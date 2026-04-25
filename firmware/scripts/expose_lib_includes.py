@@ -35,16 +35,13 @@ for pattern in candidates:
         added.append(path)
 
 # Plus MeshCore's own src — needed because lib_ignore=MeshCore drops PIO's
-# automatic include.
+# automatic include. Variant-Pfad wird aus den build_flags abgeleitet
+# (-I lib/meshcore/variants/<NAME>); kein Hardcoding mehr.
 project_dir = env.subst("$PROJECT_DIR")  # noqa: F821
-mc_paths = [
-    os.path.join(project_dir, "lib", "meshcore", "src"),
-    os.path.join(project_dir, "lib", "meshcore", "variants", "lilygo_tbeam_SX1276"),
-]
-for p in mc_paths:
-    if os.path.isdir(p):
-        env.Append(CPPPATH=[p])  # noqa: F821
-        added.append(p)
+mc_src = os.path.join(project_dir, "lib", "meshcore", "src")
+if os.path.isdir(mc_src):
+    env.Append(CPPPATH=[mc_src])  # noqa: F821
+    added.append(mc_src)
 
 print(f"[expose_lib_includes] added {len(added)} include paths")
 for p in added:
