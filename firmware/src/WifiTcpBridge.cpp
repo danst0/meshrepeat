@@ -35,6 +35,18 @@ void wsEventTrampoline(WStype_t type, uint8_t* payload, size_t length) {
 WifiTcpBridge::WifiTcpBridge(NodePrefs* prefs, mesh::PacketManager* mgr, mesh::RTCClock* rtc)
     : BridgeBase(prefs, mgr, rtc) {}
 
+const char* WifiTcpBridge::stateName(State s) {
+  switch (s) {
+    case IDLE:      return "OFF";
+    case CONNECT_W: return "WIFI";
+    case CONNECTED: return "READY";
+    case BACKOFF:   return "BACK";
+  }
+  return "?";
+}
+
+WifiTcpBridge* getActive() { return g_bridge_singleton; }
+
 bool WifiTcpBridge::loadConfig() {
   Preferences p;
   if (!p.begin(NVS_NAMESPACE, true)) return false;

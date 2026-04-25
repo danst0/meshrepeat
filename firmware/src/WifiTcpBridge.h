@@ -58,6 +58,7 @@ public:
   State state() const { return _state; }
   uint32_t reconnectCount() const { return _reconnects; }
   const char* lastError() const { return _last_error; }
+  static const char* stateName(State s);
 
   // Internal — called by the WebSocketsClient onEvent trampoline.
   void _dispatchWsEvent(uint8_t type, uint8_t* payload, size_t length);
@@ -83,5 +84,8 @@ private:
   bool _hello_sent = false;
   char _last_error[64] = {0};
 };
+
+// Returns the most recently begun()'ed WifiTcpBridge instance, or nullptr.
+WifiTcpBridge* getActive();
 
 }  // namespace mcbridge
