@@ -72,8 +72,13 @@ async def bridge_socket(ws: WebSocket) -> None:
     # Hello aus erster Message lesen
     try:
         hello_raw = await asyncio.wait_for(ws.receive_bytes(), timeout=10.0)
-    except (TimeoutError, WebSocketDisconnect):
-        await ws.close(code=WS_CLOSE_BAD_REQUEST, reason="no hello")
+    except WebSocketDisconnect:
+        return  # client gone, no close needed
+    except TimeoutError:
+        try:
+            await ws.close(code=WS_CLOSE_BAD_REQUEST, reason="no hello")
+        except RuntimeError:
+            pass
         return
 
     if len(hello_raw) > max_bytes:
