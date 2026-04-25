@@ -1,0 +1,45 @@
+# Beispiel: Handshake + erstes Paket
+# CBOR-Diagnostic-Notation (RFC 8949 §8) — kein on-wire-Format,
+# sondern menschenlesbarer CBOR-Dump zur Doku.
+
+# 1) Repeater → Server
+{
+    "t":     "hello",
+    "site":  h'7b2f9e0c4a514d0a91c8b5d1e7c63f02',
+    "tok":   "MFRGGZDFMZTWQ2LKNNSXS43FOIQAA",
+    "fw":    "v0.3.1",
+    "proto": 1,
+    "scope": "public",
+    "caps":  ["rssi", "snr"]
+}
+
+# 2) Server → Repeater
+{
+    "t":         "helloack",
+    "proto":     1,
+    "policy_ep": 47,
+    "srv_time":  1761379200,
+    "max_bytes": 8192,
+    "hb_iv":     15
+}
+
+# 3) Server → Repeater (Heartbeat alle 15 s)
+{ "t": "hb", "seq": 1, "ts": 1761379215 }
+
+# 4) Repeater → Server (Heartbeat-Ack)
+{ "t": "hback", "seq": 1 }
+
+# 5) Repeater → Server (empfangenes On-Air-MeshCore-Paket)
+{
+    "t":    "pkt",
+    "raw":  h'01_FE...',  ; komplettes MeshCore-Packet inkl. Header
+    "rssi": -97,
+    "snr":  6,
+    "rxts": 132544
+}
+
+# 6) Server → Repeater (Backpressure-Hinweis)
+{ "t": "flow", "pause_ms": 200 }
+
+# 7) Geordneter Disconnect (Server initiiert)
+{ "t": "bye", "reason": "shutdown" }

@@ -1,0 +1,33 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "meshcore-companion"
+version = "0.0.1"
+description = "Software-Companion: virtueller MeshCore-Node in Python"
+requires-python = ">=3.12"
+authors = [{ name = "Daniel Dumke", email = "claude.ai.daniel@dumke.me" }]
+dependencies = [
+    "pynacl>=1.5",
+    "cryptography>=43",
+    "cbor2>=5.6",
+    "pydantic>=2.8",
+    "structlog>=24",
+    "typer>=0.12",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
+    "pytest-cov>=5",
+    "ruff>=0.6",
+    "mypy>=1.11",
+]
+
+[project.scripts]
+meshcore-companion = "meshcore_companion.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/meshcore_companion"]

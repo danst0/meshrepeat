@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+dist/
+build/
+
+# PlatformIO
+firmware/.pio/
+firmware/.pioenvs/
+firmware/.piolibdeps/
+firmware/.vscode/
+
+# Local config & secrets
+.env
+.env.local
+*.pem
+*.key
+secrets/
+
+# Runtime data
+data/
+*.sqlite
+*.sqlite-journal
+*.db
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editors
+.vscode/
+.idea/
+*.swp
+.venv/

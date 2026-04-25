@@ -1,0 +1,44 @@
+# Top-level Workspace-Konfiguration. Tooling-Defaults für ruff,
+# mypy, pytest werden hier gehalten und von den Sub-Packages
+# (server/bridge, server/companion) geerbt.
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["server/bridge/src", "server/companion/src", "tools"]
+
+[tool.ruff.lint]
+select = [
+    "E", "F", "W",       # pycodestyle, pyflakes
+    "I",                 # isort
+    "UP",                # pyupgrade
+    "B",                 # bugbear
+    "ASYNC",             # async-correctness
+    "S",                 # bandit
+    "RET", "SIM",        # return + simplify
+    "TID", "PL",         # tidy imports, pylint
+    "RUF",               # ruff-spezifisch
+]
+ignore = [
+    "S101",              # assert in Tests OK
+    "PLR0913",           # zu viele Argumente — pragmatisch
+]
+
+[tool.ruff.lint.per-file-ignores]
+"**/tests/**" = ["S", "PLR2004"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+warn_unreachable = true
+disallow_any_unimported = true
+plugins = ["pydantic.mypy"]
+mypy_path = ["server/bridge/src", "server/companion/src"]
+
+[tool.pytest.ini_options]
+addopts = "-ra --strict-markers --strict-config"
+asyncio_mode = "auto"
+testpaths = ["server/bridge/tests", "server/companion/tests"]
+filterwarnings = ["error"]

@@ -1,0 +1,48 @@
+# MeshCore-Spiegel App-Config (gemeinsam für Bridge, Web, Companion)
+# Pfad im Container: /config/app.yaml (read-only Mount)
+
+server:
+  host: "0.0.0.0"
+  port: 8000
+
+bridge:
+  ws_path: "/api/v1/bridge"
+  max_frame_bytes: 8192
+  heartbeat_interval_s: 15
+  heartbeat_timeout_s: 45            # 3 * heartbeat_interval_s
+  reconnect_grace_s: 30
+  dedup:
+    ttl_s: 300
+    lru_capacity: 100000
+  policy:
+    default: "allow"                 # allow | deny
+    rate_limit_pkts_per_s: 50        # pro Site
+    rate_limit_burst: 200
+
+web:
+  base_url: "https://meshcore.dumke.me"
+  session_cookie_name: "meshcore_sid"
+  session_idle_timeout_days: 7
+  signup:
+    enabled: true
+    require_email_verification: true
+  argon2:
+    time_cost: 3
+    memory_cost_kib: 65536
+    parallelism: 4
+
+companion:
+  enabled: true
+  advert_interval_s: 3600            # wie oft eine Identity ihren Advert flutet
+
+storage:
+  sqlite_path: "/data/meshcore.sqlite"
+  # MESHCORE_DB_KEY_FILE wird via Env-Var aus Docker-Secret geladen
+
+logging:
+  level: "INFO"
+  format: "json"
+
+metrics:
+  enabled: false                     # Phase 5
+  bind: "127.0.0.1:9090"
