@@ -51,6 +51,38 @@ jobs:
           PYTHONPATH: server/bridge/src:server/companion/src
         run: pytest -v
 
+  firmware:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install PlatformIO
+        run: |
+          python -m pip install --upgrade pip
+          pip install "platformio==6.1.16"
+
+      - name: Cache PlatformIO data
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio/.cache
+            ~/.platformio/packages
+            ~/.platformio/platforms
+          key: pio-${{ runner.os }}-${{ hashFiles('firmware/platformio.ini') }}
+          restore-keys: |
+            pio-${{ runner.os }}-
+
+      - name: Build firmware (tbeam_sx1276_wifitcp)
+        working-directory: firmware
+        run: pio run -e tbeam_sx1276_wifitcp
+
   build-image:
     needs: test
     runs-on: ubuntu-latest

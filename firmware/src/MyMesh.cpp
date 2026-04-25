@@ -1213,6 +1213,16 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
     command += 3;
   }
 
+#ifdef WITH_WIFITCP_BRIDGE
+  // Intercept bridge.* commands BEFORE _cli sees them, so we can apply
+  // the default-password lock and route into our WifiTcpBridge config.
+  if (memcmp(command, "bridge ", 7) == 0
+      || memcmp(command, "set bridge.", 11) == 0) {
+    handleBridgeCommand(command, reply);
+    return;
+  }
+#endif
+
   // handle ACL related commands
   if (memcmp(command, "setperm ", 8) == 0) {   // format:  setperm {pubkey-hex} {permissions-int8}
     char* hex = &command[8];
@@ -1313,3 +1323,125 @@ bool MyMesh::hasPendingWork() const {
 #endif
   return _mgr->getOutboundTotal() > 0;
 }
+
+#ifdef WITH_WIFITCP_BRIDGE
+
+namespace {
+// Parse a UUID string "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" into 16 bytes.
+// Returns true on success. Hyphens optional but exact 32 hex digits required.
+static bool parseSiteUuid(const char* s, uint8_t out[16]) {
+  uint8_t bytes[16];
+  int bi = 0;
+  uint8_t curr = 0;
+  bool hi = true;
+  while (*s && bi < 16) {
+    char c = *s++;
+    if (c == '-' || c == ' ') continue;
+    int v;
+    if (c >= '0' && c <= '9') v = c - '0';
+    else if (c >= 'a' && c <= 'f') v = c - 'a' + 10;
+    else if (c >= 'A' && c <= 'F') v = c - 'A' + 10;
+    else return false;
+    if (hi) { curr = (uint8_t)(v << 4); hi = false; }
+    else    { curr |= (uint8_t)v; bytes[bi++] = curr; hi = true; }
+  }
+  if (bi != 16 || !hi) return false;
+  memcpy(out, bytes, 16);
+  return true;
+}
+}  // namespace
+
+void MyMesh::handleBridgeCommand(const char* command, char* reply) {
+  // Default-Passwort-Lock: Schutz davor, dass jemand zwischen Erst-Boot und
+  // Owner-Login fremde Bridge-Credentials reinschreibt. Wir blocken alle
+  // schreibenden Befehle, solange das Default-Passwort aktiv ist.
+  bool wants_change = (memcmp(command, "set bridge.", 11) == 0)
+                   || (memcmp(command, "bridge enable", 13) == 0);
+  if (wants_change && strcmp(_prefs.password, "password") == 0) {
+    strcpy(reply, "ERROR: change default password first");
+    return;
+  }
+
+  auto& cfg = bridge.config();
+
+  if (strcmp(command, "bridge enable") == 0) {
+    cfg.enabled = true;
+    bridge.saveConfig();
+    bridge.end();
+    bridge.begin();
+    strcpy(reply, "OK - bridge enabled");
+    return;
+  }
+  if (strcmp(command, "bridge disable") == 0) {
+    cfg.enabled = false;
+    bridge.saveConfig();
+    bridge.end();
+    strcpy(reply, "OK - bridge disabled");
+    return;
+  }
+  if (strcmp(command, "bridge status") == 0) {
+    sprintf(reply, "state=%u rec=%u err=%s",
+            (unsigned)bridge.state(),
+            (unsigned)bridge.reconnectCount(),
+            bridge.lastError()[0] ? bridge.lastError() : "-");
+    return;
+  }
+
+  // set bridge.<key> <value>
+  if (memcmp(command, "set bridge.host ", 16) == 0) {
+    StrHelper::strncpy(cfg.host, command + 16, sizeof(cfg.host));
+    bridge.saveConfig();
+    strcpy(reply, "OK");
+    return;
+  }
+  if (memcmp(command, "set bridge.port ", 16) == 0) {
+    int p = atoi(command + 16);
+    if (p < 1 || p > 65535) { strcpy(reply, "ERROR: bad port"); return; }
+    cfg.port = (uint16_t)p;
+    bridge.saveConfig();
+    strcpy(reply, "OK");
+    return;
+  }
+  if (memcmp(command, "set bridge.path ", 16) == 0) {
+    StrHelper::strncpy(cfg.path, command + 16, sizeof(cfg.path));
+    bridge.saveConfig();
+    strcpy(reply, "OK");
+    return;
+  }
+  if (memcmp(command, "set bridge.token ", 17) == 0) {
+    StrHelper::strncpy(cfg.token, command + 17, sizeof(cfg.token));
+    bridge.saveConfig();
+    strcpy(reply, "OK - token stored");
+    return;
+  }
+  if (memcmp(command, "set bridge.scope ", 17) == 0) {
+    StrHelper::strncpy(cfg.scope, command + 17, sizeof(cfg.scope));
+    bridge.saveConfig();
+    strcpy(reply, "OK");
+    return;
+  }
+  if (memcmp(command, "set bridge.site ", 16) == 0) {
+    if (!parseSiteUuid(command + 16, cfg.site_id)) {
+      strcpy(reply, "ERROR: bad site UUID");
+      return;
+    }
+    bridge.saveConfig();
+    strcpy(reply, "OK");
+    return;
+  }
+  if (memcmp(command, "set bridge.wifi.ssid ", 21) == 0) {
+    StrHelper::strncpy(cfg.wifi_ssid, command + 21, sizeof(cfg.wifi_ssid));
+    bridge.saveConfig();
+    strcpy(reply, "OK");
+    return;
+  }
+  if (memcmp(command, "set bridge.wifi.psk ", 20) == 0) {
+    StrHelper::strncpy(cfg.wifi_psk, command + 20, sizeof(cfg.wifi_psk));
+    bridge.saveConfig();
+    strcpy(reply, "OK");
+    return;
+  }
+
+  strcpy(reply, "Unknown bridge command");
+}
+#endif  // WITH_WIFITCP_BRIDGE
