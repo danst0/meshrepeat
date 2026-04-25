@@ -1,9 +1,9 @@
 """CompanionNode — virtueller MeshCore-Teilnehmer in Python.
 
-Eine Instanz pro Companion-Identität. Erzeugt Adverts, sendet/empfängt
-DMs (PAYLOAD_TYPE_TXT_MSG mit AES+HMAC). Channel-Pakete (GRP_TXT) sind
-in Phase 4b als TODO markiert (channel-secret-Discovery via App-API ist
-noch unklar).
+Eine Instanz pro Companion-Identität. Erzeugt Adverts, sendet DMs
+(PAYLOAD_TYPE_TXT_MSG mit AES+HMAC) und Channel-Posts
+(PAYLOAD_TYPE_GRP_TXT, geteiltes Channel-Secret). Inbound-GRP_TXT-
+Decode ist bewusst noch nicht implementiert (Phase 5).
 
 DM-Wire-Format (siehe firmware Mesh.cpp:466 + Utils::encryptThenMAC):
     [dest_hash:1] [src_hash:1] [mac:2] [encrypted: timestamp(4) || text]
@@ -13,6 +13,14 @@ Der Sender setzt:
     src_hash  = self.pubkey[:1]
 und encrypted-Block = encrypt_then_mac(shared_secret, timestamp || text)
 mit shared_secret = ECDH(self, peer).
+
+GRP_TXT-Wire-Format (firmware Mesh.cpp:526 ``createGroupDatagram`` +
+BaseChatMesh.cpp:464-481 ``sendGroupTextMessage``):
+    [channel_hash:1] [mac:2] [encrypted: timestamp(4) || txt_type(1)
+                              || "<sender_name>: " || text]
+mit channel_hash = sha256(channel_secret)[:1] und encrypt_then_mac via
+channel_secret. ``txt_type`` ist 0 (TXT_TYPE_PLAIN); die oberen 6 Bit
+müssen 0 sein.
 """
 
 from __future__ import annotations
@@ -136,6 +144,42 @@ class CompanionNode:
                 sender_pubkey=peer.pub_key, timestamp=ts, text=text
             )
         return None
+
+    # ---------- CHANNEL (GRP_TXT) ----------
+
+    def make_channel_message(
+        self,
+        *,
+        channel_secret: bytes,
+        channel_hash: bytes,
+        text: str,
+        sender_name: str | None = None,
+        timestamp: int | None = None,
+        flood: bool = True,
+    ) -> Packet:
+        """Erzeugt einen verschlüsselten GRP_TXT-Channel-Post.
+
+        ``channel_secret`` ist das 32-Byte-Symmetric-Secret des Channels,
+        ``channel_hash`` das 1-Byte-Routing-Prefix (üblicherweise
+        ``sha256(secret)[:1]``).
+        """
+        if len(channel_hash) < PATH_HASH_SIZE:
+            raise ValueError("channel_hash must be at least 1 byte")
+        ts = timestamp if timestamp is not None else int(time.time())
+        prefix_name = sender_name if sender_name is not None else ""
+        body = (
+            int.to_bytes(ts, 4, "little", signed=False)
+            + bytes([0])  # TXT_TYPE_PLAIN; high 6 bits must stay 0
+            + f"{prefix_name}: ".encode()
+            + text.encode("utf-8")
+        )
+        encrypted = encrypt_then_mac(channel_secret, body)
+        payload = channel_hash[:PATH_HASH_SIZE] + encrypted
+        return Packet(
+            route_type=RouteType.FLOOD if flood else RouteType.DIRECT,
+            payload_type=PayloadType.GRP_TXT,
+            payload=payload,
+        )
 
     # ---------- ADVERT receive ----------
 

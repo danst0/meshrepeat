@@ -17,20 +17,30 @@ Verantwortlichkeiten:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 from uuid import UUID
 
 import structlog
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from meshcore_companion.crypto import Identity, LocalIdentity
+from meshcore_companion.crypto import (
+    PATH_HASH_SIZE,
+    Identity,
+    LocalIdentity,
+    derive_channel_secret,
+)
 from meshcore_companion.node import CompanionNode, IncomingTextMessage
 from meshcore_companion.packet import Packet, PayloadType
 from meshcore_companion.storage import decrypt_seed, encrypt_seed
+
+if TYPE_CHECKING:
+    from meshcore_bridge.db import CompanionChannel
 
 _log = structlog.get_logger("companion")
 
@@ -169,6 +179,88 @@ class CompanionService:
             return False
         pkt = loaded.node.make_dm(peer_pubkey=peer_pubkey, text=text)
         await self._persist_outgoing(loaded, peer_pubkey=peer_pubkey, text=text, raw=pkt.encode())
+        if self.inject is not None:
+            await self.inject(pkt, loaded.scope)
+        return True
+
+    async def add_channel(
+        self,
+        *,
+        identity_id: UUID,
+        name: str,
+        password: str,
+    ) -> CompanionChannel | None:
+        """Legt einen Channel für die Identity an. Secret wird aus
+        ``derive_channel_secret(name, password)`` abgeleitet — gleiches
+        Schema wie einige MeshCore-Apps; ohne offizielle KDF-Spec.
+        """
+        from meshcore_bridge.db import CompanionChannel, CompanionIdentity
+
+        if self._by_id.get(identity_id) is None:
+            # Identity muss in-service geladen sein, damit Send funktioniert.
+            return None
+
+        secret = derive_channel_secret(name, password)
+        chash = hashlib.sha256(secret).digest()[:PATH_HASH_SIZE]
+        async with self.sessionmaker() as db:
+            ident = await db.get(CompanionIdentity, identity_id)
+            if ident is None:
+                return None
+            row = CompanionChannel(
+                identity_id=identity_id,
+                name=name,
+                secret=secret,
+                channel_hash=chash,
+            )
+            db.add(row)
+            await db.commit()
+            await db.refresh(row)
+            return row
+
+    async def send_channel(
+        self,
+        *,
+        identity_id: UUID,
+        channel_id: UUID,
+        text: str,
+    ) -> bool:
+        from meshcore_bridge.db import CompanionChannel, CompanionMessage
+
+        loaded = self._by_id.get(identity_id)
+        if loaded is None:
+            return False
+
+        async with self.sessionmaker() as db:
+            channel = await db.get(CompanionChannel, channel_id)
+            if channel is None or channel.identity_id != identity_id:
+                return False
+            chan_name = channel.name
+            chan_secret = channel.secret
+            chan_hash = channel.channel_hash
+
+        pkt = loaded.node.make_channel_message(
+            channel_secret=chan_secret,
+            channel_hash=chan_hash,
+            text=text,
+            sender_name=loaded.name,
+        )
+        raw = pkt.encode()
+
+        async with self.sessionmaker() as db:
+            db.add(
+                CompanionMessage(
+                    identity_id=loaded.id,
+                    direction="out",
+                    payload_type=int(PayloadType.GRP_TXT),
+                    peer_pubkey=None,
+                    peer_name=None,
+                    channel_name=chan_name,
+                    text=text,
+                    raw=raw,
+                )
+            )
+            await db.commit()
+
         if self.inject is not None:
             await self.inject(pkt, loaded.scope)
         return True

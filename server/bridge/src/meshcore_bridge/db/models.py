@@ -205,3 +205,28 @@ class CompanionContact(Base):
         UniqueConstraint("identity_id", "peer_pubkey", name="uq_companion_contact_pair"),
         Index("ix_companion_contacts_identity", "identity_id"),
     )
+
+
+class CompanionChannel(Base):
+    """MeshCore-Gruppenkanäle pro Identity. Secret aus name+password
+    abgeleitet (``derive_channel_secret``); wird zum Verschlüsseln von
+    GRP_TXT-Posts genutzt. ``channel_hash`` = sha256(secret)[:1] und
+    dient als Routing-Hash auf der Wire."""
+
+    __tablename__ = "companion_channels"
+
+    id: Mapped[UUID] = mapped_column(_UUIDBlob, primary_key=True, default=uuid4)
+    identity_id: Mapped[UUID] = mapped_column(
+        _UUIDBlob, ForeignKey("companion_identities.id"), nullable=False
+    )
+    name: Mapped[str] = mapped_column(String(64), nullable=False)
+    secret: Mapped[bytes] = mapped_column(BLOB, nullable=False)  # 32 bytes
+    channel_hash: Mapped[bytes] = mapped_column(BLOB, nullable=False)  # 1 byte
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        UniqueConstraint("identity_id", "name", name="uq_companion_channel_name"),
+        Index("ix_companion_channels_identity", "identity_id"),
+    )
