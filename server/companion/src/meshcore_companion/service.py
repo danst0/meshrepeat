@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from uuid import UUID
 
+import structlog
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -30,6 +31,8 @@ from meshcore_companion.crypto import Identity, LocalIdentity
 from meshcore_companion.node import CompanionNode, IncomingTextMessage
 from meshcore_companion.packet import Packet, PayloadType
 from meshcore_companion.storage import decrypt_seed, encrypt_seed
+
+_log = structlog.get_logger("companion")
 
 PacketInjector = Callable[[Packet, str], Awaitable[None]]
 """Callable(packet, scope) — fügt ein Paket in den Mesh-Scope ein."""
@@ -173,14 +176,11 @@ class CompanionService:
     async def on_repeater_connected(self, *, scope: str) -> None:
         """Bridge ruft uns wenn ein Repeater connectet — wir nutzen das um
         sofort einen Advert für jede Identity im selben Scope zu senden.
-
-        Hintergrund: der periodische ``_advert_loop`` mag zur Connection-
-        Zeit gerade in seinem 1h-Sleep sein. Ohne diesen Hook würde der
-        Repeater bis zu einer Stunde keinen Companion-Advert sehen.
         """
-        for loaded in list(self._by_id.values()):
-            if loaded.scope == scope:
-                await self._send_advert(loaded)
+        matching = [li for li in self._by_id.values() if li.scope == scope]
+        _log.info("companion_on_repeater_connected", scope=scope, identities=len(matching))
+        for loaded in matching:
+            await self._send_advert(loaded)
 
     async def on_inbound_packet(self, *, raw: bytes, scope: str) -> None:
         """Hook, vom Router pro empfangenem Paket gerufen."""
@@ -326,12 +326,21 @@ class CompanionService:
 
     async def _send_advert(self, loaded: LoadedIdentity) -> None:
         if self.inject is None:
+            _log.warning("send_advert_no_inject", identity=loaded.name)
             return
         pkt = loaded.node.make_advert(
             timestamp=int(time.time()),
             app_data=loaded.name.encode("utf-8")[:32],
         )
+        raw = pkt.encode()
+        _log.info(
+            "send_advert",
+            identity=loaded.name,
+            scope=loaded.scope,
+            pubkey_prefix=loaded.pubkey[:4].hex(),
+            raw_bytes=len(raw),
+        )
         try:
             await self.inject(pkt, loaded.scope)
         except Exception:
-            pass
+            _log.exception("send_advert_inject_failed", identity=loaded.name)

@@ -83,6 +83,27 @@ async def create_identity(
     }
 
 
+@router.post("/identities/{identity_id}/advert", response_model=None)
+async def broadcast_advert(
+    request: Request,
+    identity_id: UUID,
+    user: User = Depends(current_user_required),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Sofort einen Advert für diese Identity in den Scope pushen."""
+    row = await db.get(CompanionIdentity, identity_id)
+    if row is None or row.user_id != user.id:
+        raise HTTPException(status_code=404)
+    svc = _service(request)
+    if svc is None:
+        raise HTTPException(status_code=503, detail="companion-service not running")
+    loaded = svc.get(identity_id)
+    if loaded is None:
+        raise HTTPException(status_code=409, detail="identity not loaded in service")
+    await svc._send_advert(loaded)
+    return {"ok": True, "scope": loaded.scope}
+
+
 @router.post("/identities/{identity_id}/archive", response_model=None)
 async def archive_identity(
     request: Request,

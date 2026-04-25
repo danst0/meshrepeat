@@ -82,11 +82,20 @@ def build_app(cfg: AppConfig) -> FastAPI:
         if cfg.companion.enabled and cfg.db_key:
             async def _inject(packet: MCPacket, scope: str) -> None:
                 wire = WirePacket(raw=packet.encode())
-                for conn in list(registry.in_scope(scope)):
+                conns = list(registry.in_scope(scope))
+                log.info(
+                    "companion_inject",
+                    scope=scope,
+                    targets=len(conns),
+                    bytes=len(wire.raw),
+                )
+                for conn in conns:
                     try:
                         await conn.send(wire)
                     except Exception:
-                        pass
+                        log.exception(
+                            "companion_inject_send_failed", site=str(conn.site_id)
+                        )
 
             companion_service = CompanionService(
                 master_key=cfg.db_key,
