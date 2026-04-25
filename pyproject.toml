@@ -59,7 +59,7 @@ plugins = ["pydantic.mypy"]
 mypy_path = ["server/bridge/src", "server/companion/src"]
 
 [tool.pytest.ini_options]
-addopts = "-ra --strict-markers --strict-config"
+addopts = "-ra --strict-markers --strict-config --import-mode=importlib"
 asyncio_mode = "auto"
 testpaths = ["server/bridge/tests", "server/companion/tests"]
 filterwarnings = [
