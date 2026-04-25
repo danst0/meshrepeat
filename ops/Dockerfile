@@ -35,8 +35,8 @@ RUN pip install \
 
 COPY server/bridge /app/server/bridge
 COPY server/companion /app/server/companion
-COPY tools /app/tools
 COPY ops/config-examples/app.yaml /config/app.yaml
+# tools/ (CLI-Helfer wie meshcore-spiegel-ctl) folgt in Phase 3
 
 ENV PYTHONPATH=/app/server/bridge/src:/app/server/companion/src \
     MESHCORE_CONFIG=/config/app.yaml \
