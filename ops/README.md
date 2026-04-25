@@ -27,9 +27,11 @@ cd /home/danst/dockers/meshcore
 curl -fsSL https://raw.githubusercontent.com/danst0/meshrepeat/main/ops/docker-compose.example.yaml \
   -o docker-compose.yaml
 
-# Optional: eigene App-Config (sonst wird die im Image gebackene genutzt)
-curl -fsSL https://raw.githubusercontent.com/danst0/meshrepeat/main/ops/config-examples/app.yaml \
-  -o app.yaml
+# PFLICHT: app.yaml lokal anlegen, sonst macht Docker beim ersten Start
+# ein Phantom-Verzeichnis (Compose-Mount auf nicht-existente Datei).
+# Wir generieren sie aus der im Image gebackenen Default-Config:
+docker run --rm --entrypoint sh ghcr.io/danst0/meshrepeat:latest \
+  -c "cat /config/app.yaml" > app.yaml
 
 # Master-Key für DB-At-Rest-Encryption (XChaCha20-Poly1305 für Privkeys)
 openssl rand -hex 32 > secrets/db_key
