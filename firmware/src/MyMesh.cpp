@@ -1214,11 +1214,12 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
   }
 
 #ifdef WITH_WIFITCP_BRIDGE
-  // Intercept bridge.* commands BEFORE _cli sees them, so we can apply
-  // the default-password lock and route into our WifiTcpBridge config.
+  // Intercept bridge.* commands BEFORE _cli sees them. PW-Lock greift nur
+  // bei nicht-lokalen Quellen (LoRa-Admin-DMs haben sender_timestamp != 0;
+  // USB-Serial setzt 0 und verlangt physisches Kabel — implizite Auth).
   if (memcmp(command, "bridge ", 7) == 0
       || memcmp(command, "set bridge.", 11) == 0) {
-    handleBridgeCommand(command, reply);
+    handleBridgeCommand(sender_timestamp, command, reply);
     return;
   }
 #endif
@@ -1351,13 +1352,15 @@ static bool parseSiteUuid(const char* s, uint8_t out[16]) {
 }
 }  // namespace
 
-void MyMesh::handleBridgeCommand(const char* command, char* reply) {
-  // Default-Passwort-Lock: Schutz davor, dass jemand zwischen Erst-Boot und
-  // Owner-Login fremde Bridge-Credentials reinschreibt. Wir blocken alle
-  // schreibenden Befehle, solange das Default-Passwort aktiv ist.
+void MyMesh::handleBridgeCommand(uint32_t sender_timestamp, const char* command, char* reply) {
+  // Default-Passwort-Lock: Schutz gegen Funk-Übernahme zwischen Erst-Boot
+  // und Owner-Login. Greift nur bei LoRa-Admin-DMs (sender_timestamp != 0).
+  // USB-Serial (sender_timestamp == 0) setzt physische Anwesenheit voraus
+  // und ist daher als Setup-Pfad freigegeben.
   bool wants_change = (memcmp(command, "set bridge.", 11) == 0)
                    || (memcmp(command, "bridge enable", 13) == 0);
-  if (wants_change && strcmp(_prefs.password, "password") == 0) {
+  bool is_remote = (sender_timestamp != 0);
+  if (wants_change && is_remote && strcmp(_prefs.password, "password") == 0) {
     strcpy(reply, "ERROR: change default password first");
     return;
   }
