@@ -1,0 +1,86 @@
+{% extends "base.html.j2" %}
+{% block title %}Traffic — MeshCore Spiegel{% endblock %}
+{% block content %}
+  <h1>Bridge-Traffic-Log</h1>
+  <p>Letzte Pakete, die der Server gesehen hat. Inhalte sind on-air verschlüsselt;
+     wir zeigen Header-Metadaten und (bei ADVERTs) den Klartext-Pubkey.</p>
+
+  <div class="card">
+    <label style="display:flex;align-items:center;gap:.7rem">
+      <input type="checkbox" id="autoref" checked>
+      Auto-refresh alle 2 s
+    </label>
+    <span id="status" style="color:var(--muted)"></span>
+  </div>
+
+  <table>
+    <thead>
+      <tr>
+        <th>Zeit</th>
+        <th>Quelle</th>
+        <th>Scope</th>
+        <th>Route</th>
+        <th>Typ</th>
+        <th>Bytes</th>
+        <th>Path</th>
+        <th>Empfänger</th>
+        <th>Drop</th>
+      </tr>
+    </thead>
+    <tbody id="events"></tbody>
+  </table>
+
+<script>
+const tbody = document.getElementById('events');
+const stat = document.getElementById('status');
+const autoref = document.getElementById('autoref');
+
+function fmtTime(iso) {
+  const d = new Date(iso);
+  return d.toLocaleTimeString() + '.' + String(d.getMilliseconds()).padStart(3, '0');
+}
+
+function row(e) {
+  const tr = document.createElement('tr');
+  const cells = [
+    fmtTime(e.ts),
+    (e.site_name || e.site_id.slice(0,8)) + (e.advert_pubkey ? ' (advert ' + e.advert_pubkey.slice(0,12) + '…)' : ''),
+    e.scope,
+    e.route_type,
+    e.payload_type,
+    e.raw_size,
+    e.path_hashes.join(' › ') || '—',
+    e.forwarded_to.length === 0 ? '—'
+      : e.forwarded_to.map(f => f.name || f.site_id.slice(0,8)).join(', '),
+    e.dropped_reason || '',
+  ];
+  for (const c of cells) {
+    const td = document.createElement('td');
+    td.textContent = c;
+    tr.appendChild(td);
+  }
+  if (e.dropped_reason) tr.style.opacity = 0.55;
+  return tr;
+}
+
+async function refresh() {
+  try {
+    const r = await fetch('/api/v1/admin/traffic?limit=200', {credentials: 'same-origin'});
+    if (!r.ok) { stat.textContent = 'fetch ' + r.status; return; }
+    const j = await r.json();
+    tbody.replaceChildren(...j.events.slice().reverse().map(row));
+    stat.textContent = j.events.length + ' Events / Buffer ' + j.buffered;
+  } catch (e) {
+    stat.textContent = 'fetch-fail: ' + e;
+  }
+}
+
+let timer = null;
+function arm() {
+  if (timer) clearInterval(timer);
+  if (autoref.checked) timer = setInterval(refresh, 2000);
+}
+autoref.addEventListener('change', arm);
+refresh().then(arm);
+</script>
+{% endblock %}

@@ -1,0 +1,179 @@
+#!/usr/bin/env python3
+"""spiegel-ctl — CLI gegen die Admin-API des MeshCore-Spiegels.
+
+Login per E-Mail+Passwort eines admin-Users; Cookie wird in einer
+ephemeren Session gehalten.
+
+Subcommands:
+  status              Server-Status (Verbindungen, Policy, Dedup, Traffic)
+  policy reload       SIGHUP-äquivalent: Config + Policy reladen
+  dedup clear         Kompletten Dedup-Cache leeren
+  traffic [-n N]      Letzte N Traffic-Events
+  watch               Endlos-Loop: alle 2s Status anzeigen
+
+Auth via ENV:
+  MESHCORE_CTL_URL    z.B. https://meshcore.dumke.me  (Default)
+  MESHCORE_CTL_EMAIL  Admin-E-Mail
+  MESHCORE_CTL_PASSWORD  Passwort
+"""
+
+from __future__ import annotations
+
+import argparse
+import getpass
+import json
+import os
+import sys
+import time
+from typing import Any
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
+from urllib.request import HTTPCookieProcessor, Request, build_opener
+
+DEFAULT_URL = "https://meshcore.dumke.me"
+
+
+class Client:
+    def __init__(self, base_url: str) -> None:
+        self.base = base_url.rstrip("/")
+        self._opener = build_opener(HTTPCookieProcessor())
+
+    def _request(self, path: str, *, method: str = "GET", data: dict[str, str] | None = None) -> Any:
+        body: bytes | None = None
+        headers: dict[str, str] = {}
+        if data is not None:
+            body = urlencode(data).encode("utf-8")
+            headers["Content-Type"] = "application/x-www-form-urlencoded"
+            method = "POST"
+        url = f"{self.base}{path}"
+        req = Request(url, data=body, method=method, headers=headers)
+        try:
+            with self._opener.open(req, timeout=20) as resp:
+                ct = resp.headers.get("content-type", "")
+                payload = resp.read()
+                if "application/json" in ct:
+                    return json.loads(payload)
+                return payload.decode("utf-8", errors="replace")
+        except HTTPError as e:
+            sys.stderr.write(f"HTTP {e.code} on {url}\n{e.read().decode('utf-8', errors='replace')}\n")
+            raise
+        except URLError as e:
+            sys.stderr.write(f"URL-Fehler: {e}\n")
+            raise
+
+    def login(self, email: str, password: str) -> None:
+        # POST /login with follow-no-redirect; httplib follows by default to /dashboard.
+        # We don't care about the redirect target; cookie wird gesetzt.
+        try:
+            self._request("/login", data={"email": email, "password": password})
+        except HTTPError as e:
+            if e.code in (303, 302):
+                return
+            raise
+
+
+def cmd_status(c: Client, _args: argparse.Namespace) -> int:
+    j = c._request("/api/v1/admin/status")  # noqa: SLF001
+    print(json.dumps(j, indent=2))
+    return 0
+
+
+def cmd_traffic(c: Client, args: argparse.Namespace) -> int:
+    j = c._request(f"/api/v1/admin/traffic?limit={args.n}")  # noqa: SLF001
+    for e in j["events"]:
+        ts = e["ts"]
+        path = " > ".join(e["path_hashes"]) or "-"
+        fwd = ",".join(f.get("name") or f["site_id"][:8] for f in e["forwarded_to"]) or "-"
+        drop = e["dropped_reason"] or ""
+        adv = (" advert=" + e["advert_pubkey"][:12] + "…") if e["advert_pubkey"] else ""
+        name = e["site_name"] or e["site_id"][:8]
+        print(
+            f"{ts}  {name:<14} {e['scope']:<12} {e['route_type']:<18} "
+            f"{e['payload_type']:<10} {e['raw_size']:>4}B  path={path}  "
+            f"fwd={fwd}  {drop}{adv}"
+        )
+    return 0
+
+
+def cmd_policy_reload(c: Client, _args: argparse.Namespace) -> int:
+    j = c._request("/api/v1/admin/policy/reload", method="POST", data={})
+    print(json.dumps(j, indent=2))
+    return 0
+
+
+def cmd_dedup_clear(c: Client, _args: argparse.Namespace) -> int:
+    j = c._request("/api/v1/admin/dedup/clear", method="POST", data={})
+    print(json.dumps(j, indent=2))
+    return 0
+
+
+def cmd_watch(c: Client, args: argparse.Namespace) -> int:
+    while True:
+        j = c._request("/api/v1/admin/status")  # noqa: SLF001
+        os.system("clear")  # noqa: S605, S607 - dev tool
+        conns = j["connections"]
+        pol = j["policy"]
+        print(f"server: {j['server_time']}")
+        print(f"connections: {conns['total']}")
+        for scope, sites in conns["by_scope"].items():
+            print(f"  scope={scope}")
+            for s in sites:
+                print(f"    {s['name'] or s['site_id'][:8]}  ({s['site_id']})")
+        print(
+            f"dedup entries: {j['dedup']['entries']}   "
+            f"traffic-buffer: {j['traffic']['buffered_events']}"
+        )
+        print(
+            f"policy: default={pol['default']} rate={pol['rate_limit_pkts_per_s']}/s "
+            f"burst={pol['rate_limit_burst']} sites={pol['sites_tracked']}  "
+            f"stats: allowed={pol['stats']['allowed']} "
+            f"deny_default={pol['stats']['denied_default']} "
+            f"deny_rate={pol['stats']['denied_rate_limit']}"
+        )
+        time.sleep(args.interval)
+
+
+def main() -> int:
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("--url", default=os.environ.get("MESHCORE_CTL_URL", DEFAULT_URL))
+    p.add_argument("--email", default=os.environ.get("MESHCORE_CTL_EMAIL"))
+    p.add_argument(
+        "--password",
+        default=os.environ.get("MESHCORE_CTL_PASSWORD"),
+        help="Default: prompt or MESHCORE_CTL_PASSWORD",
+    )
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    sub.add_parser("status").set_defaults(func=cmd_status)
+
+    pp = sub.add_parser("policy")
+    pp_sub = pp.add_subparsers(dest="policy_cmd", required=True)
+    pp_sub.add_parser("reload").set_defaults(func=cmd_policy_reload)
+
+    dp = sub.add_parser("dedup")
+    dp_sub = dp.add_subparsers(dest="dedup_cmd", required=True)
+    dp_sub.add_parser("clear").set_defaults(func=cmd_dedup_clear)
+
+    tp = sub.add_parser("traffic")
+    tp.add_argument("-n", type=int, default=20)
+    tp.set_defaults(func=cmd_traffic)
+
+    wp = sub.add_parser("watch")
+    wp.add_argument("--interval", type=float, default=2.0)
+    wp.set_defaults(func=cmd_watch)
+
+    args = p.parse_args()
+
+    email = args.email or input("admin email: ").strip()
+    password = args.password or getpass.getpass("password: ")
+    c = Client(args.url)
+    try:
+        c.login(email, password)
+    except HTTPError as e:
+        sys.stderr.write(f"login fehlgeschlagen: {e}\n")
+        return 2
+    return args.func(c, args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

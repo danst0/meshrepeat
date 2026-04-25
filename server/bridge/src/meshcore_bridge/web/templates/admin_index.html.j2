@@ -1,0 +1,11 @@
+{% extends "base.html.j2" %}
+{% block title %}Admin — MeshCore Spiegel{% endblock %}
+{% block content %}
+  <h1>Admin</h1>
+  <div class="card">
+    <ul>
+      <li><a href="/admin/traffic">Live-Traffic-Log</a></li>
+      <li><a href="/api/v1/admin/status">Status-JSON</a></li>
+    </ul>
+  </div>
+{% endblock %}
