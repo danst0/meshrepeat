@@ -170,6 +170,18 @@ class CompanionService:
             await self.inject(pkt, loaded.scope)
         return True
 
+    async def on_repeater_connected(self, *, scope: str) -> None:
+        """Bridge ruft uns wenn ein Repeater connectet — wir nutzen das um
+        sofort einen Advert für jede Identity im selben Scope zu senden.
+
+        Hintergrund: der periodische ``_advert_loop`` mag zur Connection-
+        Zeit gerade in seinem 1h-Sleep sein. Ohne diesen Hook würde der
+        Repeater bis zu einer Stunde keinen Companion-Advert sehen.
+        """
+        for loaded in list(self._by_id.values()):
+            if loaded.scope == scope:
+                await self._send_advert(loaded)
+
     async def on_inbound_packet(self, *, raw: bytes, scope: str) -> None:
         """Hook, vom Router pro empfangenem Paket gerufen."""
         try:

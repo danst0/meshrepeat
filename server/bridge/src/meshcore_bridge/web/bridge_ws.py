@@ -149,6 +149,15 @@ async def bridge_socket(ws: WebSocket) -> None:
     last_hback_at = time.monotonic()
     hb_task = asyncio.create_task(_heartbeat_loop(ws, sink, hb_iv))
 
+    # Companion: alle Identities im selben Scope kriegen jetzt einen
+    # frischen Advert über diese neue Verbindung.
+    companion = getattr(ws.app.state, "companion_service", None)
+    if companion is not None:
+        try:
+            await companion.on_repeater_connected(scope=repeater.scope)
+        except Exception:
+            log.exception("companion_on_connect_hook_failed")
+
     try:
         while True:
             try:
