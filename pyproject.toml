@@ -53,6 +53,8 @@ extend-immutable-calls = [
 "**/web/app.py" = ["PLR0915", "S110", "SIM105"]
 # Companion-Routes greifen via app.state — Type-Annotation für Service kommt später
 "**/web/companion_routes.py" = ["PLR2004"]
+# CLI-Tools sind lineare prozedurale Skripten
+"tools/spiegel-tbeam-setup.py" = ["PLR0912", "PLR0915"]
 
 [tool.mypy]
 python_version = "3.12"

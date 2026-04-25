@@ -152,6 +152,14 @@ def main() -> int:
     p.add_argument("--baud", type=int, default=DEFAULT_BAUD)
     p.add_argument("--no-prompt", action="store_true",
                    help="Erwartet alle Werte als ENV (MESHCORE_SETUP_*) — für Skripten")
+    p.add_argument(
+        "--no-reset",
+        action="store_true",
+        help=(
+            "Kein DTR/RTS-Reset triggern (Pflicht für ESP32-S3 native USB-CDC, "
+            "z.B. Heltec V4 — der Reset-Pulse würde sonst Download-Mode auslösen)"
+        ),
+    )
     args = p.parse_args()
 
     if args.no_prompt:
@@ -179,13 +187,18 @@ def main() -> int:
         print(f"Serial-Fehler: {e}", file=sys.stderr)
         return 1
 
-    # Reset triggern, damit wir einen klaren Boot sehen.
-    s.setDTR(False)
-    s.setRTS(True)
-    time.sleep(0.1)
-    s.setRTS(False)
-    print("Reset getriggert; warte 4s auf Boot …")
-    time.sleep(4.0)
+    if args.no_reset:
+        print("Kein Reset; verbinde direkt zur laufenden FW …")
+        time.sleep(0.5)
+    else:
+        # Reset für klassische USB-Serial-Bridges (CH9102/CP210x). Bei
+        # ESP32-S3 native USB-CDC stattdessen --no-reset verwenden.
+        s.setDTR(False)
+        s.setRTS(True)
+        time.sleep(0.1)
+        s.setRTS(False)
+        print("Reset getriggert; warte 4s auf Boot …")
+        time.sleep(4.0)
     s.reset_input_buffer()
 
     sequence: list[tuple[str, bool]] = []
