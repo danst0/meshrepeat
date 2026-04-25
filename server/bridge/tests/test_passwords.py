@@ -30,7 +30,7 @@ def test_two_hashes_of_same_password_differ() -> None:
 
 
 def test_invalid_hash_raises() -> None:
-    with pytest.raises(Exception):  # noqa: B017 - argon2 raises a subclass-y error
+    with pytest.raises(Exception):
         verify_password("nonsense", "anything")
 
 

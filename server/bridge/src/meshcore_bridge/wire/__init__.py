@@ -1,3 +1,9 @@
+from meshcore_bridge.wire.codec import (
+    MAX_FRAME_BYTES,
+    FrameDecodeError,
+    decode_frame,
+    encode_frame,
+)
 from meshcore_bridge.wire.frames import (
     PROTO_VERSION,
     Bye,
@@ -9,12 +15,6 @@ from meshcore_bridge.wire.frames import (
     Hello,
     HelloAck,
     Packet,
-)
-from meshcore_bridge.wire.codec import (
-    MAX_FRAME_BYTES,
-    FrameDecodeError,
-    decode_frame,
-    encode_frame,
 )
 
 __all__ = [

@@ -24,8 +24,25 @@ ignore = [
     "PLR0913",           # zu viele Argumente — pragmatisch
 ]
 
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI patterns rely on call-in-default for Depends/Form/Query/etc.
+extend-immutable-calls = [
+    "fastapi.Depends",
+    "fastapi.Form",
+    "fastapi.Query",
+    "fastapi.Path",
+    "fastapi.Header",
+    "fastapi.Cookie",
+    "fastapi.Body",
+]
+
 [tool.ruff.lint.per-file-ignores]
-"**/tests/**" = ["S", "PLR2004"]
+"**/tests/**" = ["S", "PLR2004", "B017", "PLC0415"]
+# Web-Layer enthält Singleton-Swaps und FastAPI-Konventionen
+"**/web/auth_routes.py" = ["PLW0603", "PLC0415"]
+"**/db/session.py" = ["PLW0603"]
+# WebSocket-Handler ist linear lang, splittet aber schlechter als er ist
+"**/web/bridge_ws.py" = ["PLR0911", "PLR0912", "PLR0915", "S110", "SIM105"]
 
 [tool.mypy]
 python_version = "3.12"

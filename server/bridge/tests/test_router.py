@@ -71,7 +71,7 @@ async def test_scope_isolation() -> None:
     dedup = DedupCache(capacity=100, ttl_s=60)
     router = Router(reg, dedup)
     pub, sink_pub = _conn(scope="public")
-    priv1, sink_priv1 = _conn(scope="pool:abc")
+    priv1, _sink_priv1 = _conn(scope="pool:abc")
     priv2, sink_priv2 = _conn(scope="pool:abc")
     other_priv, sink_other = _conn(scope="pool:xyz")
     reg.add(pub)

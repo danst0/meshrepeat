@@ -21,10 +21,13 @@ PROTO_VERSION = 1
 CapTag = Literal["rssi", "snr"]
 
 
+_UUID_BYTES = 16
+
+
 def _coerce_uuid(v: Any) -> UUID:
     if isinstance(v, UUID):
         return v
-    if isinstance(v, bytes) and len(v) == 16:
+    if isinstance(v, bytes) and len(v) == _UUID_BYTES:
         return UUID(bytes=v)
     if isinstance(v, str):
         return UUID(v)

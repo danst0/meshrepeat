@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from datetime import timedelta
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Form, Request, Response
@@ -30,6 +29,8 @@ from meshcore_bridge.web.deps import current_user_optional, get_config, get_db
 
 router = APIRouter()
 _email_sender: EmailSender = ConsoleEmailSender()
+
+MIN_PASSWORD_LEN = 12
 
 
 def _templates(request: Request) -> Jinja2Templates:
@@ -93,12 +94,16 @@ async def signup_submit(
         return _templates(request).TemplateResponse(
             request,
             "signup.html.j2",
-            {"user": None, "email": email, "flash": {"kind": "error", "message": "Signup deaktiviert."}},
+            {
+                "user": None,
+                "email": email,
+                "flash": {"kind": "error", "message": "Signup deaktiviert."},
+            },
             status_code=403,
         )
 
     email = email.strip().lower()
-    if len(password) < 12:
+    if len(password) < MIN_PASSWORD_LEN:
         return _templates(request).TemplateResponse(
             request,
             "signup.html.j2",

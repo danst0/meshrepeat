@@ -38,6 +38,8 @@ def fast_argon2():
     from meshcore_bridge.auth import passwords
 
     original = passwords._DEFAULT_HASHER
-    passwords._DEFAULT_HASHER = passwords.make_hasher(time_cost=1, memory_cost_kib=1024, parallelism=1)
+    passwords._DEFAULT_HASHER = passwords.make_hasher(
+        time_cost=1, memory_cost_kib=1024, parallelism=1
+    )
     yield
     passwords._DEFAULT_HASHER = original

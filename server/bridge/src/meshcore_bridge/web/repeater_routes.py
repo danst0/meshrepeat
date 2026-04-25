@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
 from typing import Annotated
 from uuid import UUID, uuid4
 
@@ -96,15 +95,14 @@ async def repeater_create(
             status_code=400,
         )
 
+    # Phase 1: jeder neue Pool ist ein eigener UUID-Pool. Pool-Sharing
+    # zwischen Usern kommt in Phase 3.
     if scope == "public":
         scope_value = "public"
-    elif scope == "pool:new" or scope.startswith("pool:"):
-        # Phase 1: jeder neue Pool ist ein eigener UUID-Pool. Pool-Sharing
-        # zwischen Usern kommt in Phase 3.
-        if scope == "pool:new":
-            scope_value = f"pool:{uuid4()}"
-        else:
-            scope_value = scope
+    elif scope == "pool:new":
+        scope_value = f"pool:{uuid4()}"
+    elif scope.startswith("pool:"):
+        scope_value = scope
     else:
         scope_value = "public"
 
@@ -120,7 +118,7 @@ async def repeater_create(
     await db.commit()
     await db.refresh(repeater)
 
-    response = _templates(request).TemplateResponse(
+    return _templates(request).TemplateResponse(
         request,
         "repeater_show.html.j2",
         {
@@ -131,7 +129,6 @@ async def repeater_create(
             "flash": {"kind": "ok", "message": "Repeater angelegt."},
         },
     )
-    return response
 
 
 async def _load_owned_repeater(

@@ -15,7 +15,6 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Index,
-    Integer,
     String,
     UniqueConstraint,
     func,
@@ -30,12 +29,14 @@ class _UUIDBlob(TypeDecorator[UUID]):
     impl = BLOB
     cache_ok = True
 
+    _UUID_BYTES = 16
+
     def process_bind_param(self, value: UUID | None, dialect: object) -> bytes | None:
         if value is None:
             return None
         if isinstance(value, UUID):
             return value.bytes
-        if isinstance(value, bytes) and len(value) == 16:
+        if isinstance(value, bytes) and len(value) == self._UUID_BYTES:
             return value
         raise TypeError(f"expected UUID or 16-byte bytes, got {type(value).__name__}")
 
@@ -61,7 +62,9 @@ class User(Base):
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
 
-    repeaters: Mapped[list[Repeater]] = relationship(back_populates="owner", cascade="all, delete-orphan")
+    repeaters: Mapped[list[Repeater]] = relationship(
+        back_populates="owner", cascade="all, delete-orphan"
+    )
     identities: Mapped[list[CompanionIdentity]] = relationship(
         back_populates="owner", cascade="all, delete-orphan"
     )

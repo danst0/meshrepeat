@@ -89,7 +89,7 @@ class DedupCache:
         cutoff = now - self._ttl
         # OrderedDict iteration starts from oldest; stop at first non-expired.
         while self._entries:
-            oldest_key, oldest_entry = next(iter(self._entries.items()))
+            oldest_entry = next(iter(self._entries.values()))
             if oldest_entry.created_at >= cutoff:
                 break
             self._entries.popitem(last=False)

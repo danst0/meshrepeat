@@ -53,7 +53,7 @@ class Router:
                 continue
             try:
                 await peer.send(packet)
-            except Exception as exc:  # noqa: BLE001 — wir wollen jeden Fehler isoliert behandeln
+            except Exception as exc:
                 self._log.warning(
                     "peer_send_failed",
                     site=str(peer.site_id),
