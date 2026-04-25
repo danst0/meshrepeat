@@ -1,0 +1,40 @@
+{% extends "base.html.j2" %}
+{% block title %}{{ repeater.name }} — MeshCore Spiegel{% endblock %}
+{% block content %}
+  <h1>{{ repeater.name }}</h1>
+  <div class="card">
+    <table>
+      <tr><th>ID</th><td><code>{{ repeater.id }}</code></td></tr>
+      <tr><th>Site-ID</th><td><code>{{ repeater.site_id }}</code></td></tr>
+      <tr><th>Scope</th><td class="scope-{{ 'public' if repeater.scope == 'public' else 'pool' }}">{{ repeater.scope }}</td></tr>
+      <tr><th>Angelegt</th><td>{{ repeater.created_at.strftime('%Y-%m-%d %H:%M') }}</td></tr>
+      <tr><th>Letzte Verbindung</th><td>{% if repeater.last_seen_at %}{{ repeater.last_seen_at.strftime('%Y-%m-%d %H:%M') }}{% else %}noch nie{% endif %}</td></tr>
+      <tr><th>Widerrufen</th><td>{% if repeater.revoked_at %}{{ repeater.revoked_at.strftime('%Y-%m-%d %H:%M') }}{% else %}—{% endif %}</td></tr>
+    </table>
+  </div>
+
+  {% if new_token %}
+    <div class="card flash ok">
+      <strong>Neuer Bearer-Token (wird nicht erneut angezeigt!):</strong><br>
+      <code class="token">{{ new_token }}</code>
+      <p>Auf dem Repeater per Phone-App-Admin-DM setzen:</p>
+      <pre>set bridge.host {{ host }}
+set bridge.token {{ new_token }}
+set bridge.site {{ repeater.site_id }}
+set bridge.scope {{ repeater.scope }}
+bridge enable</pre>
+    </div>
+  {% endif %}
+
+  <form method="post" action="/repeaters/{{ repeater.id }}/rotate-token" class="card">
+    <p>Token rotieren — der alte wird sofort widerrufen, der Repeater muss neu konfiguriert werden.</p>
+    <button type="submit">Neuen Token erzeugen</button>
+  </form>
+
+  <form method="post" action="/repeaters/{{ repeater.id }}/delete" class="card">
+    <p>Repeater löschen — endgültig, kein Undo.</p>
+    <button type="submit" style="background:var(--danger)">Löschen</button>
+  </form>
+
+  <p><a href="/dashboard">← zurück</a></p>
+{% endblock %}

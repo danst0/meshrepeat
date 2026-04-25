@@ -1,0 +1,16 @@
+{% extends "base.html.j2" %}
+{% block content %}
+  <h1>MeshCore Internet-Spiegel</h1>
+  <p>
+    Internet-Spiegel zwischen mehreren MeshCore-LoRa-Mesh-Inseln plus
+    Software-Companion auf dem Server.
+  </p>
+  {% if not user %}
+    <p><a href="/signup">Account anlegen</a> oder <a href="/login">Login</a>.</p>
+  {% else %}
+    <p><a href="/dashboard">Dashboard</a></p>
+  {% endif %}
+  <div class="card">
+    <strong>Bridge-Endpoint:</strong> <code>wss://{{ host }}/api/v1/bridge</code>
+  </div>
+{% endblock %}

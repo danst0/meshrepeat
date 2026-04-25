@@ -1,0 +1,18 @@
+{% extends "base.html.j2" %}
+{% block title %}Repeater anlegen — MeshCore Spiegel{% endblock %}
+{% block content %}
+  <h1>Neuen Repeater anlegen</h1>
+  <form method="post" action="/repeaters" class="card">
+    <label>Name (frei wählbar)
+      <input name="name" required maxlength="64" value="{{ name or '' }}">
+    </label>
+    <label>Scope
+      <select name="scope">
+        <option value="public" {% if scope == 'public' %}selected{% endif %}>public — öffentlicher Spiegel</option>
+        <option value="pool:new">pool:new — neuen privaten Pool anlegen</option>
+      </select>
+    </label>
+    <button type="submit">Anlegen</button>
+  </form>
+  <p><a href="/dashboard">← zurück</a></p>
+{% endblock %}

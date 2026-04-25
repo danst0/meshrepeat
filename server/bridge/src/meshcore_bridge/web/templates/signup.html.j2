@@ -1,0 +1,15 @@
+{% extends "base.html.j2" %}
+{% block title %}Registrieren — MeshCore Spiegel{% endblock %}
+{% block content %}
+  <h1>Account anlegen</h1>
+  <form method="post" action="/signup" class="card">
+    <label>E-Mail
+      <input type="email" name="email" required value="{{ email or '' }}">
+    </label>
+    <label>Passwort (min. 12 Zeichen)
+      <input type="password" name="password" minlength="12" required>
+    </label>
+    <button type="submit">Registrieren</button>
+  </form>
+  <p>Schon Account? <a href="/login">Login</a>.</p>
+{% endblock %}

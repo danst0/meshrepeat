@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}MeshCore Spiegel{% endblock %}</title>
+  <style>
+    :root {
+      --bg: #0f1419;
+      --fg: #d6deeb;
+      --muted: #5f7e97;
+      --accent: #82aaff;
+      --danger: #ff5874;
+      --ok: #addb67;
+      --border: #1d2733;
+      --card: #161e2c;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: ui-monospace, "Cascadia Code", Menlo, Consolas, monospace;
+      background: var(--bg); color: var(--fg);
+      line-height: 1.5;
+    }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    header {
+      border-bottom: 1px solid var(--border);
+      padding: 1rem 2rem;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    header .brand { font-weight: bold; }
+    header nav a { margin-left: 1rem; }
+    main { padding: 2rem; max-width: 960px; margin: 0 auto; }
+    h1, h2 { color: var(--accent); }
+    label { display: block; margin-top: 1rem; font-size: 0.9rem; color: var(--muted); }
+    input, select, textarea {
+      width: 100%;
+      padding: 0.55rem;
+      background: var(--card);
+      color: var(--fg);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      font-family: inherit;
+    }
+    button, input[type=submit] {
+      margin-top: 1rem;
+      padding: 0.6rem 1.2rem;
+      background: var(--accent);
+      color: var(--bg);
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      font-weight: bold;
+    }
+    button:hover, input[type=submit]:hover { opacity: 0.9; }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 1.2rem;
+      margin-bottom: 1rem;
+    }
+    .flash {
+      padding: 0.7rem 1rem;
+      margin-bottom: 1rem;
+      border-radius: 4px;
+      border: 1px solid var(--border);
+    }
+    .flash.error { color: var(--danger); border-color: var(--danger); }
+    .flash.ok    { color: var(--ok);     border-color: var(--ok); }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { padding: 0.6rem; border-bottom: 1px solid var(--border); text-align: left; }
+    code, pre {
+      background: #0a0e14;
+      padding: 0.2rem 0.4rem;
+      border-radius: 3px;
+      font-size: 0.9rem;
+    }
+    .token {
+      word-break: break-all;
+      display: inline-block;
+      padding: 0.5rem 0.7rem;
+      background: #0a0e14;
+      border: 1px dashed var(--accent);
+      border-radius: 4px;
+    }
+    .scope-public  { color: var(--accent); }
+    .scope-pool    { color: var(--ok); }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="brand"><a href="/">MeshCore Spiegel</a></div>
+    <nav>
+      {% if user %}
+        <span class="muted">{{ user.email }}{% if user.role == 'admin' %} (admin){% endif %}</span>
+        <a href="/dashboard">Dashboard</a>
+        <a href="/repeaters">Repeater</a>
+        <form method="post" action="/logout" style="display:inline">
+          <button type="submit" style="margin:0; padding:0.3rem 0.7rem;">Logout</button>
+        </form>
+      {% else %}
+        <a href="/login">Login</a>
+        <a href="/signup">Registrieren</a>
+      {% endif %}
+    </nav>
+  </header>
+  <main>
+    {% if flash %}
+      <div class="flash {{ flash.kind }}">{{ flash.message }}</div>
+    {% endif %}
+    {% block content %}{% endblock %}
+  </main>
+</body>
+</html>

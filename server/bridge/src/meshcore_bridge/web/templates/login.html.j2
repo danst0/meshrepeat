@@ -1,0 +1,15 @@
+{% extends "base.html.j2" %}
+{% block title %}Login — MeshCore Spiegel{% endblock %}
+{% block content %}
+  <h1>Login</h1>
+  <form method="post" action="/login" class="card">
+    <label>E-Mail
+      <input type="email" name="email" required value="{{ email or '' }}">
+    </label>
+    <label>Passwort
+      <input type="password" name="password" required>
+    </label>
+    <button type="submit">Login</button>
+  </form>
+  <p>Noch kein Account? <a href="/signup">Registrieren</a>.</p>
+{% endblock %}

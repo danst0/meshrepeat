@@ -1,0 +1,29 @@
+{% extends "base.html.j2" %}
+{% block title %}Dashboard — MeshCore Spiegel{% endblock %}
+{% block content %}
+  <h1>Dashboard</h1>
+  <div class="card">
+    <h2>Deine Repeater ({{ repeaters | length }})</h2>
+    {% if repeaters %}
+      <table>
+        <thead>
+          <tr><th>Name</th><th>Site-ID</th><th>Scope</th><th>Status</th><th></th></tr>
+        </thead>
+        <tbody>
+        {% for r in repeaters %}
+          <tr>
+            <td>{{ r.name }}</td>
+            <td><code>{{ r.site_id }}</code></td>
+            <td class="scope-{{ 'public' if r.scope == 'public' else 'pool' }}">{{ r.scope }}</td>
+            <td>{% if r.last_seen_at %}zuletzt: {{ r.last_seen_at.strftime('%Y-%m-%d %H:%M') }}{% else %}—{% endif %}</td>
+            <td><a href="/repeaters/{{ r.id }}">Details</a></td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    {% else %}
+      <p>Noch keine Repeater.</p>
+    {% endif %}
+    <p style="margin-top:1rem;"><a href="/repeaters/new">+ Neuen Repeater anlegen</a></p>
+  </div>
+{% endblock %}

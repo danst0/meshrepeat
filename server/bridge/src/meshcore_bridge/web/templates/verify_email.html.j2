@@ -1,0 +1,8 @@
+{% extends "base.html.j2" %}
+{% block content %}
+  <h1>E-Mail-Verifikation</h1>
+  <div class="card flash {{ 'ok' if success else 'error' }}">
+    {{ message }}
+  </div>
+  <p><a href="/login">Login</a></p>
+{% endblock %}

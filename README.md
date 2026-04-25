@@ -111,22 +111,36 @@ nur im Server, niemals im Repeater.
 | 4     | Software-Companion (Subset MeshCore-Protokoll, REST + CLI)    | offen  |
 | 5     | Ops: Prometheus, Backups, Ansible                             | offen  |
 
-## Quickstart (Phase 0 — Stand jetzt)
+## Quickstart
 
-Es ist noch nichts lauffähig. Phase 0 produziert nur Specs und Skelett.
+CI baut auf jedem Push nach `main` ein Image und published es nach
+`ghcr.io/danst0/meshrepeat:latest`. Auf cassius:
 
 ```bash
-# Repo-Layout inspizieren
-tree -L 2
+ssh cassius
+mkdir -p /home/danst/dockers/meshcore/secrets
+cd /home/danst/dockers/meshcore
 
-# Wire-Protokoll lesen
-$EDITOR protocol/WIRE.md
+curl -fsSL https://raw.githubusercontent.com/danst0/meshrepeat/main/ops/docker-compose.example.yaml \
+  -o docker-compose.yaml
+openssl rand -hex 32 > secrets/db_key && chmod 600 secrets/db_key
 
-# ADRs lesen
-ls docs/adr/
+docker compose pull
+docker compose up -d
 ```
 
-Phase 1 wird dann ein erstes lauffähiges Compose-Setup liefern.
+Details: [ops/README.md](ops/README.md).
+
+## Lokale Entwicklung
+
+```bash
+git clone https://github.com/danst0/meshrepeat.git
+cd meshrepeat
+python3 -m venv .venv && source .venv/bin/activate
+pip install -e "./server/bridge[dev]" -e "./server/companion[dev]"
+pytest
+python -m meshcore_bridge   # startet die App auf :8000
+```
 
 ## Out of Scope
 

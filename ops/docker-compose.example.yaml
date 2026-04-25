@@ -1,0 +1,59 @@
+# MeshCore-Spiegel Compose-Beispiel für cassius
+#
+# Pfad-Konvention auf cassius:
+#   /home/danst/dockers/meshcore/docker-compose.yaml   (Kopie dieser Datei)
+#   /home/danst/dockers/meshcore/secrets/db_key        (32B Hex; chmod 600)
+#   /home/danst/dockers/meshcore/app.yaml              (optional: eigene Config)
+#
+# Image kommt aus GHCR (gebaut von .github/workflows/ci.yml). Updates per:
+#   docker compose pull && docker compose up -d
+# Watchtower zieht automatisch dank com.centurylinklabs.watchtower.enable.
+#
+# Reverse-Proxy/TLS macht der existierende traefik2-Stack — wir hängen uns
+# über das externe Netzwerk `traefik_proxy` und Labels ein. WebSocket geht
+# transparent (kein Sonder-Label nötig).
+
+services:
+  app:
+    image: ghcr.io/danst0/meshrepeat:latest
+    container_name: meshcore-app
+    restart: unless-stopped
+    pull_policy: always
+    environment:
+      - MESHCORE_CONFIG=/config/app.yaml
+      - MESHCORE_DB_PATH=/data/meshcore.sqlite
+      - MESHCORE_DB_KEY_FILE=/run/secrets/db_key
+      - MESHCORE_LOG_LEVEL=INFO
+    volumes:
+      # Eigene Config (optional). Ohne Mount greift die im Image enthaltene
+      # Default-Config (siehe ops/config-examples/app.yaml).
+      - ./app.yaml:/config/app.yaml:ro
+      - app_data:/data
+    secrets:
+      - db_key
+    networks:
+      - traefik_proxy
+    labels:
+      - traefik.enable=true
+      - com.centurylinklabs.watchtower.enable=true
+      - traefik.docker.network=traefik_proxy
+      - traefik.http.routers.meshcore.rule=Host(`meshcore.dumke.me`)
+      - traefik.http.routers.meshcore.entrypoints=web-secure
+      - traefik.http.routers.meshcore.tls=true
+      - traefik.http.routers.meshcore.tls.certResolver=default
+      - traefik.http.services.meshcore.loadbalancer.server.port=8000
+      - flame.type=application
+      - flame.name=MeshCore Spiegel
+      - flame.url=https://meshcore.dumke.me
+      - flame.icon=lan-connect
+
+volumes:
+  app_data:
+
+secrets:
+  db_key:
+    file: ./secrets/db_key
+
+networks:
+  traefik_proxy:
+    external: true

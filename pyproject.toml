@@ -41,4 +41,10 @@ mypy_path = ["server/bridge/src", "server/companion/src"]
 addopts = "-ra --strict-markers --strict-config"
 asyncio_mode = "auto"
 testpaths = ["server/bridge/tests", "server/companion/tests"]
-filterwarnings = ["error"]
+filterwarnings = [
+    "error",
+    # aiosqlite + multiple-event-loop interactions in TestClient/AsyncClient
+    # tests emit unraisable ResourceWarnings on connection __del__ — benign.
+    "ignore::ResourceWarning",
+    "ignore::pytest.PytestUnraisableExceptionWarning",
+]

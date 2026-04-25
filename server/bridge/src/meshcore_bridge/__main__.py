@@ -1,19 +1,29 @@
-"""Entry-Point für `python -m meshcore_bridge`.
-
-Phase 0: Platzhalter. Phase 1 implementiert hier den asyncio-Loop
-mit WebSocket-Server, FastAPI-App und (per In-Process-API) dem
-Companion-Service.
-"""
+"""Entry-Point für ``python -m meshcore_bridge``."""
 
 from __future__ import annotations
 
 import sys
 
+import uvicorn
+
+from meshcore_bridge.config import AppConfig
+from meshcore_bridge.log import configure as configure_logging
+from meshcore_bridge.web import build_app
+
 
 def main() -> int:
-    print("meshcore_bridge: Phase 0 skeleton — not yet implemented", file=sys.stderr)
+    cfg = AppConfig.load()
+    configure_logging(level=cfg.logging.level, fmt=cfg.logging.format)
+    app = build_app(cfg)
+    uvicorn.run(
+        app,
+        host=cfg.server.host,
+        port=cfg.server.port,
+        log_config=None,
+        access_log=False,
+    )
     return 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    sys.exit(main())

@@ -1,6 +1,3 @@
-# Phase-0-Skelett. Wird in Phase 1 vervollständigt, sobald ein
-# Python-Entry-Module existiert.
-
 FROM python:3.12-slim AS base
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -14,12 +11,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# Source-Layout: wir kopieren beide Sub-Packages getrennt rein,
-# damit Layer-Caching auf pyproject.toml-Ebene greift.
-COPY server/bridge/pyproject.toml /app/server/bridge/pyproject.toml
-COPY server/companion/pyproject.toml /app/server/companion/pyproject.toml
-
-# Dependencies-Install (Phase 1: echte Lock-Datei via uv oder pip-tools)
+# Layer-Caching: Dependencies vor dem Source-Code installieren.
 RUN pip install \
     "fastapi>=0.115" \
     "uvicorn[standard]>=0.30" \
@@ -36,15 +28,25 @@ RUN pip install \
     "structlog>=24" \
     "prometheus-client>=0.21" \
     "typer>=0.12" \
-    "PyYAML>=6.0"
+    "PyYAML>=6.0" \
+    "jinja2>=3.1" \
+    "python-multipart>=0.0.9" \
+    "itsdangerous>=2.2"
 
-COPY server/bridge/src /app/server/bridge/src
-COPY server/companion/src /app/server/companion/src
+COPY server/bridge /app/server/bridge
+COPY server/companion /app/server/companion
 COPY tools /app/tools
+COPY ops/config-examples/app.yaml /config/app.yaml
 
-ENV PYTHONPATH=/app/server/bridge/src:/app/server/companion/src
+ENV PYTHONPATH=/app/server/bridge/src:/app/server/companion/src \
+    MESHCORE_CONFIG=/config/app.yaml \
+    MESHCORE_DB_PATH=/data/meshcore.sqlite
+
+RUN useradd --create-home --shell /usr/sbin/nologin app \
+    && mkdir -p /data \
+    && chown -R app:app /data /app /config
+USER app
 
 EXPOSE 8000
 
-# Entry-Point wird in Phase 1 implementiert (meshcore_bridge.app:main)
 CMD ["python", "-m", "meshcore_bridge"]
