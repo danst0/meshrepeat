@@ -6,10 +6,7 @@
 
 #include <Preferences.h>
 #include <WiFi.h>
-#include <esp_log.h>
 
-// Wir leihen uns das MeshCore-Logging-Macro, damit wir denselben Stil haben
-// wie der Rest des Repeaters.
 #ifndef MESH_DEBUG_PRINTLN
   #define MESH_DEBUG_PRINTLN(...) do { Serial.printf(__VA_ARGS__); Serial.println(); } while (0)
 #endif
@@ -23,8 +20,14 @@ constexpr uint16_t MAX_FRAME_BYTES  = 8192;
 constexpr uint32_t BACKOFF_INITIAL_MS = 1000;
 constexpr uint32_t BACKOFF_MAX_MS     = 60000;
 
-bool isDefaultPassword(const char* p) {
-  return strcmp(p, "password") == 0;
+// Globaler Trampolin: Links2004 onEvent erwartet einen freistehenden
+// Funktionspointer, also leiten wir auf das einzige aktive Bridge-Objekt um.
+WifiTcpBridge* g_bridge_singleton = nullptr;
+
+void wsEventTrampoline(WStype_t type, uint8_t* payload, size_t length) {
+  if (g_bridge_singleton) {
+    g_bridge_singleton->_dispatchWsEvent(type, payload, length);
+  }
 }
 }  // namespace
 
@@ -67,30 +70,32 @@ bool WifiTcpBridge::saveConfig() {
 void WifiTcpBridge::begin() {
   loadConfig();
   _initialized = true;
+  g_bridge_singleton = this;
+
   if (!_cfg.enabled) {
     enterState(IDLE);
     return;
   }
-  _tls.setCACert(ISRG_ROOT_X1_PEM);
-  _ws.setCACert(ISRG_ROOT_X1_PEM);
-  _ws.onMessage([this](websockets::WebsocketsMessage m) { onWsMessage(m); });
-  _ws.onEvent([this](websockets::WebsocketsEvent e, String d) { onWsEvent(e, d); });
 
-  if (_cfg.wifi_ssid[0] != 0) {
-    WiFi.mode(WIFI_STA);
-    WiFi.begin(_cfg.wifi_ssid, _cfg.wifi_psk);
-    enterState(CONNECT_W);
-  } else {
+  if (_cfg.wifi_ssid[0] == 0) {
     snprintf(_last_error, sizeof(_last_error), "no wifi.ssid configured");
     enterState(BACKOFF);
+    _next_attempt_ms = millis() + 5000;
+    return;
   }
+
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(_cfg.wifi_ssid, _cfg.wifi_psk);
+  enterState(CONNECT_W);
+  _next_attempt_ms = millis();
 }
 
 void WifiTcpBridge::end() {
-  _ws.close();
+  _ws.disconnect();
   WiFi.disconnect(true, false);
   enterState(IDLE);
   _initialized = false;
+  g_bridge_singleton = nullptr;
 }
 
 void WifiTcpBridge::loop() {
@@ -103,36 +108,30 @@ void WifiTcpBridge::loop() {
 
     case CONNECT_W:
       if (WiFi.status() == WL_CONNECTED) {
-        // URL bauen: wss://host:port/path
-        String url = String("wss://") + _cfg.host + ":" + String(_cfg.port) + _cfg.path;
-        if (_ws.connect(url)) {
-          enterState(HELLO);
-          sendHello();
-        } else {
-          snprintf(_last_error, sizeof(_last_error), "ws connect failed");
-          scheduleReconnect();
-        }
+        _ws.beginSslWithCA(_cfg.host, _cfg.port, _cfg.path, ISRG_ROOT_X1_PEM);
+        _ws.onEvent(wsEventTrampoline);
+        _ws.setReconnectInterval(0);  // wir steuern Reconnects selber
+        _ws_connected = false;
+        _hello_sent = false;
+        enterState(CONNECTED);
       } else if ((int32_t)(now - _next_attempt_ms) > 30000) {
         snprintf(_last_error, sizeof(_last_error), "wifi timeout");
         scheduleReconnect();
       }
       return;
 
-    case CONNECT_S:
-    case HELLO:
-    case READY:
-      _ws.poll();
-      if (_state == READY && _hb_timeout_ms > 0
+    case CONNECTED:
+      _ws.loop();
+      if (_ws_connected && _hello_sent && _hb_timeout_ms > 0
           && (int32_t)(now - _last_hback_ms) > (int32_t)_hb_timeout_ms) {
         snprintf(_last_error, sizeof(_last_error), "heartbeat timeout");
-        _ws.close();
+        _ws.disconnect();
         scheduleReconnect();
       }
       return;
 
     case BACKOFF:
       if ((int32_t)(now - _next_attempt_ms) >= 0) {
-        // Versuch: erst WiFi-Reconnect, dann WS.
         WiFi.reconnect();
         enterState(CONNECT_W);
         _next_attempt_ms = now;
@@ -143,8 +142,7 @@ void WifiTcpBridge::loop() {
 
 void WifiTcpBridge::enterState(State s) {
   _state = s;
-  if (s == READY) {
-    _backoff_ms = BACKOFF_INITIAL_MS;
+  if (s == CONNECTED) {
     _last_hback_ms = millis();
   }
 }
@@ -153,14 +151,15 @@ void WifiTcpBridge::scheduleReconnect() {
   _reconnects++;
   uint32_t jitter = (uint32_t)random(0, _backoff_ms / 5 + 1);
   _next_attempt_ms = millis() + _backoff_ms + jitter;
-  _backoff_ms = min(_backoff_ms * 2, BACKOFF_MAX_MS);
+  _backoff_ms = _backoff_ms * 2;
+  if (_backoff_ms > BACKOFF_MAX_MS) _backoff_ms = BACKOFF_MAX_MS;
   enterState(BACKOFF);
 }
 
 void WifiTcpBridge::sendHello() {
   uint8_t buf[256];
   CborWriter w(buf, sizeof(buf));
-  w.writeMap(7);  // t, site, tok, fw, proto, scope, caps
+  w.writeMap(7);
   w.kvText("t", "hello");
   w.kvBytes("site", _cfg.site_id, sizeof(_cfg.site_id));
   w.kvText("tok", _cfg.token);
@@ -173,11 +172,12 @@ void WifiTcpBridge::sendHello() {
   w.writeText("snr");
   if (w.error()) {
     snprintf(_last_error, sizeof(_last_error), "hello encode overflow");
-    _ws.close();
+    _ws.disconnect();
     scheduleReconnect();
     return;
   }
-  _ws.sendBinary((const char*)w.data(), w.length());
+  _ws.sendBIN(w.data(), w.length());
+  _hello_sent = true;
   _last_hback_ms = millis();
 }
 
@@ -188,14 +188,12 @@ void WifiTcpBridge::sendHeartbeatAck(uint32_t seq) {
   w.kvText("t", "hback");
   w.kvUInt("seq", seq);
   if (w.error()) return;
-  _ws.sendBinary((const char*)w.data(), w.length());
+  _ws.sendBIN(w.data(), w.length());
 }
 
 bool WifiTcpBridge::encodePktFrame(const mesh::Packet* pkt, uint8_t* out, size_t cap, size_t* out_len) {
-  // Wir serialisieren das komplette on-air-Paket (Header + Path + Payload)
-  // ins "raw"-Feld. Der Server tagged es mit unserer site_id und routet.
   uint8_t raw[256];
-  uint8_t raw_len = pkt->writeTo(raw);  // MeshCore Packet::writeTo gibt Länge zurück
+  uint8_t raw_len = const_cast<mesh::Packet*>(pkt)->writeTo(raw);
   CborWriter w(out, cap);
   w.writeMap(2);
   w.kvText("t", "pkt");
@@ -206,18 +204,17 @@ bool WifiTcpBridge::encodePktFrame(const mesh::Packet* pkt, uint8_t* out, size_t
 }
 
 void WifiTcpBridge::sendPacket(mesh::Packet* packet) {
-  if (_state != READY) return;  // verloren — Mesh läuft trotzdem lokal weiter
+  if (_state != CONNECTED || !_ws_connected || !_hello_sent) return;
   uint8_t buf[300];
   size_t n;
   if (!encodePktFrame(packet, buf, sizeof(buf), &n)) {
     snprintf(_last_error, sizeof(_last_error), "pkt encode overflow");
     return;
   }
-  _ws.sendBinary((const char*)buf, n);
+  _ws.sendBIN(buf, n);
 }
 
 void WifiTcpBridge::onPacketReceived(mesh::Packet* packet) {
-  // BridgeBase-Standard: hasSeen + queue
   handleReceivedPacket(packet);
 }
 
@@ -226,25 +223,22 @@ bool WifiTcpBridge::decodeAndDispatch(const uint8_t* data, size_t len) {
   CborReader r(data, len);
   uint32_t pairs;
   if (!r.readMapHeader(&pairs)) return false;
+  if (pairs == 0) return false;
 
-  // Ersten Pass: Frame-Typ rausholen. Wir scannen die Map; Server schickt
-  // uns immer "t" zuerst (kanonisch), aber wir suchen explizit.
-  // Pragmatisch: erstes Pair muss "t":<text> sein.
   const char* k; size_t kl;
   if (!r.readText(&k, &kl) || kl != 1 || k[0] != 't') return false;
   const char* v; size_t vl;
   if (!r.readText(&v, &vl)) return false;
 
   if (vl == 8 && memcmp(v, "helloack", 8) == 0) {
-    // Restliche Felder skippen, in READY wechseln.
     for (uint32_t i = 1; i < pairs; ++i) {
       if (!r.skipItem() || !r.skipItem()) return false;
     }
-    enterState(READY);
+    _last_hback_ms = millis();
+    _backoff_ms = BACKOFF_INITIAL_MS;
     return true;
   }
   if (vl == 2 && memcmp(v, "hb", 2) == 0) {
-    // hb {seq, ts} — wir extrahieren seq und antworten mit hback.
     uint32_t seq = 0;
     for (uint32_t i = 1; i < pairs; ++i) {
       const char* fk; size_t fkl;
@@ -281,32 +275,32 @@ bool WifiTcpBridge::decodeAndDispatch(const uint8_t* data, size_t len) {
     return true;
   }
   if (vl == 4 && memcmp(v, "flow", 4) == 0) {
-    // Backpressure-Hinweis — wir loggen, ignorieren aber sonst (ohne Queue).
     return true;
   }
   if (vl == 3 && memcmp(v, "bye", 3) == 0) {
-    _ws.close();
+    _ws.disconnect();
     scheduleReconnect();
     return true;
   }
-  // Unbekannter Frame-Typ — silent ignore.
   return true;
 }
 
-void WifiTcpBridge::onWsMessage(websockets::WebsocketsMessage msg) {
-  if (!msg.isBinary()) return;
-  const auto& payload = msg.data();
-  decodeAndDispatch((const uint8_t*)payload.c_str(), payload.length());
-}
-
-void WifiTcpBridge::onWsEvent(websockets::WebsocketsEvent event, String data) {
-  switch (event) {
-    case websockets::WebsocketsEvent::ConnectionClosed:
+// Public-Trampolin-Helper (private deklariert wäre nicht callable vom freistehenden Trampoline)
+// Wir machen die Methode public mit _-Prefix als Hinweis "internal".
+void WifiTcpBridge::_dispatchWsEvent(uint8_t type, uint8_t* payload, size_t length) {
+  switch ((WStype_t)type) {
+    case WStype_CONNECTED:
+      _ws_connected = true;
+      sendHello();
+      break;
+    case WStype_DISCONNECTED:
+      _ws_connected = false;
+      _hello_sent = false;
       snprintf(_last_error, sizeof(_last_error), "ws closed");
       scheduleReconnect();
       break;
-    case websockets::WebsocketsEvent::ConnectionOpened:
-      // helloack-Wartephase, _state ist HELLO
+    case WStype_BIN:
+      decodeAndDispatch(payload, length);
       break;
     default:
       break;

@@ -1,32 +1,20 @@
 #pragma once
 //
 // WifiTcpBridge — BridgeBase-Subclass, die MeshCore-Pakete über eine
-// WebSocket-Secure-Verbindung an den Bridge-Server (cassius) reicht und
-// von dort empfangene Pakete ins lokale Mesh injiziert.
+// WebSocket-Secure-Verbindung an den Bridge-Server reicht und vom Server
+// empfangene Pakete ins lokale Mesh injiziert.
 //
 // Wire-Protokoll: siehe protocol/WIRE.md.
-// Auth: Bearer-Token im hello-Frame, Server-Cert via ISRG Root X1 gepinnt.
+// Auth: Bearer-Token im hello-Frame; Server-Cert via ISRG Root X1 gepinnt.
 // Storage: NVS-Namespace "mcbridge" (Preferences-Lib).
+// WebSocket-Stack: Links2004/arduinoWebSockets.
 //
-// State-Machine:
-//   IDLE      — kein WiFi oder bridge.enable=0
-//   CONNECT_W — WiFi.begin gestartet, warten auf STA-Connect
-//   CONNECT_S — TLS+WS-Handshake läuft
-//   HELLO     — hello gesendet, warten auf helloack
-//   READY     — operativ; pkt-Frames hin und her, Heartbeat überwachen
-//   BACKOFF   — Reconnect-Wartezeit
-//
-// Aufrufer (MyMesh) hängt uns wie die anderen BridgeBase-Subclasses ein:
-//   - sendPacket(pkt) wird auf logTx/logRx aufgerufen (siehe MyMesh)
-//   - loop() pollt den WebSocket
-//   - onPacketReceived() queued ein vom Server eingegangenes Paket ins Mesh
 
 #include <stdint.h>
 #include <stddef.h>
 
 #include "helpers/bridges/BridgeBase.h"
-#include <WiFiClientSecure.h>
-#include <ArduinoWebsockets.h>
+#include <WebSocketsClient.h>
 
 namespace mcbridge {
 
@@ -59,24 +47,24 @@ public:
   bool saveConfig();
   BridgeConfig& config() { return _cfg; }
 
-  // Status für `bridge status`-CLI
+  // Status
   enum State : uint8_t {
     IDLE = 0,
-    CONNECT_W,
-    CONNECT_S,
-    HELLO,
-    READY,
-    BACKOFF,
+    CONNECT_W,    // WiFi.begin gestartet
+    CONNECTED,    // WS-Connect läuft / Frames-Phase
+    BACKOFF,      // Reconnect-Wartezeit
   };
   State state() const { return _state; }
   uint32_t reconnectCount() const { return _reconnects; }
   const char* lastError() const { return _last_error; }
 
+  // Internal — called by the WebSocketsClient onEvent trampoline.
+  void _dispatchWsEvent(uint8_t type, uint8_t* payload, size_t length);
+
 private:
   void enterState(State s);
   void scheduleReconnect();
-  void onWsMessage(websockets::WebsocketsMessage msg);
-  void onWsEvent(websockets::WebsocketsEvent event, String data);
+  void handleWsEvent(uint8_t type, uint8_t* payload, size_t length);
   void sendHello();
   void sendHeartbeatAck(uint32_t seq);
   bool encodePktFrame(const mesh::Packet* pkt, uint8_t* out, size_t cap, size_t* out_len);
@@ -84,14 +72,14 @@ private:
 
   BridgeConfig _cfg;
   State _state = IDLE;
-  websockets::WebsocketsClient _ws;
-  WiFiClientSecure _tls;            // wird vom WS-Client genutzt (siehe begin())
+  WebSocketsClient _ws;
   uint32_t _next_attempt_ms = 0;
   uint32_t _backoff_ms = 1000;
   uint32_t _reconnects = 0;
   uint32_t _last_hback_ms = 0;
-  uint32_t _hb_iv_ms = 15000;
   uint32_t _hb_timeout_ms = 45000;
+  bool _ws_connected = false;
+  bool _hello_sent = false;
   char _last_error[64] = {0};
 };
 
