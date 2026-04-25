@@ -6,6 +6,10 @@
 line-length = 100
 target-version = "py312"
 src = ["server/bridge/src", "server/companion/src", "tools"]
+extend-exclude = [
+    "firmware/lib/**",   # MeshCore-Submodul wir nicht linten
+    "firmware/scripts/**", # PIO-pre-build-Scripts mit Import-Magic
+]
 
 [tool.ruff.lint]
 select = [

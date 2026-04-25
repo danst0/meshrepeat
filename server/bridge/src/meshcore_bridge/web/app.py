@@ -13,6 +13,7 @@ from importlib.resources import files
 from fastapi import FastAPI
 from fastapi.templating import Jinja2Templates
 
+from meshcore_bridge.auth.email import ConsoleEmailSender, SmtpEmailSender
 from meshcore_bridge.bridge import ConnectionRegistry, DedupCache, Router
 from meshcore_bridge.config import AppConfig
 from meshcore_bridge.db import close_engine, init_engine
@@ -39,6 +40,23 @@ def build_app(cfg: AppConfig) -> FastAPI:
 
         templates_dir = files("meshcore_bridge.web") / "templates"
         app.state.templates = Jinja2Templates(directory=str(templates_dir))
+
+        if cfg.web.smtp.enabled and cfg.web.smtp.host:
+            auth_routes.set_email_sender(
+                SmtpEmailSender(
+                    host=cfg.web.smtp.host,
+                    port=cfg.web.smtp.port,
+                    username=cfg.web.smtp.username or None,
+                    password=cfg.web.smtp.password or None,
+                    sender=cfg.web.smtp.sender,
+                    use_tls=cfg.web.smtp.use_tls,
+                    starttls=cfg.web.smtp.starttls,
+                )
+            )
+            log.info("smtp_enabled", host=cfg.web.smtp.host, port=cfg.web.smtp.port)
+        else:
+            auth_routes.set_email_sender(ConsoleEmailSender())
+            log.warning("smtp_disabled_using_console_sender")
 
         yield
 

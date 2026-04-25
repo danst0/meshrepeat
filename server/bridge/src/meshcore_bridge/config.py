@@ -53,12 +53,24 @@ class Argon2Config(BaseModel):
     parallelism: int = 4
 
 
+class SmtpConfig(BaseModel):
+    enabled: bool = False
+    host: str = ""
+    port: int = 587
+    username: str = ""
+    password: str = ""
+    sender: str = "noreply@meshcore.dumke.me"
+    use_tls: bool = False  # implicit TLS (port 465)
+    starttls: bool = True  # explicit STARTTLS (port 587)
+
+
 class WebConfig(BaseModel):
     base_url: str = "https://meshcore.dumke.me"
     session_cookie_name: str = "meshcore_sid"
     session_idle_timeout_days: int = 7
     signup: SignupConfig = SignupConfig()
     argon2: Argon2Config = Argon2Config()
+    smtp: SmtpConfig = SmtpConfig()
 
 
 class CompanionConfig(BaseModel):

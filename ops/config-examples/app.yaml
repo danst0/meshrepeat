@@ -30,6 +30,18 @@ web:
     time_cost: 3
     memory_cost_kib: 65536
     parallelism: 4
+  # SMTP für Versand der Verifikations-E-Mails. Wenn enabled=false oder
+  # host leer, fällt der Server auf einen Log-only-Sender zurück
+  # (Tokens stehen dann in `docker compose logs app | grep send_email`).
+  smtp:
+    enabled: false
+    host: ""
+    port: 587
+    username: ""
+    password: ""
+    sender: "noreply@meshcore.dumke.me"
+    use_tls: false       # implicit TLS (typisch Port 465)
+    starttls: true       # explicit STARTTLS (typisch Port 587)
 
 companion:
   enabled: true

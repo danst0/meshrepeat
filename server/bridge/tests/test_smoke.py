@@ -64,10 +64,11 @@ async def app_and_outbox(tmp_path: Path):
     cfg.web.base_url = "http://t"
 
     sender = _RecordingEmailSender()
-    set_email_sender(sender)
 
     app = build_app(cfg)
     async with app.router.lifespan_context(app):
+        # Lifespan überschreibt den Sender; nach Start wieder unseren setzen.
+        set_email_sender(sender)
         yield app, sender
 
 

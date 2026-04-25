@@ -1,16 +1,20 @@
 """E-Mail-Verifikations- und Passwort-Reset-Tokens.
 
-In Phase 1 ist der Versand-Channel pluggable; Default ist
-``ConsoleEmailSender``, der die Mail einfach ins Log schreibt. Phase 5
-ergänzt ``SmtpEmailSender``.
+Versand-Channel ist pluggable: ``ConsoleEmailSender`` (Dev/Default,
+schreibt ins Log) und ``SmtpEmailSender`` (Prod, nutzt aiosmtplib via
+asyncio.to_thread auf smtplib).
 """
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import secrets
+import smtplib
+import ssl
 from abc import ABC, abstractmethod
 from datetime import UTC, datetime, timedelta
+from email.message import EmailMessage
 from typing import Literal
 from uuid import UUID
 
@@ -108,10 +112,67 @@ class EmailSender(ABC):
 
 
 class ConsoleEmailSender(EmailSender):
-    """Schreibt die Mail einfach ins Log. Für Dev und v1 ausreichend."""
+    """Schreibt die Mail einfach ins Log. Für Dev ausreichend."""
 
     def __init__(self) -> None:
         self._log = get_logger("email")
 
     async def send(self, *, to: str, subject: str, body: str) -> None:
         self._log.info("send_email_console", to=to, subject=subject, body=body)
+
+
+class SmtpEmailSender(EmailSender):
+    """Versendet via SMTP. STARTTLS bevorzugt, alternativ implicit TLS.
+
+    Konfiguration kommt aus :class:`SmtpConfig` (siehe
+    :mod:`meshcore_bridge.config`). smtplib ist blockierend; wir lassen
+    es in einem Thread laufen, damit der event loop frei bleibt.
+    """
+
+    def __init__(
+        self,
+        *,
+        host: str,
+        port: int,
+        username: str | None,
+        password: str | None,
+        sender: str,
+        use_tls: bool,
+        starttls: bool,
+        timeout_s: int = 20,
+    ) -> None:
+        self._host = host
+        self._port = port
+        self._username = username
+        self._password = password
+        self._sender = sender
+        self._use_tls = use_tls
+        self._starttls = starttls
+        self._timeout = timeout_s
+        self._log = get_logger("email")
+
+    async def send(self, *, to: str, subject: str, body: str) -> None:
+        msg = EmailMessage()
+        msg["Subject"] = subject
+        msg["From"] = self._sender
+        msg["To"] = to
+        msg.set_content(body)
+
+        await asyncio.to_thread(self._send_blocking, msg)
+        self._log.info("send_email_smtp", to=to, subject=subject, host=self._host)
+
+    def _send_blocking(self, msg: EmailMessage) -> None:
+        ctx = ssl.create_default_context()
+        if self._use_tls:
+            with smtplib.SMTP_SSL(self._host, self._port, timeout=self._timeout, context=ctx) as s:
+                self._login_and_send(s, msg)
+        else:
+            with smtplib.SMTP(self._host, self._port, timeout=self._timeout) as s:
+                if self._starttls:
+                    s.starttls(context=ctx)
+                self._login_and_send(s, msg)
+
+    def _login_and_send(self, s: smtplib.SMTP, msg: EmailMessage) -> None:
+        if self._username and self._password:
+            s.login(self._username, self._password)
+        s.send_message(msg)
