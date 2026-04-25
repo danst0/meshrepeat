@@ -27,48 +27,61 @@ Keine OAuth/SSO in v1 — kann später nachgerüstet werden.
 
 ## Repeater-Onboarding
 
+Pairing nutzt den bereits in MeshCore eingebauten Login-Mechanismus
+(`_prefs.password`, App-Funktion `sendLogin`). Kein eigenes Pairing-
+Protokoll, kein USB-Kabel.
+
 ```
-┌─────────┐        ┌──────────────┐        ┌──────────┐        ┌──────────┐
-│ Owner   │        │ Web-UI       │        │ Phone    │        │ Repeater │
-│         │        │ (FastAPI)    │        │ MeshCore │        │ T-Beam   │
-└────┬────┘        └──────┬───────┘        │   App    │        └────┬─────┘
-     │                    │                └─────┬────┘             │
-     │ 1) login           │                      │                  │
-     ├───────────────────►│                      │                  │
-     │ 2) "neuer Repeater"│                      │                  │
-     ├───────────────────►│                      │                  │
-     │  scope: pool:xy    │                      │                  │
-     │ 3) site_id, token  │                      │                  │
-     │◄───────────────────┤                      │                  │
-     │                    │                      │                  │
-     │ 4) Token kopieren, MeshCore-App öffnen,                      │
-     │    eigenen Repeater als Admin auswählen                      │
-     │ 5) Admin-DM senden:                                          │
-     │    set bridge.host meshcore.dumke.me                         │
-     │    set bridge.token <TOKEN>                                  │
-     │    set bridge.site  <SITE_ID>                                │
-     │    set bridge.scope <pool:xy|public>                         │
-     │    bridge enable                                             │
-     │                    │                      │     LoRa-DM      │
-     │                    │                      ├─────────────────►│
-     │                    │                      │                  │
-     │                    │                      │             6) NVS-Write,
-     │                    │                      │                Reboot-Bridge-Task
-     │                    │                      │                  │
-     │                    │                      │       wss://     │
-     │                    │◄────────────────────────────────────────┤
-     │                    │   hello{site,tok,scope}                 │
-     │                    │                      │                  │
-     │                    │   helloack           │                  │
-     │                    ├────────────────────────────────────────►│
-     │ 7) UI: "verbunden" │                      │                  │
-     │◄───────────────────┤                      │                  │
+┌─────────┐    ┌──────────────┐    ┌──────────┐    ┌──────────┐
+│ Owner   │    │ Web-UI       │    │ Phone    │    │ Repeater │
+│         │    │ (FastAPI)    │    │ MeshCore │    │ T-Beam   │
+└────┬────┘    └──────┬───────┘    │   App    │    └────┬─────┘
+     │                │            └─────┬────┘         │
+     │ 1) login       │                  │              │
+     ├───────────────►│                  │              │
+     │ 2) Repeater    │                  │              │
+     │    anlegen,    │                  │              │
+     │    scope wählen│                  │              │
+     ├───────────────►│                  │              │
+     │ 3) site_id,    │                  │              │
+     │    token       │                  │              │
+     │◄───────────────┤                  │              │
+     │                                                  │
+     │ 4) MeshCore-App: Repeater als Contact (Advert),  │
+     │    Login mit Default-Passwort "password"         │
+     │                                  │     LoRa     │
+     │                                  ├─────────────►│
+     │                                  │              │
+     │ 5) PFLICHT: Passwort ändern                      │
+     │    `password <neues>`            │              │
+     │                                  ├─────────────►│
+     │                                  │              │
+     │ 6) Bridge konfigurieren (Web-UI zeigt die Befehle):
+     │    set bridge.host meshcore.dumke.me             │
+     │    set bridge.token <TOKEN>                      │
+     │    set bridge.site  <SITE_ID>                    │
+     │    set bridge.scope <pool:xy|public>             │
+     │    bridge enable                                 │
+     │                                  ├─────────────►│
+     │                                                  │
+     │                                  │   wss://     │
+     │                │◄─────────────────────────────────│
+     │                │   hello{site,tok,scope}         │
+     │                ├─────────────────────────────────►│
+     │                │   helloack                      │
+     │ 7) "verbunden" │                                  │
+     │◄───────────────┤                                  │
 ```
 
-### MeshCore-Admin-CLI-Erweiterungen (Phase 2)
+**Default-Passwort-Lock**: Solange `_prefs.password == "password"`
+(MeshCore-Default), weigert sich der Repeater, `set bridge.*` oder
+`bridge enable` auszuführen. So kann niemand den Repeater an einen
+fremden Bridge-Endpoint hängen, bevor der Owner sein Passwort gewechselt
+hat.
 
-Neue Befehle im Repeater-CLI (nutzbar via Phone-App-Admin-DM, signiert
-mit Admin-Pubkey wie alle anderen `set`-Befehle):
+### CLI-Erweiterungen (Phase 2)
+
+Neue Befehle im Repeater-CLI (nutzbar via Phone-App-Admin-DM nach Login):
 
 | Befehl                       | Wirkung                                            |
 |------------------------------|----------------------------------------------------|
@@ -80,6 +93,10 @@ mit Admin-Pubkey wie alle anderen `set`-Befehle):
 | `set bridge.scope <s>`       | `public` oder `pool:<uuid>`                        |
 | `bridge enable` / `disable`  | Verbindung an/aus                                  |
 | `bridge status`              | Verbindungs-Status, Reconnect-Counter, letzter Fehler |
+
+Alle `set bridge.*`-Befehle und `bridge enable` sind blockiert, solange
+das Admin-Passwort noch der MeshCore-Default `password` ist. Antwort:
+`ERROR: change default password first`.
 
 Persistenz: NVS-Namespace `mcbridge`. Token wird beim Setzen gespeichert;
 beim `get` wird nur SHA-256-Prefix geloggt, nicht der Token selbst.
@@ -139,6 +156,7 @@ ihr Pubkey bleibt stabil — andernfalls verliert der Mesh den Adressaten.
 | Token-Diebstahl vom Repeater (NVS-Dump)             | akzeptiert; Owner muss bei Verlust rotieren |
 | Repeater-Spoofing (anderer Token, gleiche Site)     | Token↔Site-Bindung in DB                  |
 | LoRa-Sniff der Admin-DM mit Token                   | MeshCore-Admin-DM ist AES-128 + HMAC      |
+| Funk-Übernahme im Default-Passwort-Window           | Default-PW-Lock auf `set bridge.*`; Recovery via Factory-Reset |
 | Phishing per Web-UI                                 | Standard-CSRF + SameSite-Cookies          |
 | Companion-Privkey-Leck                              | At-rest-Encryption                        |
 | Brute-Force gegen Token (online)                    | Rate-Limit pro IP + pro `site_id`         |

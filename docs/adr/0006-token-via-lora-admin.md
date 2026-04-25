@@ -1,56 +1,86 @@
-# ADR 006: Token-Auslieferung per MeshCore-Admin-LoRa-DM
+# ADR 006: Repeater-Onboarding über MeshCore-Standard-Login per LoRa
 
-Datum: 2026-04-25
+Datum: 2026-04-25 (revised)
 Status: accepted
 
 ## Kontext
 
-Repeater müssen einen Bridge-Endpoint und einen Bearer-Token
-zugewiesen bekommen. Out-of-band-Mechanismen: USB-Serial,
-Web-Captive-Portal, BLE, oder LoRa-DM via MeshCore-Admin-CLI.
+Repeater müssen einen Bridge-Endpoint und einen Bearer-Token zugewiesen
+bekommen. Erstkontakt-Pairing-Optionen:
 
-User hat Q8=A entschieden — MeshCore-Admin-CLI erweitern.
+- USB-Serial-CLI (Henne-Ei-frei, aber Kabel nötig)
+- BLE-Pairing (zusätzliche Stack-Komplexität)
+- Eigenes LoRa-Pairing-Protokoll (Time-Window, Pairing-Code, …)
+- **MeshCore-Standard-Login per Admin-Passwort über LoRa**
+
+Beim Pin-Wechsel auf MeshCore `repeater-v1.15.0` zeigte sich, dass das
+existierende `CommonCLI` bereits ein vollständiges passwort-basiertes
+Admin-Login hat (`_prefs.password`, CLI-Befehl `password <new>`,
+App-Seite `BaseChatMesh::sendLogin`). Der User hat sich für diesen Weg
+entschieden.
 
 ## Entscheidung
 
-Repeater-Konfiguration erfolgt über die existierende, von MeshCore
-abgesicherte Admin-CLI per LoRa-DM. Wir patchen das CLI im
-Custom-FW, um neue `set bridge.*`-Befehle zu unterstützen
-(Liste in `docs/auth.md`). Owner nutzt seine reguläre MeshCore-
-Phone-App, um die Admin-DMs zu senden.
+Onboarding erfolgt **ohne eigenes Pairing-Protokoll**:
 
-Die Admin-CLI ist authentifiziert: jeder Repeater hat einen
-Admin-Pubkey, nur Nachrichten signiert mit dem zugehörigen Privkey
-werden akzeptiert. Initial-Pairing (Erst-Setzen des Admin-Pubkeys)
-erfolgt **out-of-band** über USB-Serial-CLI bei Erst-Inbetriebnahme
-(MeshCore-Standard).
+1. Owner flasht Repeater. FW kommt mit dem MeshCore-Default-Admin-Passwort
+   `password`.
+2. Owner öffnet die offizielle MeshCore-Phone-App, fügt den neu gestarteten
+   Repeater per Advert als Contact hinzu, loggt sich mit `password` ein.
+3. **Pflicht**: Owner ändert das Admin-Passwort sofort:
+   `password <neues_passwort>`. Solange das Default-Passwort aktiv ist,
+   blockt das CLI alle `set bridge.*`-Befehle (Schutz vor Funk-Übernahme
+   im Pairing-Window).
+4. Owner setzt die Bridge-Konfiguration im selben Admin-Channel:
+   `set bridge.host meshcore.dumke.me`, `set bridge.token <T>`,
+   `set bridge.site <UUID>`, `set bridge.scope <s>`, `bridge enable`.
 
-Token werden in NVS unter Namespace `mcbridge` abgelegt. Beim Lesen
-zurück wird nur ein SHA-256-Prefix exposiert, nicht der Klartext-Token.
+Die zusätzlichen `set bridge.*`-Befehle ergänzen wir in einer Subclass
+von `CommonCLI` oder via Hook im `simple_repeater`-Bootstrap (siehe
+firmware-Code, Phase 2).
 
 ## Folgen
 
 ### Vorteile
 
-- Keine zusätzliche Hardware (kein BLE-Pairing-UI nötig).
-- Existierende MeshCore-Phone-App reicht.
-- Admin-DMs sind verschlüsselt (AES-128) und signiert (HMAC-SHA256
-  und Ed25519-Sig); Token ist on-air nicht im Klartext.
-- Token-Rotation: einfach erneut Admin-DM mit neuem Token.
+- Kein eigenes Pairing-Protokoll nötig — wir nutzen einen etablierten,
+  in der App bereits implementierten Mechanismus.
+- Keine Kabel, keine Captive-Portals, keine BLE-Stacks.
+- Repeater-Übernahme = Passwort kennen. Recovery = Factory-Reset
+  (NVS-Erase) oder neuer Flash.
+- Token + Endpoint kommen über denselben Admin-Channel wie alle anderen
+  Konfig-Settings.
 
 ### Nachteile
 
-- Initial-Setup erfordert physischen USB-Zugang einmalig (für
-  Admin-Pubkey-Pairing). Akzeptiert — Standard-MeshCore-Workflow.
-- Token in einer LoRa-DM ist auf Payload-Größe begrenzt. 32 ASCII-
-  Zeichen passen in einen Datagram-Payload.
-- Wer den Repeater physisch hat, kann NVS dumpen → Token-Leak.
-  Owner muss bei Verlust rotieren.
+- Default-Passwort `password` ist ab Power-on bekannt; wer in
+  Funkreichweite ist, kann sich vor dem rechtmäßigen Owner einloggen.
+  → Mitigation: Default-Passwort-Lock auf `set bridge.*` (Repeater
+  weigert sich, einen Bridge-Endpoint zu setzen, solange das Default-
+  Passwort aktiv ist). Der schlimmste Pre-Pairing-Schaden ist, dass
+  jemand das Passwort ändert; der Owner merkt das beim eigenen Login
+  und macht einen Factory-Reset.
+- 16-Zeichen-Limit für das Passwort (`_prefs.password[16]`, Upstream-
+  Konstante). Ausreichend, wenn der Owner ein zufälliges Passwort wählt.
+- Bei Verlust des Passworts: NVS-Erase (Owner verliert seine Identität;
+  Repeater muss neu in der Web-UI angelegt werden).
+
+### Pflicht-Erweiterungen in unserer Custom-FW
+
+- Subclass / Hook in `CommonCLI`:
+  - Neue Befehle: `bridge enable`, `bridge disable`, `bridge status`,
+    `set bridge.host`, `set bridge.token`, `set bridge.scope`,
+    `set bridge.site`, `set bridge.path`.
+  - Default-Passwort-Lock: alle `set bridge.*` und `bridge enable`
+    werfen `ERROR: change default password first`, wenn
+    `strcmp(_prefs.password, "password") == 0`.
+- NVS-Persistenz für die neuen Felder unter Namespace `mcbridge`
+  (separat von MeshCore-Prefs, damit Submodul-Updates nicht kollidieren).
 
 ## Verworfen
 
-- **Captive-Portal**: zusätzliche Web-UI auf dem ESP32, Konfigurations-
-  PSK-Frage, schlechter UX bei Multi-Repeater-Owner.
-- **USB-Only**: Owner muss bei jeder Token-Rotation an die Hardware
-  ran — schlechter UX bei vielen Repeatern.
-- **BLE**: zusätzliche Stack-Konfiguration, App-Pairing-Flow.
+- **USB-only-Pairing**: schlechter UX, alte Annahme aus ADR-Erstfassung.
+- **Eigenes LoRa-Pairing-Protokoll**: redundant zum existierenden
+  MeshCore-Login.
+- **Captive-Portal**: zusätzliche WebUI auf dem ESP32, schlechter UX
+  bei Multi-Repeater-Owner.

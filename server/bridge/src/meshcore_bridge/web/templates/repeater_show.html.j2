@@ -17,7 +17,10 @@
     <div class="card flash ok">
       <strong>Neuer Bearer-Token (wird nicht erneut angezeigt!):</strong><br>
       <code class="token">{{ new_token }}</code>
-      <p>Auf dem Repeater per Phone-App-Admin-DM setzen:</p>
+      <p>Schritt 1: In der MeshCore-App den Repeater als Contact (Advert) hinzufügen und mit Default-Passwort <code>password</code> einloggen.</p>
+      <p>Schritt 2: <strong>Pflicht</strong> — Admin-Passwort ändern, sonst werden die Bridge-Befehle abgewiesen:</p>
+      <pre>password &lt;neues_passwort&gt;</pre>
+      <p>Schritt 3: Bridge-Konfiguration setzen (über die Admin-DM):</p>
       <pre>set bridge.host {{ host }}
 set bridge.token {{ new_token }}
 set bridge.site {{ repeater.site_id }}
