@@ -1,0 +1,3 @@
+[submodule "firmware/lib/meshcore"]
+	path = firmware/lib/meshcore
+	url = https://github.com/meshcore-dev/MeshCore

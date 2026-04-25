@@ -1,5 +1,1 @@
-# MeshCore-Submodul-Pin
-# Wird in Phase 2 auf einen konkreten Tag oder Commit gesetzt.
-# Vorgehen: jüngsten stable Tag aus https://github.com/meshcore-dev/MeshCore/tags wählen
-# und hier eintragen, dann `git -C lib/meshcore checkout <tag>`.
-TBD
+repeater-v1.15.0
