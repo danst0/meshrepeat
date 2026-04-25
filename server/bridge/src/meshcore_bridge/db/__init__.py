@@ -1,6 +1,8 @@
 from meshcore_bridge.db.models import (
     Base,
+    CompanionContact,
     CompanionIdentity,
+    CompanionMessage,
     EmailVerification,
     Repeater,
     Session,
@@ -10,7 +12,9 @@ from meshcore_bridge.db.session import close_engine, get_session, init_engine
 
 __all__ = [
     "Base",
+    "CompanionContact",
     "CompanionIdentity",
+    "CompanionMessage",
     "EmailVerification",
     "Repeater",
     "Session",

@@ -99,6 +99,8 @@
         <span class="muted">{{ user.email }}{% if user.role == 'admin' %} (admin){% endif %}</span>
         <a href="/dashboard">Dashboard</a>
         <a href="/repeaters">Repeater</a>
+        <a href="/companion/">Companion</a>
+        {% if user.role == 'admin' %}<a href="/admin/">Admin</a>{% endif %}
         <form method="post" action="/logout" style="display:inline">
           <button type="submit" style="margin:0; padding:0.3rem 0.7rem;">Logout</button>
         </form>

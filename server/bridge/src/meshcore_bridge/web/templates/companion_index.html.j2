@@ -1,0 +1,78 @@
+{% extends "base.html.j2" %}
+{% block title %}Companion — MeshCore Spiegel{% endblock %}
+{% block content %}
+  <h1>Companion-Identitäten</h1>
+  <p>Virtuelle MeshCore-Teilnehmer, die der Server für dich betreibt.
+     Jede Identität wirkt im gewählten Scope (public oder Private-Pool)
+     und kann DMs an Mesh-Peers senden/empfangen.</p>
+
+  <div class="card">
+    <h2>Deine Identitäten ({{ identities | length }})</h2>
+    {% if identities %}
+      <table>
+        <thead><tr><th>Name</th><th>Scope</th><th>Pubkey</th><th>Aktion</th></tr></thead>
+        <tbody>
+        {% for i in identities %}
+          <tr>
+            <td>{{ i.name }}</td>
+            <td class="scope-{{ 'public' if i.scope == 'public' else 'pool' }}">{{ i.scope }}</td>
+            <td><code>{{ i.pubkey.hex()[:24] }}…</code></td>
+            <td>
+              <form method="post" action="/api/v1/companion/identities/{{ i.id }}/archive"
+                    style="display:inline" onsubmit="return confirm('Identität archivieren?');">
+                <button type="submit" style="margin:0;padding:.2rem .5rem;background:var(--danger)">archivieren</button>
+              </form>
+            </td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    {% else %}
+      <p>Noch keine Identitäten.</p>
+    {% endif %}
+  </div>
+
+  <div class="card">
+    <h2>Neue Identität</h2>
+    <form method="post" action="/companion/identities">
+      <label>Name
+        <input name="name" required maxlength="64">
+      </label>
+      <label>Scope
+        <select name="scope">
+          <option value="public">public</option>
+          <option value="pool:new">pool:new — neuen privaten Pool</option>
+        </select>
+      </label>
+      <button type="submit">Anlegen</button>
+    </form>
+  </div>
+
+  <div class="card">
+    <h2>Kontakte (aus beobachteten Adverts)</h2>
+    <p>Wird automatisch befüllt, sobald andere Mesh-Teilnehmer im
+       gleichen Scope ihre Adverts senden.
+       <a href="/api/v1/companion/contacts">JSON</a></p>
+  </div>
+
+  <div class="card">
+    <h2>DM senden</h2>
+    <form method="post" action="/api/v1/companion/messages/dm" id="dmform">
+      <label>Identität (UUID)
+        <input name="identity_id" required>
+      </label>
+      <label>Peer-Pubkey (hex, 64 Zeichen)
+        <input name="peer_pubkey_hex" required minlength="64" maxlength="64" pattern="[0-9a-fA-F]{64}">
+      </label>
+      <label>Text
+        <input name="text" required maxlength="200">
+      </label>
+      <button type="submit">Senden</button>
+    </form>
+  </div>
+
+  <div class="card">
+    <h2>Letzte Nachrichten</h2>
+    <p><a href="/api/v1/companion/messages">JSON-Liste</a> (UI-Tabelle folgt).</p>
+  </div>
+{% endblock %}

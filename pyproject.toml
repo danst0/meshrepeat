@@ -47,6 +47,12 @@ extend-immutable-calls = [
 "**/db/session.py" = ["PLW0603"]
 # WebSocket-Handler ist linear lang, splittet aber schlechter als er ist
 "**/web/bridge_ws.py" = ["PLR0911", "PLR0912", "PLR0915", "S110", "SIM105"]
+# CompanionService importiert meshcore_bridge.db lokal (Circular-Vermeidung)
+"**/meshcore_companion/service.py" = ["PLC0415", "S110", "SIM105"]
+# App-Lifespan integriert viele Subsysteme — flache Statementliste OK
+"**/web/app.py" = ["PLR0915", "S110", "SIM105"]
+# Companion-Routes greifen via app.state — Type-Annotation für Service kommt später
+"**/web/companion_routes.py" = ["PLR2004"]
 
 [tool.mypy]
 python_version = "3.12"

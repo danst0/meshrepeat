@@ -24,9 +24,18 @@ from meshcore_bridge.bridge import (
     TrafficLog,
 )
 from meshcore_bridge.config import AppConfig
-from meshcore_bridge.db import close_engine, init_engine
+from meshcore_bridge.db import close_engine, get_session, init_engine
 from meshcore_bridge.log import get_logger
-from meshcore_bridge.web import admin_routes, auth_routes, bridge_ws, repeater_routes
+from meshcore_bridge.web import (
+    admin_routes,
+    auth_routes,
+    bridge_ws,
+    companion_routes,
+    repeater_routes,
+)
+from meshcore_bridge.wire import Packet as WirePacket
+from meshcore_companion.packet import Packet as MCPacket
+from meshcore_companion.service import CompanionService
 
 
 def build_app(cfg: AppConfig) -> FastAPI:
@@ -68,6 +77,31 @@ def build_app(cfg: AppConfig) -> FastAPI:
         templates_dir = files("meshcore_bridge.web") / "templates"
         app.state.templates = Jinja2Templates(directory=str(templates_dir))
 
+        # CompanionService aufsetzen (sofern db_key vorhanden ist)
+        companion_service: CompanionService | None = None
+        if cfg.companion.enabled and cfg.db_key:
+            async def _inject(packet: MCPacket, scope: str) -> None:
+                wire = WirePacket(raw=packet.encode())
+                for conn in list(registry.in_scope(scope)):
+                    try:
+                        await conn.send(wire)
+                    except Exception:
+                        pass
+
+            companion_service = CompanionService(
+                master_key=cfg.db_key,
+                sessionmaker=get_session,
+                inject=_inject,
+                advert_interval_s=cfg.companion.advert_interval_s,
+            )
+            await companion_service.start()
+            app.state.companion_service = companion_service
+            log.info("companion_started", identities=len(companion_service))
+        else:
+            app.state.companion_service = None
+            if cfg.companion.enabled and not cfg.db_key:
+                log.warning("companion_disabled_no_db_key")
+
         if cfg.web.smtp.enabled and cfg.web.smtp.host:
             auth_routes.set_email_sender(
                 SmtpEmailSender(
@@ -88,6 +122,8 @@ def build_app(cfg: AppConfig) -> FastAPI:
         yield
 
         log.info("stopping")
+        if companion_service is not None:
+            await companion_service.stop()
         await close_engine()
 
     app = FastAPI(title="MeshCore Spiegel", lifespan=lifespan)
@@ -96,4 +132,6 @@ def build_app(cfg: AppConfig) -> FastAPI:
     app.include_router(bridge_ws.router)
     app.include_router(admin_routes.router)
     app.include_router(admin_routes.ui_router)
+    app.include_router(companion_routes.router)
+    app.include_router(companion_routes.ui_router)
     return app

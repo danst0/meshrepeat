@@ -170,6 +170,11 @@ async def bridge_socket(ws: WebSocket) -> None:
 
             if isinstance(frame, Packet):
                 await routing.on_packet(source=conn, packet=frame)
+                companion = getattr(ws.app.state, "companion_service", None)
+                if companion is not None:
+                    await companion.on_inbound_packet(
+                        raw=frame.raw, scope=conn.scope
+                    )
             elif isinstance(frame, HeartbeatAck):
                 last_hback_at = time.monotonic()
             elif isinstance(frame, Heartbeat):

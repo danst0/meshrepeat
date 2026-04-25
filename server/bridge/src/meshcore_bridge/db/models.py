@@ -15,6 +15,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Index,
+    Integer,
     String,
     UniqueConstraint,
     func,
@@ -154,4 +155,53 @@ class EmailVerification(Base):
     __table_args__ = (
         UniqueConstraint("user_id", "purpose", name="uq_email_verification_user_purpose"),
         Index("ix_email_verifications_user", "user_id"),
+    )
+
+
+class CompanionMessage(Base):
+    """Companion-Nachrichten. Direction 'in' = vom Mesh empfangen, 'out' = von uns
+    gesendet. Bei DMs ist ``peer_pubkey`` gefüllt; bei Channel-Posts ist
+    ``channel_name`` gesetzt und peer_pubkey leer."""
+
+    __tablename__ = "companion_messages"
+
+    id: Mapped[UUID] = mapped_column(_UUIDBlob, primary_key=True, default=uuid4)
+    identity_id: Mapped[UUID] = mapped_column(
+        _UUIDBlob, ForeignKey("companion_identities.id"), nullable=False
+    )
+    direction: Mapped[str] = mapped_column(String(8), nullable=False)  # 'in' | 'out'
+    payload_type: Mapped[int] = mapped_column(Integer, nullable=False)  # MeshCore PayloadType
+    peer_pubkey: Mapped[bytes | None] = mapped_column(BLOB)
+    peer_name: Mapped[str | None] = mapped_column(String(64))
+    channel_name: Mapped[str | None] = mapped_column(String(64))
+    text: Mapped[str | None] = mapped_column(String)
+    raw: Mapped[bytes] = mapped_column(BLOB, nullable=False)
+    ts: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        Index("ix_companion_messages_identity_ts", "identity_id", "ts"),
+    )
+
+
+class CompanionContact(Base):
+    """Bekannte Peer-Identitäten, abgeleitet aus beobachteten Adverts."""
+
+    __tablename__ = "companion_contacts"
+
+    id: Mapped[UUID] = mapped_column(_UUIDBlob, primary_key=True, default=uuid4)
+    identity_id: Mapped[UUID] = mapped_column(
+        _UUIDBlob, ForeignKey("companion_identities.id"), nullable=False
+    )
+    peer_pubkey: Mapped[bytes] = mapped_column(BLOB, nullable=False)
+    peer_name: Mapped[str | None] = mapped_column(String(64))
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        UniqueConstraint("identity_id", "peer_pubkey", name="uq_companion_contact_pair"),
+        Index("ix_companion_contacts_identity", "identity_id"),
     )
