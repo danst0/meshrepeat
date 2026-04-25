@@ -46,6 +46,6 @@ for p in mc_paths:
         env.Append(CPPPATH=[p])  # noqa: F821
         added.append(p)
 
-print("[expose_lib_includes] added %d include paths" % len(added))
+print(f"[expose_lib_includes] added {len(added)} include paths")
 for p in added:
-    print("  + " + p)
+    print(f"  + {p}")
