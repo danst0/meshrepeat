@@ -6,6 +6,7 @@
 
 #include <Preferences.h>
 #include <WiFi.h>
+#include <esp_wifi.h>
 
 #ifndef MESH_DEBUG_PRINTLN
   #define MESH_DEBUG_PRINTLN(...) do { Serial.printf(__VA_ARGS__); Serial.println(); } while (0)
@@ -47,6 +48,8 @@ bool WifiTcpBridge::loadConfig() {
   p.getString("scope", _cfg.scope, sizeof(_cfg.scope));
   p.getString("ssid", _cfg.wifi_ssid, sizeof(_cfg.wifi_ssid));
   p.getString("psk",  _cfg.wifi_psk,  sizeof(_cfg.wifi_psk));
+  size_t got_mac = p.getBytes("mac", _cfg.wifi_mac, sizeof(_cfg.wifi_mac));
+  if (got_mac != sizeof(_cfg.wifi_mac)) memset(_cfg.wifi_mac, 0, sizeof(_cfg.wifi_mac));
   p.end();
   return true;
 }
@@ -63,6 +66,7 @@ bool WifiTcpBridge::saveConfig() {
   p.putString("scope", _cfg.scope);
   p.putString("ssid", _cfg.wifi_ssid);
   p.putString("psk",  _cfg.wifi_psk);
+  p.putBytes("mac",   _cfg.wifi_mac, sizeof(_cfg.wifi_mac));
   p.end();
   return true;
 }
@@ -85,6 +89,15 @@ void WifiTcpBridge::begin() {
   }
 
   WiFi.mode(WIFI_STA);
+  // Optional MAC-Spoof — z.B. damit ein bereits im Captive-Portal
+  // angemeldetes Gerät die WLAN-Session "mit-vererbt".
+  bool any_mac = false;
+  for (int i = 0; i < 6; ++i) if (_cfg.wifi_mac[i] != 0) { any_mac = true; break; }
+  if (any_mac) {
+    if (esp_wifi_set_mac(WIFI_IF_STA, _cfg.wifi_mac) != ESP_OK) {
+      snprintf(_last_error, sizeof(_last_error), "esp_wifi_set_mac failed");
+    }
+  }
   WiFi.begin(_cfg.wifi_ssid, _cfg.wifi_psk);
   enterState(CONNECT_W);
   _next_attempt_ms = millis();

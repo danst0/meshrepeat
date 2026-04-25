@@ -1444,6 +1444,25 @@ void MyMesh::handleBridgeCommand(uint32_t sender_timestamp, const char* command,
     strcpy(reply, "OK");
     return;
   }
+  if (memcmp(command, "set bridge.wifi.mac ", 20) == 0) {
+    // aa:bb:cc:dd:ee:ff oder "0"/"default" zum Reset auf Factory-MAC.
+    const char* arg = command + 20;
+    if (strcmp(arg, "0") == 0 || strcmp(arg, "default") == 0) {
+      memset(cfg.wifi_mac, 0, sizeof(cfg.wifi_mac));
+      bridge.saveConfig();
+      strcpy(reply, "OK - mac reset to default");
+      return;
+    }
+    int v[6];
+    if (sscanf(arg, "%x:%x:%x:%x:%x:%x", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5]) != 6) {
+      strcpy(reply, "ERROR: bad mac format (aa:bb:cc:dd:ee:ff)");
+      return;
+    }
+    for (int i = 0; i < 6; ++i) cfg.wifi_mac[i] = (uint8_t)v[i];
+    bridge.saveConfig();
+    strcpy(reply, "OK - mac set, bridge restart needed");
+    return;
+  }
 
   strcpy(reply, "Unknown bridge command");
 }

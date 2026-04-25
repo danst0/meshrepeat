@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import getpass
 import os
+import re
 import sys
 import time
 from dataclasses import dataclass
@@ -44,6 +45,8 @@ DEFAULT_BAUD = 115200
 DEFAULT_HOST = "meshcore.dumke.me"
 COMMAND_TIMEOUT_S = 4.0
 
+_MAC_RE = re.compile(r"^[0-9a-fA-F]{2}(:[0-9a-fA-F]{2}){5}$")
+
 
 @dataclass
 class Setup:
@@ -54,6 +57,7 @@ class Setup:
     site: str
     scope: str
     new_password: str | None
+    wifi_mac: str | None = None  # "aa:bb:cc:dd:ee:ff" or None for factory default
 
 
 def prompt(label: str, default: str | None = None, *, secret: bool = False) -> str:
@@ -77,6 +81,14 @@ def gather_setup() -> Setup:
     token = prompt("Bridge-Token (32 Zeichen, base32)")
     site = prompt("Site-UUID (z.B. 7b2f9e0c-4a51-4d0a-91c8-b5d1e7c63f02)")
     scope = prompt("Scope", "public")
+    mac_in = prompt(
+        "MAC-Spoof (für Captive-Portal-WLANs; aa:bb:cc:dd:ee:ff oder leer)",
+        "",
+    )
+    wifi_mac = mac_in.strip() or None
+    if wifi_mac and not _MAC_RE.match(wifi_mac):
+        print("Ungültiges MAC-Format — abgebrochen.", file=sys.stderr)
+        sys.exit(1)
     change_pw = prompt("Admin-Passwort jetzt ändern? (y/N)", "n").lower().startswith("y")
     new_password = None
     if change_pw:
@@ -93,6 +105,7 @@ def gather_setup() -> Setup:
         site=site,
         scope=scope,
         new_password=new_password,
+        wifi_mac=wifi_mac,
     )
 
 
@@ -151,6 +164,7 @@ def main() -> int:
                 site=os.environ["MESHCORE_SETUP_SITE"],
                 scope=os.environ.get("MESHCORE_SETUP_SCOPE", "public"),
                 new_password=os.environ.get("MESHCORE_SETUP_NEW_PW"),
+                wifi_mac=os.environ.get("MESHCORE_SETUP_WIFI_MAC") or None,
             )
         except KeyError as e:
             print(f"Fehlende ENV-Var: {e}", file=sys.stderr)
@@ -174,14 +188,17 @@ def main() -> int:
     time.sleep(4.0)
     s.reset_input_buffer()
 
-    sequence: list[tuple[str, bool]] = [
+    sequence: list[tuple[str, bool]] = []
+    if cfg.wifi_mac:
+        sequence.append((f"set bridge.wifi.mac {cfg.wifi_mac}", False))
+    sequence.extend([
         (f"set bridge.wifi.ssid {cfg.wifi_ssid}", False),
         (f"set bridge.wifi.psk {cfg.wifi_psk}",   True),
         (f"set bridge.host {cfg.host}",           False),
         (f"set bridge.token {cfg.token}",         True),
         (f"set bridge.site {cfg.site}",           False),
         (f"set bridge.scope {cfg.scope}",         False),
-    ]
+    ])
     if cfg.new_password:
         sequence.append((f"password {cfg.new_password}", True))
     sequence.extend([

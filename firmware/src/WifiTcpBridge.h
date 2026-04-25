@@ -29,6 +29,7 @@ struct BridgeConfig {
   char     scope[40]      = "public";  // "public" oder "pool:<uuid>"
   char     wifi_ssid[33]  = {0};
   char     wifi_psk[64]   = {0};
+  uint8_t  wifi_mac[6]    = {0};  // alle 0 = default (factory MAC)
 };
 
 class WifiTcpBridge : public BridgeBase {
