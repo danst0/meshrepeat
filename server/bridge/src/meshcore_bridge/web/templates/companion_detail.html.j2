@@ -32,7 +32,7 @@
         <form id="dm-new" class="thread-new">
           <div class="at-input-wrap">
             <input id="dm-new-peer" required maxlength="128" autocomplete="off"
-                   placeholder="@Name oder Pubkey-Hex…">
+                   placeholder="Name tippen oder Pubkey-Hex einfügen…">
             <div class="at-popup" id="dm-new-popup" hidden></div>
           </div>
         </form>
@@ -462,8 +462,10 @@
   });
 
   // ---------- @-Auto-Complete ----------
-  // mode = "insert" → "@[Name] " in den Text einfügen (Compose-Feld)
-  // mode = "pick"   → onPick(target) callbacken, Input leeren (DM-Picker)
+  // mode = "insert" → "@[Name] " in den Text einfügen (Compose-Feld);
+  //   trigger ist "@" mit Whitespace davor.
+  // mode = "pick"   → onPick(target) callbacken, Input leeren (DM-Picker);
+  //   trigger ist jedes Tippen (kein @ nötig). Hex-Pubkey schließt Popup.
   function attachAtComplete(input, popup, opts={}) {
     const mode = opts.mode || "insert";
     const onPick = opts.onPick || (() => {});
@@ -516,16 +518,26 @@
 
     function update() {
       const v = input.value;
-      const cursor = input.selectionStart;
-      const before = v.slice(0, cursor);
-      const m = before.match(/(^|[\s])@([^@\s\[\]]*)$/);
-      if (!m) { close(); return; }
-      atIdx = before.length - m[2].length - 1;
-      const q = m[2].toLowerCase();
+      let q;
+      if (mode === "pick") {
+        // Pick-Modus: jedes Tippen öffnet, Hex-Pubkey schließt
+        if (/^[0-9a-fA-F]{64}$/.test(v.trim())) { close(); return; }
+        const trimmed = v.trim().replace(/^@/, "");
+        if (!trimmed) { close(); return; }
+        q = trimmed.toLowerCase();
+        atIdx = -1;
+      } else {
+        const cursor = input.selectionStart;
+        const before = v.slice(0, cursor);
+        const m = before.match(/(^|[\s])@([^@\s\[\]]*)$/);
+        if (!m) { close(); return; }
+        atIdx = before.length - m[2].length - 1;
+        q = m[2].toLowerCase();
+      }
       matches = AT_TARGETS
         .filter(filter)
         .filter(t => t.name.toLowerCase().includes(q))
-        .slice(0, 8);
+        .slice(0, 12);
       if (!matches.length) { close(); return; }
       activeIdx = 0;
       render();
