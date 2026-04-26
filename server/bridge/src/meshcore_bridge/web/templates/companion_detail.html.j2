@@ -69,9 +69,23 @@
       </div>
       <div id="node-map" class="node-map"></div>
       <p style="margin-top:.5rem;font-size:.85em;color:var(--muted)">
-        Pins basieren auf Lat/Lon-Feldern aus empfangenen ADVERTs. Nodes
-        ohne Geo-Flag erscheinen nicht. Daten werden beim Laden geholt.
+        Pins entstehen aus Lat/Lon in ADVERTs ODER aus
+        REQ_TYPE_GET_TELEMETRY_DATA (LPP_GPS) — anfragebar pro Kontakt
+        unten. Knoten mit unset-Koordinaten (0,0) werden ignoriert.
       </p>
+    </div>
+
+    <div class="card">
+      <h3 style="margin-top:0">Kontakte — Telemetrie anfragen</h3>
+      <p style="font-size:.85em;color:var(--muted);margin-top:0">
+        REQ-Paket via LoRa an den Peer; Antwort kommt asynchron, Karte
+        aktualisiert sich nach 5 s Polling. Kostet Mesh-Bandbreite —
+        sparsam einsetzen.
+      </p>
+      <div id="telemetry-status" style="color:var(--muted);font-size:.85em;margin-bottom:.5rem"></div>
+      <div id="telemetry-list" class="telemetry-list">
+        <div class="thread-empty" style="color:var(--muted);padding:.5rem">lade …</div>
+      </div>
     </div>
   </section>
 
@@ -557,6 +571,7 @@
   // ---------- Map ----------
   let mapInstance = null;
   let mapMarkers = null;
+  let mapAutoTimer = null;
 
   async function ensureMap() {
     const status = document.getElementById("map-status");
@@ -578,6 +593,85 @@
       setTimeout(() => mapInstance.invalidateSize(), 50);
     }
     await refreshMap();
+    await refreshTelemetryList();
+  }
+
+  async function refreshTelemetryList() {
+    const box = document.getElementById("telemetry-list");
+    try {
+      const r = await fetch(`${API}/identities/${IDENTITY_ID}/contacts`, {credentials:"same-origin"});
+      if (!r.ok) { box.textContent = "Fehler: " + r.status; return; }
+      const list = await r.json();
+      if (!list.length) {
+        box.innerHTML = '<div class="thread-empty" style="color:var(--muted);padding:.5rem">Keine Kontakte.</div>';
+        return;
+      }
+      // Sortierung: ohne Geo zuerst, dann nach last_seen
+      list.sort((a, b) => {
+        const aHasGeo = a.lat != null && a.lon != null;
+        const bHasGeo = b.lat != null && b.lon != null;
+        if (aHasGeo !== bHasGeo) return aHasGeo ? 1 : -1;
+        return (b.last_seen_at || "").localeCompare(a.last_seen_at || "");
+      });
+      box.innerHTML = "";
+      for (const c of list) {
+        const row = document.createElement("div");
+        row.className = "telemetry-row";
+        const hasGeo = c.lat != null && c.lon != null;
+        const star = c.favorite ? '<span style="color:gold">★</span> ' : '';
+        const geo = hasGeo
+          ? `<span class="telemetry-geo">📍 ${c.lat.toFixed(4)}, ${c.lon.toFixed(4)}</span>`
+          : '<span class="telemetry-geo telemetry-geo-missing">— kein Geo</span>';
+        row.innerHTML = `
+          <div class="telemetry-name">${star}${escText(c.peer_name || c.peer_pubkey_hex.slice(0,8))}</div>
+          <div class="telemetry-meta"><code>${c.peer_pubkey_hex.slice(0,12)}…</code> · ${fmtTime(c.last_seen_at)}</div>
+          ${geo}
+        `;
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.textContent = "📡 Telemetrie";
+        btn.className = "telemetry-btn";
+        btn.addEventListener("click", () => requestTelemetry(c.peer_pubkey_hex, c.peer_name || c.peer_pubkey_hex.slice(0,8)));
+        row.appendChild(btn);
+        box.appendChild(row);
+      }
+    } catch (e) {
+      box.textContent = "Fehler: " + e;
+    }
+  }
+
+  async function requestTelemetry(peerHex, label) {
+    const status = document.getElementById("telemetry-status");
+    status.textContent = `Anfrage an ${label} gesendet — warte auf RESPONSE…`;
+    try {
+      const r = await fetch(
+        `${API}/identities/${IDENTITY_ID}/contacts/${peerHex}/telemetry`,
+        {method: "POST", credentials: "same-origin"},
+      );
+      if (!r.ok) {
+        status.textContent = `Fehler ${r.status} bei ${label}`;
+        return;
+      }
+    } catch (e) {
+      status.textContent = `Sendefehler: ${e}`;
+      return;
+    }
+    // 30 s lang alle 5 s Map + Liste reladen — die Antwort kann mehrere Hops dauern
+    let attempts = 0;
+    if (mapAutoTimer) clearInterval(mapAutoTimer);
+    mapAutoTimer = setInterval(async () => {
+      attempts++;
+      await refreshMap();
+      await refreshTelemetryList();
+      if (attempts >= 6) {
+        clearInterval(mapAutoTimer);
+        mapAutoTimer = null;
+        const cur = document.getElementById("telemetry-status").textContent;
+        if (cur.startsWith("Anfrage")) {
+          status.textContent = `${label}: keine Antwort innerhalb 30 s (Knoten offline oder kein Geo).`;
+        }
+      }
+    }, 5000);
   }
 
   async function refreshMap() {

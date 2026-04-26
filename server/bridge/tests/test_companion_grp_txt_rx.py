@@ -4,6 +4,7 @@ empfangene Channel-Posts und unterdrückt eigene Echo-Posts."""
 from __future__ import annotations
 
 import os
+from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
@@ -20,9 +21,13 @@ from meshcore_bridge.db import (
     User,
 )
 from meshcore_bridge.db.models import Base
-from meshcore_companion.crypto import LocalIdentity, derive_channel_secret
+from meshcore_companion.crypto import (
+    LocalIdentity,
+    derive_channel_secret,
+    encrypt_then_mac,
+)
 from meshcore_companion.node import CompanionNode, encode_advert_app_data
-from meshcore_companion.packet import PayloadType
+from meshcore_companion.packet import Packet, PayloadType, RouteType
 from meshcore_companion.service import CompanionService
 
 
@@ -438,6 +443,136 @@ async def test_inbound_advert_without_lat_lon_keeps_previous(service_env) -> Non
         ).scalar_one()
     assert row.last_lat == pytest.approx(51.0, abs=1e-5)
     assert row.last_lon == pytest.approx(7.0, abs=1e-5)
+
+
+@pytest.mark.asyncio
+async def test_telemetry_request_emits_req_packet(service_env) -> None:
+    """request_telemetry baut ein REQ und schickt es via inject."""
+    svc, _sessionmaker, user_id, sent = service_env
+    loaded = await svc.add_identity(
+        user_id=user_id, name="Antonia", scope="public"
+    )
+    sent.clear()  # advert von add_identity raus
+
+    peer = LocalIdentity.generate()
+    ok = await svc.request_telemetry(
+        identity_id=loaded.id, peer_pubkey=peer.pub_key
+    )
+    assert ok is True
+    assert len(sent) == 1
+    raw, scope = sent[0]
+    assert scope == "public"
+    pkt = Packet.decode(raw)
+    assert pkt.payload_type == PayloadType.REQ
+    # Body: dest_hash(1) + src_hash(1) + encrypted(>=18)
+    assert pkt.payload[:1] == peer.pub_key[:1]
+    assert pkt.payload[1:2] == loaded.pubkey[:1]
+
+
+@pytest.mark.asyncio
+async def test_telemetry_response_persists_geo(service_env) -> None:
+    """Externer Peer sendet RESPONSE mit LPP_GPS — Companion persistiert
+    last_lat/last_lon im zugehörigen CompanionContact."""
+    import struct
+
+    svc, sessionmaker, user_id, _sent = service_env
+    loaded = await svc.add_identity(
+        user_id=user_id, name="Antonia", scope="public"
+    )
+    # Peer als Contact eintragen (sonst kann response nicht decoded werden)
+    peer = LocalIdentity.generate()
+    async with sessionmaker() as db:
+        db.add(
+            CompanionContact(
+                identity_id=loaded.id,
+                peer_pubkey=peer.pub_key,
+                peer_name="Drusilla",
+                last_seen_at=datetime.now(UTC),
+            )
+        )
+        await db.commit()
+
+    # LPP-Buffer mit GPS
+    lat, lon, alt = 51.1907, 6.5722, 42.0
+    voltage = bytes([1, 116]) + struct.pack(">H", 385)
+    lat_i, lon_i, alt_i = int(lat * 10000), int(lon * 10000), int(alt * 100)
+    def b3(v: int) -> bytes:
+        u = v + (1 << 24) if v < 0 else v
+        return bytes([(u >> 16) & 0xFF, (u >> 8) & 0xFF, u & 0xFF])
+    gps = bytes([1, 136]) + b3(lat_i) + b3(lon_i) + b3(alt_i)
+    lpp_buf = voltage + gps
+
+    # Reply-Plaintext: tag(4) + lpp_buf
+    plaintext = struct.pack("<I", 0xDEADBEEF) + lpp_buf
+    secret = peer.calc_shared_secret(loaded.pubkey)
+    encrypted = encrypt_then_mac(secret, plaintext)
+    body = loaded.pubkey[:1] + peer.pub_key[:1] + encrypted
+    pkt = Packet(
+        route_type=RouteType.FLOOD,
+        payload_type=PayloadType.RESPONSE,
+        payload=body,
+    )
+    await svc.on_inbound_packet(raw=pkt.encode(), scope="public")
+
+    async with sessionmaker() as db:
+        contact = (
+            await db.execute(
+                select(CompanionContact).where(
+                    CompanionContact.identity_id == loaded.id,
+                    CompanionContact.peer_pubkey == peer.pub_key,
+                )
+            )
+        ).scalar_one()
+    assert contact.last_lat is not None
+    assert contact.last_lon is not None
+    assert abs(contact.last_lat - lat) < 0.001
+    assert abs(contact.last_lon - lon) < 0.001
+
+
+@pytest.mark.asyncio
+async def test_telemetry_response_zero_geo_ignored(service_env) -> None:
+    """Lat=0 Lon=0 ist Default-Sentinel — nicht persistieren."""
+    import struct
+
+    svc, sessionmaker, user_id, _sent = service_env
+    loaded = await svc.add_identity(
+        user_id=user_id, name="Antonia", scope="public"
+    )
+    peer = LocalIdentity.generate()
+    async with sessionmaker() as db:
+        db.add(
+            CompanionContact(
+                identity_id=loaded.id,
+                peer_pubkey=peer.pub_key,
+                peer_name="ZeroGeo",
+                last_seen_at=datetime.now(UTC),
+            )
+        )
+        await db.commit()
+
+    voltage = bytes([1, 116]) + struct.pack(">H", 385)
+    gps = bytes([1, 136]) + b"\x00" * 9
+    plaintext = struct.pack("<I", 1) + voltage + gps
+    secret = peer.calc_shared_secret(loaded.pubkey)
+    encrypted = encrypt_then_mac(secret, plaintext)
+    body = loaded.pubkey[:1] + peer.pub_key[:1] + encrypted
+    pkt = Packet(
+        route_type=RouteType.FLOOD,
+        payload_type=PayloadType.RESPONSE,
+        payload=body,
+    )
+    await svc.on_inbound_packet(raw=pkt.encode(), scope="public")
+
+    async with sessionmaker() as db:
+        contact = (
+            await db.execute(
+                select(CompanionContact).where(
+                    CompanionContact.identity_id == loaded.id
+                )
+            )
+        ).scalar_one()
+    assert contact.last_lat is None
+    assert contact.last_lon is None
 
 
 @pytest.mark.asyncio

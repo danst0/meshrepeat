@@ -493,6 +493,68 @@ async def list_dm_messages(
     return [_message_dict(m) for m in rows]
 
 
+@router.get("/identities/{identity_id}/contacts")
+async def list_identity_contacts(
+    identity_id: UUID,
+    user: User = Depends(current_user_required),
+    db: AsyncSession = Depends(get_db),
+) -> list[dict[str, Any]]:
+    """Alle Kontakte einer Identity, inkl. Geo-Status. Frontend filtert."""
+    if not await _user_owns_identity(db, user.id, identity_id):
+        raise HTTPException(status_code=404)
+    rows = list(
+        (
+            await db.execute(
+                select(CompanionContact)
+                .where(CompanionContact.identity_id == identity_id)
+                .order_by(
+                    desc(CompanionContact.favorite),
+                    desc(CompanionContact.last_seen_at),
+                )
+            )
+        ).scalars()
+    )
+    return [
+        {
+            "peer_pubkey_hex": c.peer_pubkey.hex(),
+            "peer_name": c.peer_name,
+            "favorite": c.favorite,
+            "last_seen_at": _ts_iso(c.last_seen_at),
+            "lat": c.last_lat,
+            "lon": c.last_lon,
+        }
+        for c in rows
+    ]
+
+
+@router.post("/identities/{identity_id}/contacts/{peer_pubkey_hex}/telemetry", response_model=None)
+async def request_contact_telemetry(
+    request: Request,
+    identity_id: UUID,
+    peer_pubkey_hex: str,
+    user: User = Depends(current_user_required),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Schickt einen REQ_TYPE_GET_TELEMETRY_DATA an den angegebenen Peer.
+    Antwort kommt asynchron zurück und füllt last_lat/last_lon, falls
+    der Peer LPP_GPS in der Telemetrie liefert."""
+    if not await _user_owns_identity(db, user.id, identity_id):
+        raise HTTPException(status_code=404)
+    try:
+        peer = bytes.fromhex(peer_pubkey_hex.strip())
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail="bad pubkey hex") from e
+    if len(peer) != 32:
+        raise HTTPException(status_code=400, detail="pubkey must be 32 bytes")
+    svc = _service(request)
+    if svc is None:
+        raise HTTPException(status_code=503, detail="companion-service not running")
+    ok = await svc.request_telemetry(identity_id=identity_id, peer_pubkey=peer)
+    if not ok:
+        raise HTTPException(status_code=409, detail="identity not loaded in service")
+    return {"ok": True, "ts": datetime.now(UTC).isoformat()}
+
+
 @router.get("/identities/{identity_id}/map")
 async def list_identity_map_pins(
     identity_id: UUID,

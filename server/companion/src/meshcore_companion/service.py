@@ -40,9 +40,11 @@ from meshcore_companion.node import (
     ADV_TYPE_CHAT,
     CompanionNode,
     IncomingChannelMessage,
+    IncomingResponse,
     IncomingTextMessage,
     encode_advert_app_data,
     parse_advert_app_data,
+    parse_lpp_gps,
     try_decrypt_grp_txt,
 )
 from meshcore_companion.packet import Packet, PayloadType
@@ -231,6 +233,33 @@ class CompanionService:
                 return False
             await db.delete(row)
             await db.commit()
+        return True
+
+    async def request_telemetry(
+        self,
+        *,
+        identity_id: UUID,
+        peer_pubkey: bytes,
+    ) -> bool:
+        """Schickt einen REQ_TYPE_GET_TELEMETRY_DATA an ``peer_pubkey``.
+
+        Fire-and-forget: die RESPONSE wird asynchron via
+        ``_handle_inbound_response`` verarbeitet (LPP-Buffer parsen, falls
+        ``LPP_GPS`` enthalten ist → ``CompanionContact.last_lat/last_lon``
+        aktualisieren).
+        """
+        loaded = self._by_id.get(identity_id)
+        if loaded is None:
+            return False
+        pkt, tag = loaded.node.make_telemetry_req(peer_pubkey=peer_pubkey)
+        _log.info(
+            "telemetry_req",
+            identity=loaded.name,
+            peer=peer_pubkey[:4].hex(),
+            tag=tag,
+        )
+        if self.inject is not None:
+            await self.inject(pkt, loaded.scope)
         return True
 
     async def send_dm(
@@ -426,6 +455,8 @@ class CompanionService:
             await self._handle_inbound_dm(pkt=pkt, scope=scope, raw=raw)
         elif pkt.payload_type == PayloadType.GRP_TXT:
             await self._handle_inbound_grp_txt(pkt=pkt, scope=scope, raw=raw)
+        elif pkt.payload_type == PayloadType.RESPONSE:
+            await self._handle_inbound_response(pkt=pkt, scope=scope)
 
     # ---------- internal ----------
 
@@ -570,6 +601,80 @@ class CompanionService:
                 )
             )
             await db.commit()
+
+    async def _handle_inbound_response(self, *, pkt: Packet, scope: str) -> None:
+        """RESPONSE auf einen unserer REQs. Wir kennen den Sender nicht
+        per src_hash eindeutig, daher iterieren wir über alle Identities
+        im scope und ihre bekannten Contacts. Erste erfolgreiche
+        Dekryption gewinnt; bei Telemetrie mit LPP_GPS → lat/lon
+        persistieren.
+        """
+        from meshcore_bridge.db import CompanionContact
+
+        for loaded in self._by_id.values():
+            if loaded.scope != scope:
+                continue
+            async with self.sessionmaker() as db:
+                contacts = list(
+                    (
+                        await db.execute(
+                            select(CompanionContact).where(
+                                CompanionContact.identity_id == loaded.id
+                            )
+                        )
+                    ).scalars()
+                )
+            cands = [Identity(c.peer_pubkey) for c in contacts]
+            decoded: IncomingResponse | None = loaded.node.try_decrypt_response(
+                packet=pkt, peer_candidates=cands
+            )
+            if decoded is None:
+                continue
+            # firmware MyMesh.cpp:212 + 264: reply_data wird komplett als
+            # plaintext verschlüsselt; reply_data[0..3] = sender_timestamp
+            # (= unser tag-Echo, schon als ``decoded.tag`` extrahiert),
+            # reply_data[4..] = LPP-Telemetrie-Buffer. Der ``decoded.reply_data``
+            # ist hier bereits ab Byte 4 = direkt der LPP-Buffer.
+            gps = parse_lpp_gps(decoded.reply_data)
+            if gps is None:
+                _log.info(
+                    "telemetry_response_no_gps",
+                    identity=loaded.name,
+                    peer=decoded.sender_pubkey[:4].hex(),
+                    tag=decoded.tag,
+                    reply_len=len(decoded.reply_data),
+                )
+                return
+            # Lat/Lon = (0,0) ist Default-Sentinel, nicht ozeanmittig schreiben
+            if gps.lat == 0.0 and gps.lon == 0.0:
+                _log.info(
+                    "telemetry_gps_zero",
+                    peer=decoded.sender_pubkey[:4].hex(),
+                )
+                return
+            async with self.sessionmaker() as db:
+                contact = (
+                    await db.execute(
+                        select(CompanionContact).where(
+                            CompanionContact.identity_id == loaded.id,
+                            CompanionContact.peer_pubkey == decoded.sender_pubkey,
+                        )
+                    )
+                ).scalar_one_or_none()
+                if contact is None:
+                    return
+                contact.last_lat = gps.lat
+                contact.last_lon = gps.lon
+                contact.last_seen_at = datetime.now(UTC)
+                await db.commit()
+            _log.info(
+                "telemetry_gps_persisted",
+                identity=loaded.name,
+                peer=decoded.sender_pubkey[:4].hex(),
+                lat=gps.lat,
+                lon=gps.lon,
+            )
+            return
 
     async def _persist_outgoing(
         self,

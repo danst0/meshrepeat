@@ -25,6 +25,7 @@ müssen 0 sein.
 
 from __future__ import annotations
 
+import os
 import struct
 import time
 from dataclasses import dataclass
@@ -119,6 +120,17 @@ class IncomingTextMessage:
     sender_pubkey: bytes  # nur best-effort: src_hash matched mehrere Pubkeys
     timestamp: int
     text: str
+
+
+@dataclass
+class IncomingResponse:
+    """Decodierte RESPONSE auf einen REQ. ``reply_data`` ist payload-
+    spezifisch (z.B. LPP-Buffer für GET_TELEMETRY_DATA, beginnend nach
+    den 4 ``tag``-Bytes — diese sind hier bereits als ``tag`` extrahiert)."""
+
+    sender_pubkey: bytes
+    tag: int
+    reply_data: bytes
 
 
 class CompanionNode:
@@ -217,6 +229,91 @@ class CompanionNode:
             )
         return None
 
+    # ---------- REQ / RESPONSE (Admin-Telemetrie etc.) ----------
+
+    def make_telemetry_req(
+        self,
+        *,
+        peer_pubkey: bytes,
+        tag: int | None = None,
+        req_type: int = 0x03,
+        perm_mask_inverse: int = 0x00,
+        timestamp: int | None = None,
+        flood: bool = True,
+    ) -> tuple[Packet, int]:
+        """REQ-Paket für ``REQ_TYPE_GET_TELEMETRY_DATA`` an ``peer_pubkey``.
+
+        Wire (firmware ``BaseChatMesh::sendRequest`` und
+        ``Mesh::createDatagram``): payload_type=REQ, body =
+        ``[dest_hash:1] [src_hash:1] [encrypt_then_mac(plaintext)]``,
+        plaintext = ``tag(4 LE) || req_type(1) || perm_mask_inverse(1) ||
+        reserved(3 zero) || random(4)`` = 13 Byte.
+
+        Firmware setzt ``perm_mask = ~payload[1]``, daher 0x00 hier
+        bedeutet "alle Permissions" beim Empfänger (gefiltert auf
+        ``PERM_ACL_GUEST`` falls Sender Guest ist).
+
+        Returns ``(packet, tag)`` — ``tag`` wird als Korrelations-ID in
+        der RESPONSE zurück-echot.
+        """
+        if tag is None:
+            tag = (timestamp if timestamp is not None else int(time.time())) & 0xFFFFFFFF
+        plaintext = (
+            int.to_bytes(tag, 4, "little", signed=False)
+            + bytes([req_type, perm_mask_inverse, 0x00, 0x00, 0x00])
+            + os.urandom(4)
+        )
+        secret = self.local.calc_shared_secret(peer_pubkey)
+        encrypted = encrypt_then_mac(secret, plaintext)
+        peer = Identity(peer_pubkey)
+        body = peer.hash_prefix() + self.pub_hash + encrypted
+        pkt = Packet(
+            route_type=RouteType.FLOOD if flood else RouteType.DIRECT,
+            payload_type=PayloadType.REQ,
+            payload=body,
+        )
+        return pkt, tag
+
+    def try_decrypt_response(
+        self,
+        *,
+        packet: Packet,
+        peer_candidates: list[Identity],
+    ) -> IncomingResponse | None:
+        """RESPONSE-Body decoden. Wire-Format identisch zu DM:
+        ``[dest_hash:1] [src_hash:1] [encrypt_then_mac(tag(4) || reply_data)]``.
+
+        Wir probieren alle Kandidaten mit passendem ``src_hash``-Prefix
+        und versuchen ``mac_then_decrypt``. Erste erfolgreiche Dekryption
+        gewinnt. Reply_data ab Byte 4 (nach tag).
+        """
+        if packet.payload_type != PayloadType.RESPONSE:
+            return None
+        body = packet.payload
+        if len(body) < 2 * PATH_HASH_SIZE + CIPHER_MAC_SIZE:
+            return None
+        dest_hash = body[:PATH_HASH_SIZE]
+        if dest_hash != self.pub_hash:
+            return None
+        src_hash = body[PATH_HASH_SIZE : 2 * PATH_HASH_SIZE]
+        encrypted = body[2 * PATH_HASH_SIZE :]
+        for peer in peer_candidates:
+            if peer.hash_prefix() != src_hash:
+                continue
+            secret = self.local.calc_shared_secret(peer.pub_key)
+            plain = mac_then_decrypt(secret, encrypted)
+            if plain is None:
+                continue
+            if len(plain) < _TIMESTAMP_LEN:
+                continue
+            tag = int.from_bytes(plain[:_TIMESTAMP_LEN], "little", signed=False)
+            return IncomingResponse(
+                sender_pubkey=peer.pub_key,
+                tag=tag,
+                reply_data=bytes(plain[4:]),
+            )
+        return None
+
     # ---------- CHANNEL (GRP_TXT) ----------
 
     def make_channel_message(
@@ -282,6 +379,73 @@ class IncomingChannelMessage:
     timestamp: int
     sender_name: str
     text: str
+
+
+@dataclass
+class TelemetryGPS:
+    """Aus LPP_GPS-Eintrag eines Telemetrie-Reply gewonnene Geokoordinaten."""
+
+    lat: float
+    lon: float
+    alt: float
+
+
+# LPP-Type-IDs → Datenlänge in Bytes (ohne chan+type-Prefix). Quelle:
+# firmware/lib/meshcore/src/helpers/sensors/LPPDataHelpers.h skipData().
+_LPP_DATA_SIZE: dict[int, int] = {
+    0: 1,    # DIGITAL_INPUT
+    1: 1,    # DIGITAL_OUTPUT
+    2: 2,    # ANALOG_INPUT
+    3: 2,    # ANALOG_OUTPUT
+    100: 4,  # GENERIC_SENSOR
+    101: 2,  # LUMINOSITY
+    102: 1,  # PRESENCE
+    103: 2,  # TEMPERATURE
+    104: 1,  # RELATIVE_HUMIDITY
+    113: 6,  # ACCELEROMETER
+    115: 2,  # BAROMETRIC_PRESSURE
+    116: 2,  # VOLTAGE
+    117: 2,  # CURRENT
+    118: 4,  # FREQUENCY
+    120: 1,  # PERCENTAGE
+    121: 2,  # ALTITUDE
+    125: 2,  # CONCENTRATION
+    128: 2,  # POWER
+    130: 4,  # DISTANCE
+    131: 4,  # ENERGY
+    132: 2,  # DIRECTION
+    133: 4,  # UNIXTIME
+    134: 6,  # GYROMETER
+    135: 3,  # COLOUR
+    136: 9,  # GPS (3 lat + 3 lon + 3 alt)
+    142: 1,  # SWITCH
+}
+_LPP_GPS_TYPE = 136
+
+
+def parse_lpp_gps(buf: bytes) -> TelemetryGPS | None:
+    """Findet den ersten ``LPP_GPS``-Eintrag in einem LPP-Telemetrie-Buffer.
+
+    Format pro Eintrag: ``[chan:1] [type:1] [data:N]``. GPS-Daten sind
+    9 Byte: lat(3 BE signed, /10000), lon(3 BE signed, /10000), alt(3 BE
+    signed, /100). Bei unbekanntem Type bricht der Parser ab — saubere
+    Telemetrie-Buffer enthalten nur known types.
+    """
+    i = 0
+    while i + 2 <= len(buf):
+        type_ = buf[i + 1]
+        if type_ == _LPP_GPS_TYPE:
+            if i + 2 + 9 > len(buf):
+                return None
+            lat = int.from_bytes(buf[i + 2 : i + 5], "big", signed=True) / 10000.0
+            lon = int.from_bytes(buf[i + 5 : i + 8], "big", signed=True) / 10000.0
+            alt = int.from_bytes(buf[i + 8 : i + 11], "big", signed=True) / 100.0
+            return TelemetryGPS(lat=lat, lon=lon, alt=alt)
+        size = _LPP_DATA_SIZE.get(type_)
+        if size is None:
+            return None
+        i += 2 + size
+    return None
 
 
 def try_decrypt_grp_txt(
