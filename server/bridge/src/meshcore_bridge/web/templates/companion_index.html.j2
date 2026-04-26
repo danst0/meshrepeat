@@ -54,23 +54,37 @@
 
   <div class="card">
     <h2>Kontakte (aus beobachteten Adverts)</h2>
-    {% set total_contacts = (contacts_by_identity.values() | map('length') | sum) if contacts_by_identity else 0 %}
-    {% if total_contacts %}
+    {% if visible_contacts %}
       <table>
-        <thead><tr><th>Identity</th><th>Peer</th><th>Pubkey</th><th>Last seen</th></tr></thead>
+        <thead><tr><th>Fav</th><th>Identity</th><th>Peer</th><th>Pubkey</th><th>Last seen</th></tr></thead>
         <tbody>
-        {% for ident_id, contacts in contacts_by_identity.items() %}
-          {% for c in contacts %}
-            <tr>
-              <td>{{ identity_names.get(ident_id, ident_id[:8]) }}</td>
-              <td>{{ c.peer_name or '–' }}</td>
-              <td><code>{{ c.peer_pubkey_hex[:16] }}…</code></td>
-              <td>{{ c.last_seen_at or '–' }}</td>
-            </tr>
-          {% endfor %}
+        {% for c in visible_contacts %}
+          <tr>
+            <td>
+              <form method="post" action="/companion/contacts/{{ c.id }}/favorite"
+                    style="display:inline">
+                <button type="submit"
+                        title="{{ 'Favorit entfernen' if c.favorite else 'als Favorit markieren' }}"
+                        style="margin:0;padding:.1rem .4rem;background:transparent;
+                               color:{{ 'gold' if c.favorite else 'var(--muted)' }};
+                               border:none;font-size:1.1em;cursor:pointer">{{ '★' if c.favorite else '☆' }}</button>
+              </form>
+            </td>
+            <td>{{ identity_names.get(c.identity_id, c.identity_id[:8]) }}</td>
+            <td>{{ c.peer_name or '–' }}</td>
+            <td><code>{{ c.peer_pubkey_hex[:16] }}…</code></td>
+            <td>{{ c.last_seen_at or '–' }}</td>
+          </tr>
         {% endfor %}
         </tbody>
       </table>
+      {% if hidden_contact_count %}
+        <p style="font-size:.85em;color:var(--muted)">
+          … {{ hidden_contact_count }} weitere nicht-favorisierte Kontakte
+          ausgeblendet. Markiere die wichtigsten als Favorit, um sie
+          dauerhaft zu sehen.
+        </p>
+      {% endif %}
     {% else %}
       <p>Noch keine Kontakte. Wird automatisch befüllt, sobald andere
          Mesh-Teilnehmer im gleichen Scope ihre Adverts senden.</p>
@@ -98,7 +112,7 @@
         {% for i in identities %}
           <datalist id="contacts-{{ i.id }}">
             {% for c in contacts_by_identity.get(i.id|string, []) %}
-              <option value="{{ c.peer_pubkey_hex }}">{{ c.peer_name or c.peer_pubkey_hex[:8] }}</option>
+              <option value="{{ c.peer_pubkey_hex }}">{{ '★ ' if c.favorite else '' }}{{ c.peer_name or c.peer_pubkey_hex[:8] }}</option>
             {% endfor %}
           </datalist>
         {% endfor %}

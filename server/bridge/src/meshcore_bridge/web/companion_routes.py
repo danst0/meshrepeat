@@ -341,7 +341,10 @@ async def companion_index(
                 await db.execute(
                     select(CompanionContact)
                     .where(CompanionContact.identity_id.in_(own_ids))
-                    .order_by(desc(CompanionContact.last_seen_at))
+                    .order_by(
+                        desc(CompanionContact.favorite),
+                        desc(CompanionContact.last_seen_at),
+                    )
                 )
             ).scalars()
         )
@@ -355,15 +358,36 @@ async def companion_index(
             ).scalars()
         )
 
+    # Datalist für DM-Picker: alle Kontakte pro Identity, Favoriten zuerst
     contacts_by_identity: dict[str, list[dict[str, Any]]] = {}
     for c in contacts:
         contacts_by_identity.setdefault(str(c.identity_id), []).append(
             {
+                "id": str(c.id),
                 "peer_pubkey_hex": c.peer_pubkey.hex(),
                 "peer_name": c.peer_name,
                 "last_seen_at": c.last_seen_at.isoformat() if c.last_seen_at else None,
+                "favorite": c.favorite,
             }
         )
+
+    # Tabellen-Anzeige: Favoriten immer + die letzten 5 Nicht-Favoriten
+    NON_FAVORITE_LIMIT = 5
+    favorite_contacts = [c for c in contacts if c.favorite]
+    non_favorite_contacts = [c for c in contacts if not c.favorite][:NON_FAVORITE_LIMIT]
+    visible_contacts = favorite_contacts + non_favorite_contacts
+    visible_rows = [
+        {
+            "id": str(c.id),
+            "identity_id": str(c.identity_id),
+            "peer_pubkey_hex": c.peer_pubkey.hex(),
+            "peer_name": c.peer_name,
+            "last_seen_at": c.last_seen_at.isoformat() if c.last_seen_at else None,
+            "favorite": c.favorite,
+        }
+        for c in visible_contacts
+    ]
+    hidden_count = max(0, len(contacts) - len(visible_rows))
     channels_by_identity: dict[str, list[dict[str, Any]]] = {}
     identity_names: dict[str, str] = {str(i.id): i.name for i in identities}
     for ch in channels:
@@ -382,6 +406,8 @@ async def companion_index(
             "user": user,
             "identities": identities,
             "contacts_by_identity": contacts_by_identity,
+            "visible_contacts": visible_rows,
+            "hidden_contact_count": hidden_count,
             "channels_by_identity": channels_by_identity,
             "channels": channels,
             "identity_names": identity_names,
@@ -402,6 +428,23 @@ async def companion_identity_create(
         raise HTTPException(status_code=503)
     actual_scope = f"pool:{uuid4()}" if scope == "pool:new" else scope
     await svc.add_identity(user_id=user.id, name=name.strip(), scope=actual_scope)
+    return RedirectResponse(url="/companion/", status_code=303)
+
+
+@ui_router.post("/contacts/{contact_id}/favorite", response_model=None)
+async def companion_contact_toggle_favorite(
+    contact_id: UUID,
+    user: User = Depends(current_user_required),
+    db: AsyncSession = Depends(get_db),
+) -> RedirectResponse:
+    contact = await db.get(CompanionContact, contact_id)
+    if contact is None:
+        raise HTTPException(status_code=404)
+    ident = await db.get(CompanionIdentity, contact.identity_id)
+    if ident is None or ident.user_id != user.id:
+        raise HTTPException(status_code=404)
+    contact.favorite = not contact.favorite
+    await db.commit()
     return RedirectResponse(url="/companion/", status_code=303)
 
 

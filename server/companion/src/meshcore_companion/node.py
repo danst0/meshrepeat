@@ -25,6 +25,7 @@ müssen 0 sein.
 
 from __future__ import annotations
 
+import struct
 import time
 from dataclasses import dataclass
 
@@ -38,6 +39,76 @@ from meshcore_companion.crypto import (
 from meshcore_companion.packet import Advert, Packet, PayloadType, RouteType
 
 _TIMESTAMP_LEN = 4  # le-uint32, prepended to encrypted DM body
+
+# AdvertDataHelpers (firmware/lib/meshcore/src/helpers/AdvertDataHelpers.h):
+# app_data := flags(1) [lat(4) lon(4)]? [feat1(2)]? [feat2(2)]? [name…]?
+ADV_TYPE_NONE = 0
+ADV_TYPE_CHAT = 1
+ADV_TYPE_REPEATER = 2
+ADV_TYPE_ROOM = 3
+ADV_TYPE_SENSOR = 4
+ADV_LATLON_MASK = 0x10
+ADV_FEAT1_MASK = 0x20
+ADV_FEAT2_MASK = 0x40
+ADV_NAME_MASK = 0x80
+
+
+@dataclass
+class ParsedAdvertData:
+    adv_type: int
+    name: str
+    lat: float | None
+    lon: float | None
+
+
+def encode_advert_app_data(
+    *,
+    name: str,
+    adv_type: int = ADV_TYPE_CHAT,
+    lat: float | None = None,
+    lon: float | None = None,
+) -> bytes:
+    """Baut das ``app_data``-Feld eines ADVERT-Pakets im MeshCore-Format
+    (Flags-Byte, optional Lat/Lon, dann Name).
+    """
+    flags = adv_type & 0x0F
+    body = b""
+    if lat is not None and lon is not None:
+        flags |= ADV_LATLON_MASK
+        body += struct.pack("<ii", int(lat * 1_000_000), int(lon * 1_000_000))
+    name_bytes = name.encode("utf-8")
+    if name_bytes:
+        flags |= ADV_NAME_MASK
+        body += name_bytes
+    return bytes([flags]) + body
+
+
+def parse_advert_app_data(app_data: bytes) -> ParsedAdvertData:
+    """Liest ein ADVERT-``app_data``-Feld zurück. Tolerant gegen
+    Längen-Mismatches (gibt dann leeren Namen zurück).
+    """
+    if not app_data:
+        return ParsedAdvertData(adv_type=0, name="", lat=None, lon=None)
+    flags = app_data[0]
+    adv_type = flags & 0x0F
+    i = 1
+    lat: float | None = None
+    lon: float | None = None
+    if flags & ADV_LATLON_MASK:
+        if len(app_data) < i + 8:
+            return ParsedAdvertData(adv_type=adv_type, name="", lat=None, lon=None)
+        lat_i, lon_i = struct.unpack("<ii", app_data[i : i + 8])
+        lat = lat_i / 1_000_000.0
+        lon = lon_i / 1_000_000.0
+        i += 8
+    if flags & ADV_FEAT1_MASK:
+        i += 2
+    if flags & ADV_FEAT2_MASK:
+        i += 2
+    name = ""
+    if flags & ADV_NAME_MASK and len(app_data) > i:
+        name = app_data[i:].rstrip(b"\x00").decode("utf-8", errors="replace").strip()
+    return ParsedAdvertData(adv_type=adv_type, name=name, lat=lat, lon=lon)
 
 
 @dataclass

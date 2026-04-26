@@ -35,7 +35,13 @@ from meshcore_companion.crypto import (
     LocalIdentity,
     derive_channel_secret,
 )
-from meshcore_companion.node import CompanionNode, IncomingTextMessage
+from meshcore_companion.node import (
+    ADV_TYPE_CHAT,
+    CompanionNode,
+    IncomingTextMessage,
+    encode_advert_app_data,
+    parse_advert_app_data,
+)
 from meshcore_companion.packet import Packet, PayloadType
 from meshcore_companion.storage import decrypt_seed, encrypt_seed
 
@@ -46,6 +52,10 @@ _log = structlog.get_logger("companion")
 
 PacketInjector = Callable[[Packet, str], Awaitable[None]]
 """Callable(packet, scope) — fügt ein Paket in den Mesh-Scope ein."""
+
+PUBLIC_CHANNEL_NAME = "public"
+PUBLIC_CHANNEL_PASSWORD = "public"  # noqa: S105 — kein Geheimnis, MeshCore-Konvention
+"""Default-Channel, der für jede Identity automatisch angelegt wird."""
 
 
 @dataclass
@@ -98,6 +108,10 @@ class CompanionService:
                 self._by_id[row.id] = loaded
                 self._by_pubkey[loaded.pubkey] = loaded
 
+        # Default-Public-Channel pro Identity sicherstellen
+        for identity_id in list(self._by_id.keys()):
+            await self._ensure_public_channel(identity_id)
+
         self._stop.clear()
         self._advert_task = asyncio.create_task(self._advert_loop())
 
@@ -149,6 +163,8 @@ class CompanionService:
         )
         self._by_id[row_id] = loaded
         self._by_pubkey[loaded.pubkey] = loaded
+        # Default-Public-Channel mit anlegen
+        await self._ensure_public_channel(row_id)
         # Erst-Advert sofort
         await self._send_advert(loaded)
         return loaded
@@ -190,15 +206,12 @@ class CompanionService:
         name: str,
         password: str,
     ) -> CompanionChannel | None:
-        """Legt einen Channel für die Identity an. Secret wird aus
+        """Legt einen Channel für die Identity an oder gibt den
+        existierenden zurück. Secret wird aus
         ``derive_channel_secret(name, password)`` abgeleitet — gleiches
         Schema wie einige MeshCore-Apps; ohne offizielle KDF-Spec.
         """
         from meshcore_bridge.db import CompanionChannel, CompanionIdentity
-
-        if self._by_id.get(identity_id) is None:
-            # Identity muss in-service geladen sein, damit Send funktioniert.
-            return None
 
         secret = derive_channel_secret(name, password)
         chash = hashlib.sha256(secret).digest()[:PATH_HASH_SIZE]
@@ -206,6 +219,16 @@ class CompanionService:
             ident = await db.get(CompanionIdentity, identity_id)
             if ident is None:
                 return None
+            existing = (
+                await db.execute(
+                    select(CompanionChannel).where(
+                        CompanionChannel.identity_id == identity_id,
+                        CompanionChannel.name == name,
+                    )
+                )
+            ).scalar_one_or_none()
+            if existing is not None:
+                return existing
             row = CompanionChannel(
                 identity_id=identity_id,
                 name=name,
@@ -216,6 +239,18 @@ class CompanionService:
             await db.commit()
             await db.refresh(row)
             return row
+
+    async def _ensure_public_channel(self, identity_id: UUID) -> None:
+        """Idempotent: legt den Standard-Public-Channel an, falls noch
+        nicht vorhanden."""
+        try:
+            await self.add_channel(
+                identity_id=identity_id,
+                name=PUBLIC_CHANNEL_NAME,
+                password=PUBLIC_CHANNEL_PASSWORD,
+            )
+        except Exception:
+            _log.exception("ensure_public_channel_failed", identity_id=str(identity_id))
 
     async def send_channel(
         self,
@@ -299,10 +334,8 @@ class CompanionService:
                 continue
             if advert.pubkey == loaded.pubkey:
                 continue
-            try:
-                name = advert.app_data.decode("utf-8", errors="ignore").strip()
-            except Exception:
-                name = ""
+            parsed = parse_advert_app_data(advert.app_data)
+            name = parsed.name
             async with self.sessionmaker() as db:
                 contact = (
                     await db.execute(
@@ -420,9 +453,13 @@ class CompanionService:
         if self.inject is None:
             _log.warning("send_advert_no_inject", identity=loaded.name)
             return
+        # MeshCore-Advert-Format: flags(1) [lat lon]? name…
+        app_data = encode_advert_app_data(
+            name=loaded.name[:32], adv_type=ADV_TYPE_CHAT
+        )
         pkt = loaded.node.make_advert(
             timestamp=int(time.time()),
-            app_data=loaded.name.encode("utf-8")[:32],
+            app_data=app_data,
         )
         raw = pkt.encode()
         _log.info(

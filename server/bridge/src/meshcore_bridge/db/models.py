@@ -11,6 +11,7 @@ from uuid import UUID, uuid4
 
 from sqlalchemy import (
     BLOB,
+    Boolean,
     CheckConstraint,
     DateTime,
     ForeignKey,
@@ -197,6 +198,9 @@ class CompanionContact(Base):
     peer_pubkey: Mapped[bytes] = mapped_column(BLOB, nullable=False)
     peer_name: Mapped[str | None] = mapped_column(String(64))
     last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    favorite: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="0", default=False
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
