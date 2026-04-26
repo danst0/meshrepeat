@@ -191,6 +191,7 @@ async def bridge_socket(ws: WebSocket) -> None:
                     scope=conn.scope,
                     bytes=len(frame.raw),
                     payload_type=_payload_type,
+                    head=frame.raw[:8].hex() if frame.raw else "",
                 )
                 await routing.on_packet(source=conn, packet=frame)
                 companion = getattr(ws.app.state, "companion_service", None)
