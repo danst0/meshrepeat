@@ -17,6 +17,7 @@ Verantwortlichkeiten:
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import time
 from collections.abc import Awaitable, Callable
@@ -56,8 +57,24 @@ PacketInjector = Callable[[Packet, str], Awaitable[None]]
 """Callable(packet, scope) — fügt ein Paket in den Mesh-Scope ein."""
 
 PUBLIC_CHANNEL_NAME = "public"
-PUBLIC_CHANNEL_PASSWORD = "public"  # noqa: S105 — kein Geheimnis, MeshCore-Konvention
+# Offizieller MeshCore-Public-Channel-PSK (base64, 16 Byte real). Quelle:
+# firmware/lib/meshcore/examples/companion_radio/MyMesh.cpp PUBLIC_GROUP_PSK.
+# Wir padden auf 32 Byte (letzte 16 Byte = 0). HMAC-SHA256 ist durch
+# Block-Padding-Eigenschaft funktional identisch zu HMAC mit 16-Byte-Key,
+# AES-128 nutzt nur die ersten 16 Byte.
+PUBLIC_CHANNEL_PSK_B64 = "izOH6cXN6mrJ5e26oRXNcg=="
 """Default-Channel, der für jede Identity automatisch angelegt wird."""
+
+
+def _public_channel_secret_and_hash() -> tuple[bytes, bytes]:
+    """Liefert (secret_32, channel_hash_1) für den MeshCore-Public-Channel.
+    channel_hash wird über die *echten* PSK-Bytes berechnet (Firmware-
+    Konvention), nicht über das mit Nullen gepaddete 32-Byte-Secret.
+    """
+    real = base64.b64decode(PUBLIC_CHANNEL_PSK_B64)
+    secret = real.ljust(32, b"\x00")
+    chash = hashlib.sha256(real).digest()[:PATH_HASH_SIZE]
+    return secret, chash
 
 
 @dataclass
@@ -271,14 +288,41 @@ class CompanionService:
             return row
 
     async def _ensure_public_channel(self, identity_id: UUID) -> None:
-        """Idempotent: legt den Standard-Public-Channel an, falls noch
-        nicht vorhanden."""
+        """Idempotent: legt den MeshCore-Public-Channel an oder migriert
+        ein bestehendes ``public`` mit falschem (legacy) Secret auf den
+        offiziellen PSK."""
+        from meshcore_bridge.db import CompanionChannel
+
+        secret, chash = _public_channel_secret_and_hash()
         try:
-            await self.add_channel(
-                identity_id=identity_id,
-                name=PUBLIC_CHANNEL_NAME,
-                password=PUBLIC_CHANNEL_PASSWORD,
-            )
+            async with self.sessionmaker() as db:
+                existing = (
+                    await db.execute(
+                        select(CompanionChannel).where(
+                            CompanionChannel.identity_id == identity_id,
+                            CompanionChannel.name == PUBLIC_CHANNEL_NAME,
+                        )
+                    )
+                ).scalar_one_or_none()
+                if existing is None:
+                    db.add(
+                        CompanionChannel(
+                            identity_id=identity_id,
+                            name=PUBLIC_CHANNEL_NAME,
+                            secret=secret,
+                            channel_hash=chash,
+                        )
+                    )
+                    await db.commit()
+                    return
+                if existing.secret != secret or existing.channel_hash != chash:
+                    _log.info(
+                        "public_channel_secret_migrated",
+                        identity_id=str(identity_id),
+                    )
+                    existing.secret = secret
+                    existing.channel_hash = chash
+                    await db.commit()
         except Exception:
             _log.exception("ensure_public_channel_failed", identity_id=str(identity_id))
 

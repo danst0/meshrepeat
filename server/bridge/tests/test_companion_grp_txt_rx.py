@@ -205,6 +205,80 @@ async def test_rename_identity_updates_db_and_memory(service_env) -> None:
 
 
 @pytest.mark.asyncio
+async def test_public_channel_uses_meshcore_psk(service_env) -> None:
+    """Regression: Public-Channel muss den echten MeshCore-PSK haben,
+    nicht derive_channel_secret('public','public'), sonst können wir
+    den globalen Public-Channel-Verkehr nicht dekodieren."""
+    import base64
+    import hashlib
+
+    from sqlalchemy import select
+
+    svc, sessionmaker, user_id, _sent = service_env
+    loaded = await svc.add_identity(
+        user_id=user_id, name="Antonia", scope="public"
+    )
+    expected_real = base64.b64decode("izOH6cXN6mrJ5e26oRXNcg==")
+    expected_secret = expected_real.ljust(32, b"\x00")
+    expected_hash = hashlib.sha256(expected_real).digest()[:1]
+
+    async with sessionmaker() as db:
+        ch = (
+            await db.execute(
+                select(CompanionChannel).where(
+                    CompanionChannel.identity_id == loaded.id,
+                    CompanionChannel.name == "public",
+                )
+            )
+        ).scalar_one()
+    assert ch.secret == expected_secret
+    assert ch.channel_hash == expected_hash
+
+
+@pytest.mark.asyncio
+async def test_public_channel_inbound_with_real_psk(service_env) -> None:
+    """Ein externer Knoten mit dem echten MeshCore-Public-PSK postet —
+    unser Companion muss das dekodieren und persistieren."""
+    import base64
+
+    from sqlalchemy import select
+
+    svc, sessionmaker, user_id, _sent = service_env
+    loaded = await svc.add_identity(
+        user_id=user_id, name="Antonia", scope="public"
+    )
+
+    real = base64.b64decode("izOH6cXN6mrJ5e26oRXNcg==")
+    secret_padded = real.ljust(32, b"\x00")
+    chash = __import__("hashlib").sha256(real).digest()[:1]
+
+    sender = CompanionNode(LocalIdentity.generate())
+    pkt = sender.make_channel_message(
+        channel_secret=secret_padded,
+        channel_hash=chash,
+        text="hello public",
+        sender_name="external",
+        timestamp=4242,
+    )
+    await svc.on_inbound_packet(raw=pkt.encode(), scope="public")
+
+    async with sessionmaker() as db:
+        rows = list(
+            (
+                await db.execute(
+                    select(CompanionMessage).where(
+                        CompanionMessage.identity_id == loaded.id,
+                        CompanionMessage.channel_name == "public",
+                    )
+                )
+            ).scalars()
+        )
+    assert len(rows) == 1
+    assert rows[0].text == "hello public"
+    assert rows[0].peer_name == "external"
+
+
+@pytest.mark.asyncio
 async def test_delete_channel(service_env) -> None:
     svc, sessionmaker, user_id, _sent = service_env
     loaded = await svc.add_identity(
