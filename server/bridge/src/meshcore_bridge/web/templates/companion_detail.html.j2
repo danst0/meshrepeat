@@ -492,10 +492,28 @@
   //   trigger ist "@" mit Whitespace davor.
   // mode = "pick"   → onPick(target) callbacken, Input leeren (DM-Picker);
   //   trigger ist jedes Tippen (kein @ nötig). Hex-Pubkey schließt Popup.
+  // placement = "above" (default, Compose-Feld) | "below" (Sidebar-Picker)
+
+  // Normalisiert Name + Query: lowercase, häufige Tippfehler-Pärchen
+  // (k↔c, z↔c, y↔i) auf einen Buchstaben mappen, damit "oktavia" auch
+  // "Octavia" findet.
+  function normalizeForSearch(s) {
+    return (s || "").toLowerCase()
+      .replace(/[äà-å]/g, "a")
+      .replace(/[ëè-ê]/g, "e")
+      .replace(/[ïì-î]/g, "i")
+      .replace(/[öò-ô]/g, "o")
+      .replace(/[üù-û]/g, "u")
+      .replace(/ß/g, "ss")
+      .replace(/[ck]/g, "k")  // c und k gleichwertig
+      .replace(/y/g, "i");    // y meistens als i gehört
+  }
+
   function attachAtComplete(input, popup, opts={}) {
     const mode = opts.mode || "insert";
     const onPick = opts.onPick || (() => {});
     const filter = opts.filter || ((t) => true);
+    if (opts.placement === "below") popup.classList.add("at-popup-below");
     let activeIdx = 0;
     let matches = [];
     let atIdx = -1;
@@ -550,7 +568,7 @@
         if (/^[0-9a-fA-F]{64}$/.test(v.trim())) { close(); return; }
         const trimmed = v.trim().replace(/^@/, "");
         if (!trimmed) { close(); return; }
-        q = trimmed.toLowerCase();
+        q = trimmed;
         atIdx = -1;
       } else {
         const cursor = input.selectionStart;
@@ -558,14 +576,21 @@
         const m = before.match(/(^|[\s])@([^@\s\[\]]*)$/);
         if (!m) { close(); return; }
         atIdx = before.length - m[2].length - 1;
-        q = m[2].toLowerCase();
+        q = m[2];
       }
+      const qNorm = normalizeForSearch(q);
       matches = AT_TARGETS
         .filter(filter)
-        .filter(t => t.name.toLowerCase().includes(q))
-        .slice(0, 12);
-      if (!matches.length) { close(); return; }
+        .filter(t => normalizeForSearch(t.name).includes(qNorm))
+        .slice(0, 20);
       activeIdx = 0;
+      if (!matches.length) {
+        // 0-Treffer: Hinweis-Item rendern statt zu schließen, damit der
+        // User merkt dass der Picker aktiv ist.
+        popup.innerHTML = '<div class="at-empty">kein Treffer</div>';
+        popup.hidden = false;
+        return;
+      }
       render();
     }
 
@@ -601,6 +626,7 @@
     document.getElementById("dm-new-popup"),
     {
       mode: "pick",
+      placement: "below",
       filter: (t) => !!t.pubkey_hex,
       onPick: (t) => selectDm(t.pubkey_hex.toLowerCase(), t.name),
     },

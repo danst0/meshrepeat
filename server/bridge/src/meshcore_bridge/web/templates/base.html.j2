@@ -239,13 +239,25 @@
       bottom: calc(100% + .25rem);
       left: 0;
       right: 0;
-      max-height: 220px;
+      max-height: 240px;
       overflow-y: auto;
       background: var(--card);
       border: 1px solid var(--accent);
       border-radius: 4px;
       box-shadow: 0 4px 12px rgba(0,0,0,.4);
       z-index: 50;
+    }
+    /* Variante für Sidebar-Picker: Popup UNTER dem Input, weil oberhalb
+       die Card-Kante clipped */
+    .at-popup-below {
+      bottom: auto;
+      top: calc(100% + .25rem);
+    }
+    .at-empty {
+      padding: .5rem;
+      color: var(--muted);
+      font-size: .85rem;
+      font-style: italic;
     }
     .at-item {
       display: flex;
