@@ -17,6 +17,17 @@
       --card: #161e2c;
     }
     * { box-sizing: border-box; }
+    /* Dark scrollbars (Firefox + WebKit) */
+    html { scrollbar-color: var(--border) var(--bg); scrollbar-width: thin; }
+    *::-webkit-scrollbar { width: 10px; height: 10px; }
+    *::-webkit-scrollbar-track { background: var(--bg); }
+    *::-webkit-scrollbar-thumb {
+      background: var(--border);
+      border-radius: 5px;
+      border: 2px solid var(--bg);
+    }
+    *::-webkit-scrollbar-thumb:hover { background: var(--muted); }
+    *::-webkit-scrollbar-corner { background: var(--bg); }
     body {
       margin: 0;
       font-family: ui-monospace, "Cascadia Code", Menlo, Consolas, monospace;
