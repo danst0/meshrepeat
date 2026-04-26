@@ -109,6 +109,48 @@ async def test_inbound_grp_txt_persists_message(service_env) -> None:
 
 
 @pytest.mark.asyncio
+async def test_inbound_grp_txt_dedups_same_raw(service_env) -> None:
+    """Bei mehreren verbundenen Repeatern liefert jeder denselben LoRa-
+    Frame einmal. Wir dürfen ihn nur einmal in der DB persistieren."""
+    svc, sessionmaker, user_id, _sent = service_env
+    loaded = await svc.add_identity(
+        user_id=user_id, name="Antonia", scope="public"
+    )
+    ch = await svc.add_channel(
+        identity_id=loaded.id, name="tech", password="hunter2"
+    )
+    assert ch is not None
+
+    secret = derive_channel_secret("tech", "hunter2")
+    sender = CompanionNode(LocalIdentity.generate())
+    pkt = sender.make_channel_message(
+        channel_secret=secret,
+        channel_hash=ch.channel_hash,
+        text="dup",
+        sender_name="alice",
+        timestamp=5000,
+    )
+    raw = pkt.encode()
+
+    # 3x dasselbe raw — simuliert 3 Repeater-Connections
+    for _ in range(3):
+        await svc.on_inbound_packet(raw=raw, scope="public")
+
+    async with sessionmaker() as db:
+        rows = list(
+            (
+                await db.execute(
+                    select(CompanionMessage).where(
+                        CompanionMessage.identity_id == loaded.id,
+                        CompanionMessage.channel_name == "tech",
+                    )
+                )
+            ).scalars()
+        )
+    assert len(rows) == 1
+
+
+@pytest.mark.asyncio
 async def test_inbound_grp_txt_suppresses_own_echo(service_env) -> None:
     svc, sessionmaker, user_id, _sent = service_env
 

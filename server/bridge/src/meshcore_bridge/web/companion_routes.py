@@ -37,14 +37,26 @@ def _service(request: Request):  # type: ignore[no-untyped-def]
     return getattr(request.app.state, "companion_service", None)
 
 
+def _ts_iso(dt: datetime | None) -> str | None:
+    """ISO-8601 mit garantiertem TZ-Suffix. SQLite-server_default speichert
+    in UTC, gibt aber naive datetime zurück → ohne Suffix interpretiert
+    der Browser als lokal und zeigt 2 h zu früh (CEST). Wir ergänzen UTC
+    falls naive."""
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    return dt.isoformat()
+
+
 def _identity_dict(row: CompanionIdentity) -> dict[str, Any]:
     return {
         "id": str(row.id),
         "name": row.name,
         "scope": row.scope,
         "pubkey_hex": row.pubkey.hex(),
-        "created_at": row.created_at.isoformat() if row.created_at else None,
-        "archived_at": row.archived_at.isoformat() if row.archived_at else None,
+        "created_at": _ts_iso(row.created_at),
+        "archived_at": _ts_iso(row.archived_at),
     }
 
 
@@ -163,7 +175,7 @@ async def list_messages(
             "peer_name": m.peer_name,
             "channel_name": m.channel_name,
             "text": m.text,
-            "ts": m.ts.isoformat() if m.ts else None,
+            "ts": _ts_iso(m.ts),
         }
         for m in rows
     ]
@@ -220,7 +232,7 @@ async def list_contacts(
             "identity_id": str(c.identity_id),
             "peer_pubkey": c.peer_pubkey.hex(),
             "peer_name": c.peer_name,
-            "last_seen_at": c.last_seen_at.isoformat() if c.last_seen_at else None,
+            "last_seen_at": _ts_iso(c.last_seen_at),
         }
         for c in rows
     ]
@@ -235,7 +247,7 @@ def _channel_dict(c: CompanionChannel) -> dict[str, Any]:
         "identity_id": str(c.identity_id),
         "name": c.name,
         "channel_hash_hex": c.channel_hash.hex(),
-        "created_at": c.created_at.isoformat() if c.created_at else None,
+        "created_at": _ts_iso(c.created_at),
     }
 
 
@@ -326,7 +338,7 @@ def _message_dict(m: CompanionMessage) -> dict[str, Any]:
         "peer_name": m.peer_name,
         "channel_name": m.channel_name,
         "text": m.text,
-        "ts": m.ts.isoformat() if m.ts else None,
+        "ts": _ts_iso(m.ts),
     }
 
 
@@ -381,7 +393,7 @@ async def list_identity_threads(
                 "peer_pubkey_hex": m.peer_pubkey.hex(),
                 "peer_name": (contact.peer_name if contact else None) or m.peer_name,
                 "favorite": bool(contact and contact.favorite),
-                "last_ts": m.ts.isoformat() if m.ts else None,
+                "last_ts": _ts_iso(m.ts),
                 "last_text": m.text,
                 "last_direction": m.direction,
             }
@@ -403,7 +415,7 @@ async def list_identity_threads(
             "peer_pubkey_hex": c.peer_pubkey.hex(),
             "peer_name": c.peer_name,
             "favorite": True,
-            "last_ts": c.last_seen_at.isoformat() if c.last_seen_at else None,
+            "last_ts": _ts_iso(c.last_seen_at),
             "last_text": None,
             "last_direction": None,
         }
@@ -420,7 +432,7 @@ async def list_identity_threads(
                 "id": str(ch.id),
                 "name": ch.name,
                 "channel_hash_hex": ch.channel_hash.hex(),
-                "last_ts": last.ts.isoformat() if last and last.ts else None,
+                "last_ts": _ts_iso(last.ts) if last else None,
                 "last_text": last.text if last else None,
                 "last_direction": last.direction if last else None,
             }

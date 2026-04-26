@@ -101,6 +101,9 @@ class CompanionService:
     _by_pubkey: dict[bytes, LoadedIdentity] = field(default_factory=dict)
     _advert_task: asyncio.Task[None] | None = None
     _stop: asyncio.Event = field(default_factory=asyncio.Event)
+    # Inbound-Dedup: gleiches raw-Paket kommt pro verbundenem Repeater einmal
+    # rein. Ohne dedup persistieren wir GRP_TXT/TXT_MSG mehrfach.
+    _seen_raw: dict[bytes, float] = field(default_factory=dict)
 
     async def start(self) -> None:
         """DB → Identitäten laden, Advert-Loop starten."""
@@ -383,8 +386,30 @@ class CompanionService:
         for loaded in matching:
             await self._send_advert(loaded)
 
+    _SEEN_RAW_TTL_S = 600.0
+    _SEEN_RAW_MAX = 4096
+
+    def _seen_already(self, raw: bytes) -> bool:
+        """Inbound-Dedup über sha256(raw). Bei mehreren verbundenen
+        Repeatern liefert jeder denselben LoRa-Frame einmal — wir wollen
+        ihn nur einmal verarbeiten (ein DB-Insert pro Channel-Post)."""
+        key = hashlib.sha256(raw).digest()
+        now = time.monotonic()
+        if len(self._seen_raw) > self._SEEN_RAW_MAX:
+            cutoff = now - self._SEEN_RAW_TTL_S
+            self._seen_raw = {
+                k: v for k, v in self._seen_raw.items() if v >= cutoff
+            }
+        prev = self._seen_raw.get(key)
+        if prev is not None and now - prev < self._SEEN_RAW_TTL_S:
+            return True
+        self._seen_raw[key] = now
+        return False
+
     async def on_inbound_packet(self, *, raw: bytes, scope: str) -> None:
         """Hook, vom Router pro empfangenem Paket gerufen."""
+        if self._seen_already(raw):
+            return
         try:
             pkt = Packet.decode(raw)
         except ValueError:
