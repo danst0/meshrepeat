@@ -389,11 +389,12 @@ class CompanionService:
     _SEEN_RAW_TTL_S = 600.0
     _SEEN_RAW_MAX = 4096
 
-    def _seen_already(self, raw: bytes) -> bool:
-        """Inbound-Dedup über sha256(raw). Bei mehreren verbundenen
-        Repeatern liefert jeder denselben LoRa-Frame einmal — wir wollen
-        ihn nur einmal verarbeiten (ein DB-Insert pro Channel-Post)."""
-        key = hashlib.sha256(raw).digest()
+    def _seen_already(self, key: bytes) -> bool:
+        """Inbound-Dedup. ``key`` MUSS hop-invariant sein — derselbe
+        LoRa-Frame über zwei Repeater hat unterschiedliches ``raw`` (jeder
+        Hop schreibt seinen path_hash in den Header), aber identischen
+        ``(payload_type, payload)``-Body. Daher nutzen wir den Body als
+        Key, nicht das ganze raw."""
         now = time.monotonic()
         if len(self._seen_raw) > self._SEEN_RAW_MAX:
             cutoff = now - self._SEEN_RAW_TTL_S
@@ -408,11 +409,16 @@ class CompanionService:
 
     async def on_inbound_packet(self, *, raw: bytes, scope: str) -> None:
         """Hook, vom Router pro empfangenem Paket gerufen."""
-        if self._seen_already(raw):
-            return
         try:
             pkt = Packet.decode(raw)
         except ValueError:
+            return
+        # Dedup-Key: payload_type + payload — ohne path_len/path_hashes,
+        # die jeder Repeater beim Forward inkrementiert.
+        dedup_key = hashlib.sha256(
+            bytes([int(pkt.payload_type)]) + pkt.payload
+        ).digest()
+        if self._seen_already(dedup_key):
             return
         if pkt.payload_type == PayloadType.ADVERT:
             await self._handle_inbound_advert(pkt=pkt, scope=scope)

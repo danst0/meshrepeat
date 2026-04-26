@@ -151,6 +151,64 @@ async def test_inbound_grp_txt_dedups_same_raw(service_env) -> None:
 
 
 @pytest.mark.asyncio
+async def test_inbound_grp_txt_dedups_across_hops(service_env) -> None:
+    """Zwei Repeater forwarden denselben LoRa-Frame mit unterschiedlichen
+    Path-Hashes (Hop-Anzahl). Das raw differiert, der payload-Body ist
+    identisch — Dedup muss trotzdem greifen."""
+    from meshcore_companion.packet import Packet, PayloadType, RouteType
+
+    svc, sessionmaker, user_id, _sent = service_env
+    loaded = await svc.add_identity(
+        user_id=user_id, name="Antonia", scope="public"
+    )
+    ch = await svc.add_channel(
+        identity_id=loaded.id, name="tech", password="hunter2"
+    )
+    assert ch is not None
+
+    secret = derive_channel_secret("tech", "hunter2")
+    sender = CompanionNode(LocalIdentity.generate())
+    pkt = sender.make_channel_message(
+        channel_secret=secret,
+        channel_hash=ch.channel_hash,
+        text="hop-test",
+        sender_name="alice",
+        timestamp=6000,
+    )
+    # Variante A: 1 Hop, path = b"\xaa"
+    raw_a = Packet(
+        route_type=RouteType.FLOOD,
+        payload_type=PayloadType.GRP_TXT,
+        path=b"\xaa",
+        payload=pkt.payload,
+    ).encode()
+    # Variante B: 2 Hops, path = b"\xaa\xbb"
+    raw_b = Packet(
+        route_type=RouteType.FLOOD,
+        payload_type=PayloadType.GRP_TXT,
+        path=b"\xaa\xbb",
+        payload=pkt.payload,
+    ).encode()
+    assert raw_a != raw_b  # unterschiedliche raws
+
+    await svc.on_inbound_packet(raw=raw_a, scope="public")
+    await svc.on_inbound_packet(raw=raw_b, scope="public")
+
+    async with sessionmaker() as db:
+        rows = list(
+            (
+                await db.execute(
+                    select(CompanionMessage).where(
+                        CompanionMessage.identity_id == loaded.id,
+                        CompanionMessage.channel_name == "tech",
+                    )
+                )
+            ).scalars()
+        )
+    assert len(rows) == 1
+
+
+@pytest.mark.asyncio
 async def test_inbound_grp_txt_suppresses_own_echo(service_env) -> None:
     svc, sessionmaker, user_id, _sent = service_env
 
