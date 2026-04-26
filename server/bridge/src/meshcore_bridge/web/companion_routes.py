@@ -498,8 +498,13 @@ async def list_identity_contacts(
     identity_id: UUID,
     user: User = Depends(current_user_required),
     db: AsyncSession = Depends(get_db),
+    limit: int = Query(default=100, ge=1, le=500),
 ) -> list[dict[str, Any]]:
-    """Alle Kontakte einer Identity, inkl. Geo-Status. Frontend filtert."""
+    """Letzte ``limit`` Kontakte einer Identity (default 100), sortiert
+    nach last_seen_at DESC. Frontend hebt Favoriten weiterhin via
+    favorite-Flag hervor; Top-Reihenfolge ist aber Aktualität, nicht
+    Favorit-Priorität — sonst würden alte Favoriten neue Mesh-Sender
+    aus der Liste verdrängen."""
     if not await _user_owns_identity(db, user.id, identity_id):
         raise HTTPException(status_code=404)
     rows = list(
@@ -507,15 +512,14 @@ async def list_identity_contacts(
             await db.execute(
                 select(CompanionContact)
                 .where(CompanionContact.identity_id == identity_id)
-                .order_by(
-                    desc(CompanionContact.favorite),
-                    desc(CompanionContact.last_seen_at),
-                )
+                .order_by(desc(CompanionContact.last_seen_at))
+                .limit(limit)
             )
         ).scalars()
     )
     return [
         {
+            "id": str(c.id),
             "peer_pubkey_hex": c.peer_pubkey.hex(),
             "peer_name": c.peer_name,
             "favorite": c.favorite,
@@ -525,6 +529,25 @@ async def list_identity_contacts(
         }
         for c in rows
     ]
+
+
+@router.post("/contacts/{contact_id}/favorite", response_model=None)
+async def toggle_contact_favorite_rest(
+    contact_id: UUID,
+    user: User = Depends(current_user_required),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """REST-Variante (JSON statt 303-Redirect) zum Favorit-Toggle —
+    für Frontend-fetch ohne Page-Reload."""
+    contact = await db.get(CompanionContact, contact_id)
+    if contact is None:
+        raise HTTPException(status_code=404)
+    ident = await db.get(CompanionIdentity, contact.identity_id)
+    if ident is None or ident.user_id != user.id:
+        raise HTTPException(status_code=404)
+    contact.favorite = not contact.favorite
+    await db.commit()
+    return {"id": str(contact.id), "favorite": contact.favorite}
 
 
 @router.post("/identities/{identity_id}/contacts/{peer_pubkey_hex}/telemetry", response_model=None)

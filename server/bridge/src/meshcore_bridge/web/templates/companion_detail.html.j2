@@ -630,19 +630,42 @@
         const row = document.createElement("div");
         row.className = "telemetry-row";
         const hasGeo = c.lat != null && c.lon != null;
-        const star = c.favorite ? '<span style="color:gold">★</span> ' : '';
         const geo = hasGeo
           ? `<span class="telemetry-geo">📍 ${c.lat.toFixed(4)}, ${c.lon.toFixed(4)}</span>`
           : '<span class="telemetry-geo telemetry-geo-missing">— kein Geo</span>';
-        row.innerHTML = `
-          <div class="telemetry-name">${star}${escText(c.peer_name || c.peer_pubkey_hex.slice(0,8))}</div>
-          <div class="telemetry-meta"><code>${c.peer_pubkey_hex.slice(0,12)}…</code> · ${fmtTime(c.last_seen_at)}</div>
-          ${geo}
-        `;
+        // Stern-Toggle als Button (nicht innerHTML, weil wir Event-Handler brauchen)
+        const star = document.createElement("button");
+        star.type = "button";
+        star.className = "telemetry-star";
+        star.textContent = c.favorite ? "★" : "☆";
+        star.style.color = c.favorite ? "gold" : "var(--muted)";
+        star.title = c.favorite ? "Favorit entfernen" : "Als Favorit markieren";
+        star.addEventListener("click", async (e) => {
+          e.stopPropagation();
+          try {
+            const r = await fetch(`${API}/contacts/${c.id}/favorite`, {
+              method: "POST", credentials: "same-origin",
+            });
+            if (r.ok) await refreshTelemetryList();
+          } catch (e) { console.warn("favorite toggle failed", e); }
+        });
+        row.appendChild(star);
+        const nameDiv = document.createElement("div");
+        nameDiv.className = "telemetry-name";
+        nameDiv.textContent = c.peer_name || c.peer_pubkey_hex.slice(0, 8);
+        row.appendChild(nameDiv);
+        const meta = document.createElement("div");
+        meta.className = "telemetry-meta";
+        meta.innerHTML = `<code>${c.peer_pubkey_hex.slice(0,12)}…</code> · ${fmtTime(c.last_seen_at)}`;
+        row.appendChild(meta);
+        const geoDiv = document.createElement("div");
+        geoDiv.innerHTML = geo;
+        row.appendChild(geoDiv);
         const btn = document.createElement("button");
         btn.type = "button";
-        btn.textContent = "📡 Telemetrie";
+        btn.textContent = "📡";
         btn.className = "telemetry-btn";
+        btn.title = "Telemetrie anfragen";
         btn.addEventListener("click", () => requestTelemetry(c.peer_pubkey_hex, c.peer_name || c.peer_pubkey_hex.slice(0,8)));
         row.appendChild(btn);
         box.appendChild(row);
