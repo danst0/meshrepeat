@@ -42,12 +42,13 @@ from meshcore_companion.node import (
     IncomingChannelMessage,
     IncomingResponse,
     IncomingTextMessage,
+    compute_dm_ack_hash,
     encode_advert_app_data,
     parse_advert_app_data,
     parse_lpp_gps,
     try_decrypt_grp_txt,
 )
-from meshcore_companion.packet import Packet, PayloadType
+from meshcore_companion.packet import Packet, PayloadType, RouteType
 from meshcore_companion.storage import decrypt_seed, encrypt_seed
 
 if TYPE_CHECKING:
@@ -531,19 +532,72 @@ class CompanionService:
                 (c.peer_name for c in contacts if c.peer_pubkey == decoded.sender_pubkey),
                 None,
             )
+            # ts vom Sender persistieren (firmware setzt seine RTC). Zwei Retries
+            # mit gleichem ts + peer + identity → de-duped via DB-Lookup.
+            msg_ts = datetime.fromtimestamp(decoded.timestamp, UTC)
+            text_bytes = decoded.text.encode("utf-8")
             async with self.sessionmaker() as db:
-                db.add(
-                    CompanionMessage(
-                        identity_id=loaded.id,
-                        direction="in",
-                        payload_type=int(PayloadType.TXT_MSG),
-                        peer_pubkey=decoded.sender_pubkey,
-                        peer_name=peer_name,
-                        text=decoded.text,
-                        raw=raw,
+                existing = (
+                    await db.execute(
+                        select(CompanionMessage.id).where(
+                            CompanionMessage.identity_id == loaded.id,
+                            CompanionMessage.peer_pubkey == decoded.sender_pubkey,
+                            CompanionMessage.payload_type == int(PayloadType.TXT_MSG),
+                            CompanionMessage.ts == msg_ts,
+                        )
                     )
+                ).scalar_one_or_none()
+                if existing is None:
+                    db.add(
+                        CompanionMessage(
+                            identity_id=loaded.id,
+                            direction="in",
+                            payload_type=int(PayloadType.TXT_MSG),
+                            peer_pubkey=decoded.sender_pubkey,
+                            peer_name=peer_name,
+                            text=decoded.text,
+                            raw=raw,
+                            ts=msg_ts,
+                        )
+                    )
+                    await db.commit()
+                else:
+                    _log.info(
+                        "dm_retry_dedup",
+                        peer=decoded.sender_pubkey[:4].hex(),
+                        ts=decoded.timestamp,
+                    )
+
+            # ACK + PATH-Return: der Sender lernt damit die Out-Path zu uns
+            # und markiert die DM in seiner UI als 'delivered'. Pflicht bei
+            # FLOOD-RX laut firmware BaseChatMesh.cpp:224.
+            if pkt.route_type == RouteType.FLOOD and self.inject is not None:
+                # firmware-Konvention: ACK-Hash = sha256(plaintext || sender_pubkey).
+                # ``sender`` ist HIER der Absender der DM (Octavia), nicht wir.
+                ack_hash = compute_dm_ack_hash(
+                    timestamp=decoded.timestamp,
+                    flags=decoded.flags,
+                    text_bytes=text_bytes,
+                    sender_pubkey=decoded.sender_pubkey,
                 )
-                await db.commit()
+                try:
+                    path_pkt = loaded.node.make_path_return(
+                        peer_pubkey=decoded.sender_pubkey,
+                        rx_path_len_byte=pkt.path_len_byte,
+                        rx_path_bytes=pkt.path,
+                        extra_type=int(PayloadType.ACK),
+                        extra_data=ack_hash,
+                    )
+                    await self.inject(path_pkt, scope)
+                    _log.info(
+                        "dm_ack_sent",
+                        peer=decoded.sender_pubkey[:4].hex(),
+                        ts=decoded.timestamp,
+                        ack=ack_hash.hex(),
+                        rx_hops=pkt.hop_count,
+                    )
+                except Exception:
+                    _log.exception("dm_ack_send_failed")
             return  # erste Identity, die's lesen kann, gewinnt
 
     async def _handle_inbound_grp_txt(

@@ -180,3 +180,103 @@ def test_parse_lpp_gps_unknown_type_aborts() -> None:
     # type 99 ist nicht in der size-map → abort
     buf = bytes([1, 99, 0xFF])
     assert parse_lpp_gps(buf) is None
+
+
+# ---------- DM flags-Byte + ACK-Hash + PATH-Return ----------
+
+
+def test_dm_includes_flags_byte_in_plaintext() -> None:
+    """make_dm muss flags=0 zwischen ts und text einfügen, sonst lehnt
+    die MeshCore-Firmware (BaseChatMesh.cpp:217) das Paket ab."""
+    from meshcore_companion.crypto import mac_then_decrypt
+
+    alice = CompanionNode(LocalIdentity.generate())
+    bob = CompanionNode(LocalIdentity.generate())
+    pkt = alice.make_dm(peer_pubkey=bob.pub_key, text="hi", timestamp=42)
+    body = pkt.payload
+    encrypted = body[2:]
+    secret = bob.local.calc_shared_secret(alice.pub_key)
+    plain = mac_then_decrypt(secret, encrypted)
+    assert plain is not None
+    # ts(4) + flags(1) + "hi" = 7 byte real, AES-padded auf 16
+    assert plain[:4] == struct.pack("<I", 42)
+    assert plain[4] == 0  # flags = TXT_TYPE_PLAIN, attempt=0
+    assert plain[5:7] == b"hi"
+
+
+def test_dm_decoder_skips_flags_byte() -> None:
+    """try_decrypt_dm muss flags-Byte überspringen, sonst landet \\x00
+    am Anfang des Texts."""
+    alice = CompanionNode(LocalIdentity.generate())
+    bob = CompanionNode(LocalIdentity.generate())
+    pkt = alice.make_dm(peer_pubkey=bob.pub_key, text="Test", timestamp=99)
+    decoded = bob.try_decrypt_dm(packet=pkt, peer_candidates=[Identity(alice.pub_key)])
+    assert decoded is not None
+    assert decoded.text == "Test"  # NICHT "\x00Test"
+    assert decoded.flags == 0
+
+
+def test_dm_decoder_rejects_non_plain_txt_type() -> None:
+    """txt_type != 0 (z.B. CLI_DATA) muss verworfen werden."""
+    from meshcore_companion.crypto import encrypt_then_mac
+
+    alice = CompanionNode(LocalIdentity.generate())
+    bob = CompanionNode(LocalIdentity.generate())
+    secret = alice.local.calc_shared_secret(bob.pub_key)
+    # txt_type = 2 (CLI_DATA) → flags-Byte = 2 << 2 = 0x08
+    plain = struct.pack("<I", 1) + bytes([0x08]) + b"clidata"
+    encrypted = encrypt_then_mac(secret, plain)
+    body = bob.pub_key[:1] + alice.pub_key[:1] + encrypted
+    pkt = Packet(
+        route_type=RouteType.FLOOD,
+        payload_type=PayloadType.TXT_MSG,
+        payload=body,
+    )
+    decoded = bob.try_decrypt_dm(packet=pkt, peer_candidates=[Identity(alice.pub_key)])
+    assert decoded is None
+
+
+def test_dm_ack_hash_matches_firmware_formula() -> None:
+    """ack_hash = sha256(ts || flags || text || sender_pubkey)[:4]"""
+    import hashlib
+
+    from meshcore_companion.node import compute_dm_ack_hash
+
+    sender_pk = bytes(range(32))
+    expected = hashlib.sha256(
+        struct.pack("<I", 1234) + bytes([0]) + b"hello" + sender_pk
+    ).digest()[:4]
+    actual = compute_dm_ack_hash(
+        timestamp=1234, flags=0, text_bytes=b"hello", sender_pubkey=sender_pk
+    )
+    assert actual == expected
+
+
+def test_path_return_wire_format() -> None:
+    """PATH-Datagram: payload = dest_hash + src_hash + encrypt_then_mac(
+    path_len_byte + path_bytes + extra_type + extra_data)."""
+    from meshcore_companion.crypto import mac_then_decrypt
+
+    alice = CompanionNode(LocalIdentity.generate())
+    bob = CompanionNode(LocalIdentity.generate())
+    rx_path = b"\xaa\xbb"
+    rx_path_len_byte = 0x02  # hash_size=1 (top 2 bits=0), hop_count=2
+    ack_hash = b"\x01\x02\x03\x04"
+    pkt = bob.make_path_return(
+        peer_pubkey=alice.pub_key,
+        rx_path_len_byte=rx_path_len_byte,
+        rx_path_bytes=rx_path,
+        extra_type=int(PayloadType.ACK),
+        extra_data=ack_hash,
+    )
+    assert pkt.payload_type == PayloadType.PATH
+    assert pkt.payload[:1] == alice.pub_key[:1]
+    assert pkt.payload[1:2] == bob.pub_key[:1]
+    encrypted = pkt.payload[2:]
+    secret = alice.local.calc_shared_secret(bob.pub_key)
+    plain = mac_then_decrypt(secret, encrypted)
+    assert plain is not None
+    assert plain[0] == rx_path_len_byte
+    assert plain[1:3] == rx_path
+    assert plain[3] == int(PayloadType.ACK)
+    assert plain[4:8] == ack_hash

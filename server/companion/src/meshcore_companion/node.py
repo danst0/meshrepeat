@@ -25,6 +25,7 @@ müssen 0 sein.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import struct
 import time
@@ -120,6 +121,7 @@ class IncomingTextMessage:
     sender_pubkey: bytes  # nur best-effort: src_hash matched mehrere Pubkeys
     timestamp: int
     text: str
+    flags: int = 0  # raw flags-Byte aus plaintext[4], wichtig für ack_hash
 
 
 @dataclass
@@ -176,11 +178,19 @@ class CompanionNode:
         timestamp: int | None = None,
         flood: bool = True,
     ) -> Packet:
-        """Verschlüsselte Direktnachricht an ``peer_pubkey``."""
+        """Verschlüsselte Direktnachricht an ``peer_pubkey``.
+
+        Plaintext-Format (firmware ``BaseChatMesh.cpp:209-219``):
+        ``[ts:4 LE] [flags:1] [text...]`` — flags bits sind
+        ``(attempt & 3) | (txt_type << 2)``. Wir senden flags=0 =
+        TXT_TYPE_PLAIN, attempt=0.
+        """
         ts = timestamp if timestamp is not None else int(time.time())
         secret = self.local.calc_shared_secret(peer_pubkey)
         plaintext = (
-            int.to_bytes(ts, 4, "little", signed=False) + text.encode("utf-8")
+            int.to_bytes(ts, 4, "little", signed=False)
+            + bytes([0])  # flags: TXT_TYPE_PLAIN | attempt=0
+            + text.encode("utf-8")
         )
         encrypted = encrypt_then_mac(secret, plaintext)
         peer = Identity(peer_pubkey)
@@ -197,8 +207,13 @@ class CompanionNode:
         packet: Packet,
         peer_candidates: list[Identity],
     ) -> IncomingTextMessage | None:
-        """Versucht, einen TXT_MSG-Paket-Body zu entschlüsseln, indem mit jedem
-        Kandidaten ECDH gerechnet und ``mac_then_decrypt`` probiert wird.
+        """TXT_MSG-Paket-Body entschlüsseln.
+
+        Plaintext-Format (firmware ``BaseChatMesh.cpp:209``):
+        ``[ts:4 LE] [flags:1] [text...]``. ``flags = (attempt & 3) |
+        (txt_type << 2)``. Wir akzeptieren nur ``txt_type == 0``
+        (TXT_TYPE_PLAIN); andere Typen (CLI_DATA, SIGNED_PLAIN) werden
+        gedroppt, weil deren Body-Layout abweicht.
         """
         if packet.payload_type != PayloadType.TXT_MSG:
             return None
@@ -217,15 +232,22 @@ class CompanionNode:
             plain = mac_then_decrypt(secret, encrypted)
             if plain is None:
                 continue
-            if len(plain) < _TIMESTAMP_LEN:
+            if len(plain) < _TIMESTAMP_LEN + 1:
                 continue
             ts = int.from_bytes(plain[:_TIMESTAMP_LEN], "little", signed=False)
+            flags = plain[_TIMESTAMP_LEN]
+            txt_type = flags >> 2
+            if txt_type != 0:  # nur TXT_TYPE_PLAIN
+                continue
             try:
-                text = plain[_TIMESTAMP_LEN:].rstrip(b"\x00").decode("utf-8")
+                text = plain[_TIMESTAMP_LEN + 1 :].rstrip(b"\x00").decode("utf-8")
             except UnicodeDecodeError:
                 continue
             return IncomingTextMessage(
-                sender_pubkey=peer.pub_key, timestamp=ts, text=text
+                sender_pubkey=peer.pub_key,
+                timestamp=ts,
+                text=text,
+                flags=flags,
             )
         return None
 
@@ -350,6 +372,48 @@ class CompanionNode:
             payload=payload,
         )
 
+    # ---------- PATH-Return (Out-Path-Lernen + ACK piggyback) ----------
+
+    def make_path_return(
+        self,
+        *,
+        peer_pubkey: bytes,
+        rx_path_len_byte: int,
+        rx_path_bytes: bytes,
+        extra_type: int = 0,
+        extra_data: bytes = b"",
+    ) -> Packet:
+        """Erzeugt ein PATH-Datagramm an ``peer_pubkey``.
+
+        firmware ``Mesh::createPathReturn`` (Mesh.cpp:434): plaintext =
+        ``[path_len_byte:1] [path_bytes:N] [extra_type:1] [extra_data]``
+        (bei ``extra_data`` leer wird ``extra_type=0xFF`` und 4 Random-
+        Bytes als Filler gesendet, damit der packet_hash unique bleibt).
+
+        Praxis-Aufruf: nach erfolgreichem DM-Empfang (RouteType=FLOOD)
+        antwortet der Empfänger mit PATH-Return + extra_type=ACK
+        (0x03) + ack_hash(4 Byte). Der Sender lernt damit den Out-Path
+        ZU UNS und kennzeichnet die DM in seiner UI als delivered.
+        """
+        plain_data = bytearray()
+        plain_data.append(rx_path_len_byte)
+        plain_data += rx_path_bytes
+        if extra_data:
+            plain_data.append(extra_type)
+            plain_data += extra_data
+        else:
+            plain_data.append(0xFF)
+            plain_data += os.urandom(4)
+        secret = self.local.calc_shared_secret(peer_pubkey)
+        encrypted = encrypt_then_mac(secret, bytes(plain_data))
+        peer = Identity(peer_pubkey)
+        body = peer.hash_prefix() + self.pub_hash + encrypted
+        return Packet(
+            route_type=RouteType.FLOOD,
+            payload_type=PayloadType.PATH,
+            payload=body,
+        )
+
     # ---------- ADVERT receive ----------
 
     def parse_inbound_advert(self, packet: Packet) -> Advert | None:
@@ -379,6 +443,23 @@ class IncomingChannelMessage:
     timestamp: int
     sender_name: str
     text: str
+
+
+def compute_dm_ack_hash(
+    *, timestamp: int, flags: int, text_bytes: bytes, sender_pubkey: bytes
+) -> bytes:
+    """4-Byte-ACK-Hash über die DM-Plaintext (firmware
+    ``BaseChatMesh.cpp:222``): ``sha256(ts(4) || flags(1) || text || sender_pubkey)[:4]``.
+
+    Empfänger sendet diesen Hash im PATH-Return-extra zurück, damit die
+    Mobile-App des Senders die DM in der UI als 'delivered' markiert.
+    """
+    plaintext = (
+        int.to_bytes(timestamp, 4, "little", signed=False)
+        + bytes([flags])
+        + text_bytes
+    )
+    return hashlib.sha256(plaintext + sender_pubkey).digest()[:4]
 
 
 @dataclass

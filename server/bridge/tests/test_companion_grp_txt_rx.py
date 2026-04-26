@@ -446,6 +446,129 @@ async def test_inbound_advert_without_lat_lon_keeps_previous(service_env) -> Non
 
 
 @pytest.mark.asyncio
+async def test_inbound_dm_persists_with_sender_ts_and_dedups_retries(
+    service_env,
+) -> None:
+    """Zwei Retry-Pakete mit gleichem Sender-ts dürfen nur einmal in der
+    DB landen. Außerdem: ts in DB = Sender-ts (nicht Empfangszeit)."""
+    import struct
+
+    svc, sessionmaker, user_id, _sent = service_env
+    loaded = await svc.add_identity(
+        user_id=user_id, name="Antonia", scope="public"
+    )
+    peer = LocalIdentity.generate()
+    async with sessionmaker() as db:
+        db.add(
+            CompanionContact(
+                identity_id=loaded.id,
+                peer_pubkey=peer.pub_key,
+                peer_name="Octavia",
+                last_seen_at=datetime.now(UTC),
+            )
+        )
+        await db.commit()
+
+    sender_ts = 1700000000
+    plaintext = struct.pack("<I", sender_ts) + bytes([0]) + b"hello"
+    secret = peer.calc_shared_secret(loaded.pubkey)
+    encrypted = encrypt_then_mac(secret, plaintext)
+    body = loaded.pubkey[:1] + peer.pub_key[:1] + encrypted
+    pkt = Packet(
+        route_type=RouteType.FLOOD,
+        payload_type=PayloadType.TXT_MSG,
+        payload=body,
+    )
+    raw_a = pkt.encode()
+
+    # Retry mit anderem flags-byte (attempt=1 statt 0) → anderer encrypted
+    # body, aber gleicher (peer, ts)
+    plaintext_retry = struct.pack("<I", sender_ts) + bytes([0x01]) + b"hello"
+    encrypted_retry = encrypt_then_mac(secret, plaintext_retry)
+    body_retry = loaded.pubkey[:1] + peer.pub_key[:1] + encrypted_retry
+    pkt_retry = Packet(
+        route_type=RouteType.FLOOD,
+        payload_type=PayloadType.TXT_MSG,
+        payload=body_retry,
+    )
+    raw_b = pkt_retry.encode()
+
+    # Erster Receive: persisted
+    await svc.on_inbound_packet(raw=raw_a, scope="public")
+    # zweiter Receive (echte retry vom Sender): muss dedupen
+    await svc.on_inbound_packet(raw=raw_b, scope="public")
+
+    async with sessionmaker() as db:
+        rows = list(
+            (
+                await db.execute(
+                    select(CompanionMessage).where(
+                        CompanionMessage.identity_id == loaded.id,
+                        CompanionMessage.payload_type == int(PayloadType.TXT_MSG),
+                    )
+                )
+            ).scalars()
+        )
+    assert len(rows) == 1
+    assert rows[0].text == "hello"
+    # ts stammt vom Sender (SQLite gibt naive datetime zurück, daher
+    # auf naive normalisieren für den Vergleich)
+    db_ts = rows[0].ts
+    if db_ts.tzinfo is not None:
+        db_ts = db_ts.replace(tzinfo=None)
+    assert db_ts == datetime.fromtimestamp(sender_ts, UTC).replace(tzinfo=None)
+
+
+@pytest.mark.asyncio
+async def test_inbound_dm_emits_path_ack_on_flood(service_env) -> None:
+    """Bei FLOOD-RX einer DM muss der Service ein PATH-Datagram (mit
+    ACK-Hash piggybacked) an den Sender zurückschicken — sonst lernt der
+    Sender keinen Out-Path und retried weiter Flood."""
+    import struct
+
+    svc, sessionmaker, user_id, sent = service_env
+    loaded = await svc.add_identity(
+        user_id=user_id, name="Antonia", scope="public"
+    )
+    peer = LocalIdentity.generate()
+    async with sessionmaker() as db:
+        db.add(
+            CompanionContact(
+                identity_id=loaded.id,
+                peer_pubkey=peer.pub_key,
+                peer_name="Octavia",
+                last_seen_at=datetime.now(UTC),
+            )
+        )
+        await db.commit()
+
+    sender_ts = 1700000000
+    plaintext = struct.pack("<I", sender_ts) + bytes([0]) + b"hi"
+    secret = peer.calc_shared_secret(loaded.pubkey)
+    encrypted = encrypt_then_mac(secret, plaintext)
+    body = loaded.pubkey[:1] + peer.pub_key[:1] + encrypted
+    pkt = Packet(
+        route_type=RouteType.FLOOD,
+        payload_type=PayloadType.TXT_MSG,
+        path=b"\xaa",  # 1 Hop
+        payload=body,
+    )
+    sent.clear()
+    await svc.on_inbound_packet(raw=pkt.encode(), scope="public")
+
+    # Erster gesendeter Frame nach RX = unser PATH-Return
+    path_frames = [
+        (raw, sc) for raw, sc in sent
+        if Packet.decode(raw).payload_type == PayloadType.PATH
+    ]
+    assert len(path_frames) == 1
+    path_raw, _ = path_frames[0]
+    path_pkt = Packet.decode(path_raw)
+    assert path_pkt.payload[:1] == peer.pub_key[:1]
+    assert path_pkt.payload[1:2] == loaded.pubkey[:1]
+
+
+@pytest.mark.asyncio
 async def test_telemetry_request_emits_req_packet(service_env) -> None:
     """request_telemetry baut ein REQ und schickt es via inject."""
     svc, _sessionmaker, user_id, sent = service_env
