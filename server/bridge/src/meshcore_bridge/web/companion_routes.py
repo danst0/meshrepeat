@@ -329,6 +329,19 @@ async def send_channel_message(
 # ---------- Conversations (per identity) ----------
 
 
+def _hop_count(raw: bytes | None) -> int | None:
+    """Liest die Hop-Anzahl aus dem rohen MeshCore-Paket (path_len // hash_size).
+    Eigene Out-Messages, Pakete ohne raw oder dekodier-Fehler → None."""
+    if not raw:
+        return None
+    try:
+        from meshcore_companion.packet import Packet as MCPacket  # noqa: PLC0415
+
+        return MCPacket.decode(raw).hop_count
+    except (ValueError, ImportError):
+        return None
+
+
 def _message_dict(m: CompanionMessage) -> dict[str, Any]:
     return {
         "id": str(m.id),
@@ -339,6 +352,7 @@ def _message_dict(m: CompanionMessage) -> dict[str, Any]:
         "channel_name": m.channel_name,
         "text": m.text,
         "ts": _ts_iso(m.ts),
+        "hops": _hop_count(m.raw),
     }
 
 

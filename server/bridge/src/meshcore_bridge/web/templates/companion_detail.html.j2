@@ -14,10 +14,44 @@
   </div>
 
   <div class="tabs">
+    <button class="tab-btn" data-tab="chats">Chats</button>
     <button class="tab-btn" data-tab="settings">Settings</button>
-    <button class="tab-btn" data-tab="dms">DMs</button>
-    <button class="tab-btn" data-tab="channels">Channels</button>
   </div>
+
+  {# ---------- Chats (DMs + Channels unified) ---------- #}
+  <section class="tab-panel" data-tab="chats">
+    <div class="card messenger">
+      <aside class="thread-list" id="threads">
+        <form id="dm-new" class="thread-new">
+          <div class="at-input-wrap">
+            <input id="dm-new-peer" required maxlength="128" autocomplete="off"
+                   placeholder="@Name oder Pubkey-Hex…">
+            <div class="at-popup" id="dm-new-popup" hidden></div>
+          </div>
+        </form>
+        <div class="thread-section-label">Kanäle</div>
+        <div id="ch-list">
+          <div class="thread-empty" style="color:var(--muted);padding:.5rem">lade …</div>
+        </div>
+        <div class="thread-section-label">DMs</div>
+        <div id="dm-list">
+          <div class="thread-empty" style="color:var(--muted);padding:.5rem">lade …</div>
+        </div>
+      </aside>
+      <div class="thread-view">
+        <div id="conv-header" class="thread-header">Wähle einen Chat oder starte einen DM.</div>
+        <div id="conv-messages" class="message-list"></div>
+        <form id="conv-compose" class="compose-row" style="display:none">
+          <div class="at-input-wrap">
+            <input id="conv-text" required autocomplete="off"
+                   placeholder="Nachricht… (@ für Auto-Complete)">
+            <div class="at-popup" id="conv-at-popup" hidden></div>
+          </div>
+          <button type="submit">Senden</button>
+        </form>
+      </div>
+    </div>
+  </section>
 
   {# ---------- Settings ---------- #}
   <section class="tab-panel" data-tab="settings">
@@ -91,66 +125,18 @@
     </div>
   </section>
 
-  {# ---------- DMs ---------- #}
-  <section class="tab-panel" data-tab="dms">
-    <div class="card messenger">
-      <aside class="thread-list" id="dm-threads">
-        <div class="thread-empty" style="color:var(--muted);padding:.5rem">lade …</div>
-      </aside>
-      <div class="thread-view">
-        <div id="dm-header" class="thread-header">Wähle einen Thread oder starte einen neuen.</div>
-        <div id="dm-messages" class="message-list"></div>
-        <form id="dm-compose" class="compose-row" style="display:none">
-          <div class="at-input-wrap">
-            <input id="dm-text" required maxlength="200" placeholder="Nachricht… (@ für Auto-Complete)" autocomplete="off">
-            <div class="at-popup" id="dm-at-popup" hidden></div>
-          </div>
-          <button type="submit">Senden</button>
-        </form>
-      </div>
-    </div>
-    <div class="card">
-      <h3 style="margin-top:0">Neuer DM-Thread</h3>
-      <form id="dm-new" class="compose-row">
-        <input id="dm-new-peer" required pattern="[0-9a-fA-F]{64}" maxlength="64" minlength="64"
-               placeholder="Peer-Pubkey-Hex (64 Zeichen)" style="flex:2">
-        <button type="submit">Öffnen</button>
-      </form>
-    </div>
-  </section>
-
-  {# ---------- Channels ---------- #}
-  <section class="tab-panel" data-tab="channels">
-    <div class="card messenger">
-      <aside class="thread-list" id="ch-threads">
-        <div class="thread-empty" style="color:var(--muted);padding:.5rem">lade …</div>
-      </aside>
-      <div class="thread-view">
-        <div id="ch-header" class="thread-header">Wähle einen Kanal.</div>
-        <div id="ch-messages" class="message-list"></div>
-        <form id="ch-compose" class="compose-row" style="display:none">
-          <div class="at-input-wrap">
-            <input id="ch-text" required maxlength="140" placeholder="Wird mit '{{ identity.name }}: ' präfixiert. @ für Auto-Complete." autocomplete="off">
-            <div class="at-popup" id="ch-at-popup" hidden></div>
-          </div>
-          <button type="submit">Posten</button>
-        </form>
-      </div>
-    </div>
-    {% if not channels %}
-      <p style="color:var(--muted)">Lege im Settings-Tab einen Kanal an, um zu posten.</p>
-    {% endif %}
-  </section>
-
 <script>
 (() => {
   const IDENTITY_ID = "{{ identity.id }}";
+  const IDENTITY_NAME = {{ identity.name | tojson }};
   const API = "/api/v1/companion";
   const POLL_ACTIVE_MS = 5000;
   const POLL_THREADS_MS = 15000;
   const AT_TARGETS = {{ at_targets | tojson }};
+  const LS_KEY = `meshcore.companion.${IDENTITY_ID}.lastConv`;
+  const LS_TAB = `meshcore.companion.${IDENTITY_ID}.lastTab`;
 
-  // ---------- Hash state ----------
+  // ---------- Hash + LocalStorage state ----------
   function parseHash() {
     const out = {};
     const h = (location.hash || "").replace(/^#/, "");
@@ -164,8 +150,18 @@
     const enc = Object.entries(s).map(([k,v]) => k+"="+encodeURIComponent(v)).join("&");
     history.replaceState(null, "", "#"+enc);
   }
-  function patchHash(p) {
-    writeHash({...parseHash(), ...p});
+  function patchHash(p) { writeHash({...parseHash(), ...p}); }
+  function persistConv(spec) {
+    try { localStorage.setItem(LS_KEY, spec || ""); } catch (e) {}
+  }
+  function persistTab(name) {
+    try { localStorage.setItem(LS_TAB, name); } catch (e) {}
+  }
+  function restoredConv() {
+    try { return localStorage.getItem(LS_KEY) || ""; } catch (e) { return ""; }
+  }
+  function restoredTab() {
+    try { return localStorage.getItem(LS_TAB) || ""; } catch (e) { return ""; }
   }
 
   // ---------- Tabs ----------
@@ -177,14 +173,16 @@
   }
   tabBtns.forEach(b => b.addEventListener("click", () => {
     patchHash({tab: b.dataset.tab});
+    persistTab(b.dataset.tab);
     showTab(b.dataset.tab);
-    onTabEnter(b.dataset.tab);
+    if (b.dataset.tab === "chats") loadThreads();
   }));
 
   // ---------- State ----------
-  let active = null;  // {kind: "dm"|"channel", peer?, channel_id?, channel_name?}
+  let active = null;  // {kind:"dm"|"channel", peer?, peer_name?, channel_id?, channel_name?}
   let activeTimer = null;
   let lastActiveTs = null;
+  let threadCache = {dms: [], channels: []};
 
   function fmtTime(iso) {
     if (!iso) return "";
@@ -205,37 +203,32 @@
       const r = await fetch(`${API}/identities/${IDENTITY_ID}/threads`, {credentials:"same-origin"});
       if (!r.ok) return;
       const j = await r.json();
-      renderDmThreads(j.dms || []);
-      renderChannelThreads(j.channels || []);
+      threadCache = {dms: j.dms || [], channels: j.channels || []};
+      renderChannelList(threadCache.channels);
+      renderDmList(threadCache.dms);
+      // Falls active mit unbekanntem Namen geladen wurde, jetzt nachtragen
+      if (active && active.kind === "channel" && (!active.channel_name || active.channel_name.length <= 8)) {
+        const ch = threadCache.channels.find(c => c.id === active.channel_id);
+        if (ch) {
+          active.channel_name = ch.name;
+          document.getElementById("conv-header").textContent = "#" + ch.name;
+        }
+      }
+      if (active && active.kind === "dm" && !active.peer_name) {
+        const dm = threadCache.dms.find(d => d.peer_pubkey_hex === active.peer);
+        if (dm && dm.peer_name) {
+          active.peer_name = dm.peer_name;
+          document.getElementById("conv-header").textContent =
+            dm.peer_name + " · " + shortHex(active.peer, 16);
+        }
+      }
     } catch (e) {
       console.warn("threads load failed", e);
     }
   }
 
-  function renderDmThreads(dms) {
-    const box = document.getElementById("dm-threads");
-    if (!dms.length) {
-      box.innerHTML = '<div class="thread-empty" style="color:var(--muted);padding:.5rem">Keine DMs. Starte einen neuen Thread unten.</div>';
-      return;
-    }
-    box.innerHTML = "";
-    for (const t of dms) {
-      const item = document.createElement("button");
-      item.type = "button";
-      item.className = "thread-item";
-      if (active && active.kind === "dm" && active.peer === t.peer_pubkey_hex) item.classList.add("active");
-      const star = t.favorite ? '<span style="color:gold">★</span> ' : '';
-      const peer = escText(t.peer_name || shortHex(t.peer_pubkey_hex, 12));
-      const last = t.last_text ? escText(t.last_text).slice(0,40) : '<span style="color:var(--muted)">—</span>';
-      item.innerHTML = `<div class="thread-top">${star}${peer}<span class="thread-time">${fmtTime(t.last_ts)}</span></div>
-                        <div class="thread-snip">${last}</div>`;
-      item.addEventListener("click", () => selectDm(t.peer_pubkey_hex, t.peer_name));
-      box.appendChild(item);
-    }
-  }
-
-  function renderChannelThreads(chs) {
-    const box = document.getElementById("ch-threads");
+  function renderChannelList(chs) {
+    const box = document.getElementById("ch-list");
     if (!chs.length) {
       box.innerHTML = '<div class="thread-empty" style="color:var(--muted);padding:.5rem">Keine Kanäle.</div>';
       return;
@@ -254,68 +247,112 @@
     }
   }
 
-  // ---------- DM messages ----------
+  function renderDmList(dms) {
+    const box = document.getElementById("dm-list");
+    if (!dms.length) {
+      box.innerHTML = '<div class="thread-empty" style="color:var(--muted);padding:.5rem">Keine DMs. Starte oben einen neuen Thread.</div>';
+      return;
+    }
+    box.innerHTML = "";
+    for (const t of dms) {
+      const item = document.createElement("button");
+      item.type = "button";
+      item.className = "thread-item";
+      if (active && active.kind === "dm" && active.peer === t.peer_pubkey_hex) item.classList.add("active");
+      const star = t.favorite ? '<span style="color:gold">★</span> ' : '';
+      const peer = escText(t.peer_name || shortHex(t.peer_pubkey_hex, 12));
+      const last = t.last_text ? escText(t.last_text).slice(0,40) : '<span style="color:var(--muted)">—</span>';
+      item.innerHTML = `<div class="thread-top">${star}${peer}<span class="thread-time">${fmtTime(t.last_ts)}</span></div>
+                        <div class="thread-snip">${last}</div>`;
+      item.addEventListener("click", () => selectDm(t.peer_pubkey_hex, t.peer_name));
+      box.appendChild(item);
+    }
+  }
+
+  // ---------- Conv selection ----------
   async function selectDm(peerHex, peerName) {
     active = {kind:"dm", peer: peerHex, peer_name: peerName || null};
     lastActiveTs = null;
-    patchHash({tab:"dms", conv:"dm:"+peerHex});
-    document.getElementById("dm-header").textContent =
+    const spec = "dm:" + peerHex;
+    patchHash({tab:"chats", conv: spec});
+    persistConv(spec);
+    persistTab("chats");
+    document.getElementById("conv-header").textContent =
       (peerName ? peerName+" · " : "") + shortHex(peerHex, 16);
-    document.getElementById("dm-messages").innerHTML = "";
-    document.getElementById("dm-compose").style.display = "flex";
+    document.getElementById("conv-messages").innerHTML = "";
+    setComposeMode("dm");
     await loadDmMessages(peerHex, true);
     armActiveTimer();
     markActiveThread();
   }
 
-  async function loadDmMessages(peerHex, replace) {
-    const url = `${API}/identities/${IDENTITY_ID}/dms/${peerHex}` +
-                (lastActiveTs ? `?since=${encodeURIComponent(lastActiveTs)}` : "");
-    const r = await fetch(url, {credentials:"same-origin"});
-    if (!r.ok) return;
-    const list = await r.json();
-    const box = document.getElementById("dm-messages");
-    if (replace) box.innerHTML = "";
-    for (const m of list) {
-      const cls = m.direction === "out" ? "out" : "in";
-      const who = m.direction === "out" ? "me" : (m.peer_name || shortHex(m.peer_pubkey_hex, 8));
-      const div = document.createElement("div");
-      div.className = "message " + cls;
-      div.innerHTML = `<div class="msg-meta">${escText(who)} · ${fmtDate(m.ts)}</div>
-                       <div class="msg-text">${escText(m.text || "")}</div>`;
-      box.appendChild(div);
-      if (m.ts) lastActiveTs = m.ts;
-    }
-    if (list.length) box.scrollTop = box.scrollHeight;
-  }
-
-  // ---------- Channel messages ----------
   async function selectChannel(channelId, channelName) {
     active = {kind:"channel", channel_id: channelId, channel_name: channelName};
     lastActiveTs = null;
-    patchHash({tab:"channels", conv:"ch:"+channelId});
-    document.getElementById("ch-header").textContent = "#" + channelName;
-    document.getElementById("ch-messages").innerHTML = "";
-    document.getElementById("ch-compose").style.display = "flex";
+    const spec = "ch:" + channelId;
+    patchHash({tab:"chats", conv: spec});
+    persistConv(spec);
+    persistTab("chats");
+    document.getElementById("conv-header").textContent = "#" + channelName;
+    document.getElementById("conv-messages").innerHTML = "";
+    setComposeMode("channel");
     await loadChannelMessages(channelId, true);
     armActiveTimer();
     markActiveThread();
   }
 
-  async function loadChannelMessages(channelId, replace) {
-    const url = `${API}/identities/${IDENTITY_ID}/channels/${channelId}/messages` +
-                (lastActiveTs ? `?since=${encodeURIComponent(lastActiveTs)}` : "");
+  function setComposeMode(kind) {
+    const form = document.getElementById("conv-compose");
+    const input = document.getElementById("conv-text");
+    form.style.display = "flex";
+    if (kind === "dm") {
+      input.maxLength = 200;
+      input.placeholder = "Nachricht… (@ für Auto-Complete)";
+    } else {
+      input.maxLength = 140;
+      input.placeholder = `Wird mit '${IDENTITY_NAME}: ' präfixiert. @ für Auto-Complete.`;
+    }
+  }
+
+  async function loadDmMessages(peerHex, replace) {
+    const url = `${API}/identities/${IDENTITY_ID}/dms/${peerHex}` +
+                (lastActiveTs && !replace ? `?since=${encodeURIComponent(lastActiveTs)}` : "");
     const r = await fetch(url, {credentials:"same-origin"});
     if (!r.ok) return;
     const list = await r.json();
-    const box = document.getElementById("ch-messages");
+    appendMessages(list, replace);
+  }
+
+  async function loadChannelMessages(channelId, replace) {
+    const url = `${API}/identities/${IDENTITY_ID}/channels/${channelId}/messages` +
+                (lastActiveTs && !replace ? `?since=${encodeURIComponent(lastActiveTs)}` : "");
+    const r = await fetch(url, {credentials:"same-origin"});
+    if (!r.ok) return;
+    const list = await r.json();
+    appendMessages(list, replace);
+  }
+
+  function fmtHops(n) {
+    if (n == null) return "";
+    if (n === 0) return ` · <span class="msg-hops" title="0 Hops — Direkt-Empfang">·0</span>`;
+    return ` · <span class="msg-hops" title="${n} Hop${n === 1 ? "" : "s"} im Mesh">↗${n}</span>`;
+  }
+
+  function appendMessages(list, replace) {
+    const box = document.getElementById("conv-messages");
     if (replace) box.innerHTML = "";
     for (const m of list) {
       const cls = m.direction === "out" ? "out" : "in";
-      const who = m.direction === "out" ? "me" : (m.peer_name || "?");
+      const who = m.direction === "out"
+        ? "me"
+        : (m.peer_name || (m.peer_pubkey_hex ? shortHex(m.peer_pubkey_hex, 8) : "?"));
+      // Hops nur bei eingehenden anzeigen — eigene Out-Pakete haben kein
+      // gemessenes Hop-Wert (wir verschicken sie, der Echo-Hop kommt
+      // separat, ggf. dedupliziert).
+      const hopsTxt = m.direction === "in" ? fmtHops(m.hops) : "";
       const div = document.createElement("div");
       div.className = "message " + cls;
-      div.innerHTML = `<div class="msg-meta">${escText(who)} · ${fmtDate(m.ts)}</div>
+      div.innerHTML = `<div class="msg-meta">${escText(who)} · ${fmtDate(m.ts)}${hopsTxt}</div>
                        <div class="msg-text">${escText(m.text || "")}</div>`;
       box.appendChild(div);
       if (m.ts) lastActiveTs = m.ts;
@@ -325,7 +362,7 @@
 
   function markActiveThread() {
     document.querySelectorAll(".thread-item").forEach(el => el.classList.remove("active"));
-    // Re-render via reload triggers it; simpler: skip — next loadThreads will set it
+    // exakte Highlight kommt mit dem nächsten loadThreads-Render
   }
 
   function armActiveTimer() {
@@ -338,42 +375,29 @@
   }
 
   // ---------- Send ----------
-  document.getElementById("dm-compose").addEventListener("submit", async (e) => {
+  document.getElementById("conv-compose").addEventListener("submit", async (e) => {
     e.preventDefault();
-    if (!active || active.kind !== "dm") return;
-    const t = document.getElementById("dm-text");
+    if (!active) return;
+    const t = document.getElementById("conv-text");
     const text = t.value.trim();
     if (!text) return;
     const fd = new FormData();
     fd.append("identity_id", IDENTITY_ID);
-    fd.append("peer_pubkey_hex", active.peer);
     fd.append("text", text);
-    const r = await fetch(`${API}/messages/dm`, {method:"POST", body: fd, credentials:"same-origin"});
-    if (r.ok) {
-      t.value = "";
-      lastActiveTs = null;
-      await loadDmMessages(active.peer, true);
-      loadThreads();
+    let endpoint;
+    if (active.kind === "dm") {
+      fd.append("peer_pubkey_hex", active.peer);
+      endpoint = `${API}/messages/dm`;
     } else {
-      alert("send failed: " + r.status);
+      fd.append("channel_id", active.channel_id);
+      endpoint = `${API}/messages/channel`;
     }
-  });
-
-  document.getElementById("ch-compose").addEventListener("submit", async (e) => {
-    e.preventDefault();
-    if (!active || active.kind !== "channel") return;
-    const t = document.getElementById("ch-text");
-    const text = t.value.trim();
-    if (!text) return;
-    const fd = new FormData();
-    fd.append("identity_id", IDENTITY_ID);
-    fd.append("channel_id", active.channel_id);
-    fd.append("text", text);
-    const r = await fetch(`${API}/messages/channel`, {method:"POST", body: fd, credentials:"same-origin"});
+    const r = await fetch(endpoint, {method:"POST", body: fd, credentials:"same-origin"});
     if (r.ok) {
       t.value = "";
       lastActiveTs = null;
-      await loadChannelMessages(active.channel_id, true);
+      if (active.kind === "dm") await loadDmMessages(active.peer, true);
+      else await loadChannelMessages(active.channel_id, true);
       loadThreads();
     } else {
       alert("send failed: " + r.status);
@@ -383,40 +407,33 @@
   document.getElementById("dm-new").addEventListener("submit", (e) => {
     e.preventDefault();
     const v = document.getElementById("dm-new-peer").value.trim();
-    if (!/^[0-9a-fA-F]{64}$/.test(v)) { alert("64-Zeichen-Hex erwartet"); return; }
-    selectDm(v.toLowerCase(), null);
+    // Hex direkt
+    if (/^[0-9a-fA-F]{64}$/.test(v)) {
+      selectDm(v.toLowerCase(), null);
+      document.getElementById("dm-new-peer").value = "";
+      return;
+    }
+    // exakter Name aus Targets
+    const lower = v.replace(/^@/, "").toLowerCase();
+    const exact = AT_TARGETS.find(t => t.pubkey_hex && t.name.toLowerCase() === lower);
+    if (exact) {
+      selectDm(exact.pubkey_hex.toLowerCase(), exact.name);
+      document.getElementById("dm-new-peer").value = "";
+      return;
+    }
+    alert("Kein Kontakt mit diesem Namen, oder Pubkey ist nicht 64 Hex-Zeichen.");
   });
 
-  // ---------- Init ----------
-  function onTabEnter(name) {
-    if (name === "dms" || name === "channels") {
-      loadThreads();
-    }
-  }
-
-  function restoreFromHash() {
-    const s = parseHash();
-    const tab = ["settings","dms","channels"].includes(s.tab) ? s.tab : "settings";
-    showTab(tab);
-    onTabEnter(tab);
-    if (s.conv) {
-      if (s.conv.startsWith("dm:")) {
-        const peer = s.conv.slice(3);
-        if (/^[0-9a-fA-F]{64}$/.test(peer)) selectDm(peer.toLowerCase(), null);
-      } else if (s.conv.startsWith("ch:")) {
-        const id = s.conv.slice(3);
-        // wir haben den Channel-Namen noch nicht; loadThreads liefert ihn,
-        // bis dahin zeigen wir Header mit ID
-        selectChannel(id, id.slice(0,8));
-      }
-    }
-  }
-
   // ---------- @-Auto-Complete ----------
-  function attachAtComplete(input, popup) {
-    let active = 0;
+  // mode = "insert" → "@[Name] " in den Text einfügen (Compose-Feld)
+  // mode = "pick"   → onPick(target) callbacken, Input leeren (DM-Picker)
+  function attachAtComplete(input, popup, opts={}) {
+    const mode = opts.mode || "insert";
+    const onPick = opts.onPick || (() => {});
+    const filter = opts.filter || ((t) => true);
+    let activeIdx = 0;
     let matches = [];
-    let atIdx = -1;  // Position des "@" im input.value, oder -1 wenn inaktiv
+    let atIdx = -1;
 
     function close() {
       popup.hidden = true;
@@ -429,16 +446,12 @@
       popup.innerHTML = "";
       matches.forEach((t, i) => {
         const el = document.createElement("div");
-        el.className = "at-item" + (i === active ? " active" : "");
+        el.className = "at-item" + (i === activeIdx ? " active" : "");
         const sub = t.pubkey_hex
           ? `<span class="at-sub">${t.pubkey_hex.slice(0,8)}…</span>`
           : '<span class="at-sub">channel</span>';
         el.innerHTML = `<span class="at-name">${escText(t.name)}</span>${sub}`;
-        // mousedown statt click, damit blur das popup nicht vorher schließt
-        el.addEventListener("mousedown", (e) => {
-          e.preventDefault();
-          apply(i);
-        });
+        el.addEventListener("mousedown", (e) => { e.preventDefault(); apply(i); });
         popup.appendChild(el);
       });
       popup.hidden = matches.length === 0;
@@ -446,7 +459,14 @@
 
     function apply(idx) {
       const t = matches[idx];
-      if (!t || atIdx < 0) return;
+      if (!t) return;
+      if (mode === "pick") {
+        onPick(t);
+        input.value = "";
+        close();
+        return;
+      }
+      if (atIdx < 0) return;
       const v = input.value;
       const cursor = input.selectionStart;
       const insert = `@[${t.name}] `;
@@ -461,59 +481,95 @@
       const v = input.value;
       const cursor = input.selectionStart;
       const before = v.slice(0, cursor);
-      // Letzter "@", der einen Token einleitet: nicht escaped, nicht in []
       const m = before.match(/(^|[\s])@([^@\s\[\]]*)$/);
       if (!m) { close(); return; }
-      atIdx = before.length - m[2].length - 1;  // Index des @
+      atIdx = before.length - m[2].length - 1;
       const q = m[2].toLowerCase();
       matches = AT_TARGETS
+        .filter(filter)
         .filter(t => t.name.toLowerCase().includes(q))
         .slice(0, 8);
       if (!matches.length) { close(); return; }
-      active = 0;
+      activeIdx = 0;
       render();
     }
 
     input.addEventListener("input", update);
-    input.addEventListener("click", update);  // cursor moved
+    input.addEventListener("click", update);
     input.addEventListener("keydown", (e) => {
       if (popup.hidden) return;
       if (e.key === "ArrowDown") {
         e.preventDefault();
-        active = (active + 1) % matches.length;
+        activeIdx = (activeIdx + 1) % matches.length;
         render();
       } else if (e.key === "ArrowUp") {
         e.preventDefault();
-        active = (active - 1 + matches.length) % matches.length;
+        activeIdx = (activeIdx - 1 + matches.length) % matches.length;
         render();
       } else if (e.key === "Enter" || e.key === "Tab") {
         e.preventDefault();
-        apply(active);
+        apply(activeIdx);
       } else if (e.key === "Escape") {
         e.preventDefault();
         close();
       }
     });
-    input.addEventListener("blur", () => {
-      // kleiner Delay, damit mousedown noch greift
-      setTimeout(close, 100);
-    });
+    input.addEventListener("blur", () => setTimeout(close, 100));
   }
+
   attachAtComplete(
-    document.getElementById("dm-text"),
-    document.getElementById("dm-at-popup"),
+    document.getElementById("conv-text"),
+    document.getElementById("conv-at-popup"),
   );
   attachAtComplete(
-    document.getElementById("ch-text"),
-    document.getElementById("ch-at-popup"),
+    document.getElementById("dm-new-peer"),
+    document.getElementById("dm-new-popup"),
+    {
+      mode: "pick",
+      filter: (t) => !!t.pubkey_hex,
+      onPick: (t) => selectDm(t.pubkey_hex.toLowerCase(), t.name),
+    },
   );
 
-  // initial sidebar refresh + periodic
-  loadThreads();
+  // ---------- Init / Restore ----------
+  function applyConvSpec(spec) {
+    if (!spec) return false;
+    if (spec.startsWith("dm:")) {
+      const peer = spec.slice(3);
+      if (/^[0-9a-fA-F]{64}$/.test(peer)) { selectDm(peer.toLowerCase(), null); return true; }
+    } else if (spec.startsWith("ch:")) {
+      const id = spec.slice(3);
+      selectChannel(id, id.slice(0,8));
+      return true;
+    }
+    return false;
+  }
+
+  function restoreState() {
+    const s = parseHash();
+    // Legacy-Hashes: alte tab=dms / tab=channels mappen auf "chats"
+    let tab = s.tab;
+    if (tab === "dms" || tab === "channels") tab = "chats";
+    if (!["chats","settings"].includes(tab)) tab = restoredTab() || "chats";
+    showTab(tab);
+
+    // Conv: Hash hat Vorrang, sonst localStorage
+    let convSpec = s.conv || "";
+    if (!convSpec) convSpec = restoredConv();
+    if (tab === "chats") {
+      loadThreads().then(() => applyConvSpec(convSpec));
+    }
+  }
+
   setInterval(loadThreads, POLL_THREADS_MS);
-
-  restoreFromHash();
-  window.addEventListener("hashchange", restoreFromHash);
+  restoreState();
+  window.addEventListener("hashchange", () => {
+    const s = parseHash();
+    let tab = s.tab;
+    if (tab === "dms" || tab === "channels") tab = "chats";
+    if (["chats","settings"].includes(tab)) showTab(tab);
+    if (s.conv) applyConvSpec(s.conv);
+  });
 })();
 </script>
 {% endblock %}

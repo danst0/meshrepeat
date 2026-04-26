@@ -224,14 +224,13 @@ async def test_companion_detail_page_and_settings(app_and_outbox) -> None:
         assert resp.status_code == 200, resp.text
         ident_id = resp.json()["id"]
 
-        # Detail-Page erreichbar mit Tabs
+        # Detail-Page erreichbar mit Tabs (chats unified, settings)
         resp = await client.get(f"/companion/{ident_id}/")
         assert resp.status_code == 200
         body = resp.text
         assert "Antonia" in body
         assert 'data-tab="settings"' in body
-        assert 'data-tab="dms"' in body
-        assert 'data-tab="channels"' in body
+        assert 'data-tab="chats"' in body
 
         # Rename
         resp = await client.post(
