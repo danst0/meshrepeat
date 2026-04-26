@@ -224,13 +224,21 @@ async def test_companion_detail_page_and_settings(app_and_outbox) -> None:
         assert resp.status_code == 200, resp.text
         ident_id = resp.json()["id"]
 
-        # Detail-Page erreichbar mit Tabs (chats unified, settings)
+        # Detail-Page erreichbar mit Tabs (chats unified, map, settings)
         resp = await client.get(f"/companion/{ident_id}/")
         assert resp.status_code == 200
         body = resp.text
         assert "Antonia" in body
         assert 'data-tab="settings"' in body
         assert 'data-tab="chats"' in body
+        assert 'data-tab="map"' in body
+
+        # Map-API leer (noch keine Adverts mit Lat/Lon empfangen)
+        resp = await client.get(
+            f"/api/v1/companion/identities/{ident_id}/map"
+        )
+        assert resp.status_code == 200
+        assert resp.json() == []
 
         # Rename
         resp = await client.post(

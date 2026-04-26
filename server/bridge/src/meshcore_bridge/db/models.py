@@ -201,6 +201,9 @@ class CompanionContact(Base):
     favorite: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default="0", default=False
     )
+    # Aus letzter ADVERT app_data extrahiert, falls Lat/Lon-Flag gesetzt war.
+    last_lat: Mapped[float | None] = mapped_column(nullable=True)
+    last_lon: Mapped[float | None] = mapped_column(nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

@@ -493,6 +493,39 @@ async def list_dm_messages(
     return [_message_dict(m) for m in rows]
 
 
+@router.get("/identities/{identity_id}/map")
+async def list_identity_map_pins(
+    identity_id: UUID,
+    user: User = Depends(current_user_required),
+    db: AsyncSession = Depends(get_db),
+) -> list[dict[str, Any]]:
+    """Alle bekannten Kontakte mit Geokoordinaten für die Identity."""
+    if not await _user_owns_identity(db, user.id, identity_id):
+        raise HTTPException(status_code=404)
+    rows = list(
+        (
+            await db.execute(
+                select(CompanionContact).where(
+                    CompanionContact.identity_id == identity_id,
+                    CompanionContact.last_lat.is_not(None),
+                    CompanionContact.last_lon.is_not(None),
+                )
+            )
+        ).scalars()
+    )
+    return [
+        {
+            "peer_pubkey_hex": c.peer_pubkey.hex(),
+            "peer_name": c.peer_name,
+            "lat": c.last_lat,
+            "lon": c.last_lon,
+            "favorite": c.favorite,
+            "last_seen_at": _ts_iso(c.last_seen_at),
+        }
+        for c in rows
+    ]
+
+
 @router.get("/identities/{identity_id}/channels/{channel_id}/messages")
 async def list_channel_messages(
     identity_id: UUID,

@@ -14,13 +14,14 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from meshcore_bridge.db import (
     CompanionChannel,
+    CompanionContact,
     CompanionIdentity,
     CompanionMessage,
     User,
 )
 from meshcore_bridge.db.models import Base
 from meshcore_companion.crypto import LocalIdentity, derive_channel_secret
-from meshcore_companion.node import CompanionNode
+from meshcore_companion.node import CompanionNode, encode_advert_app_data
 from meshcore_companion.packet import PayloadType
 from meshcore_companion.service import CompanionService
 
@@ -376,6 +377,67 @@ async def test_public_channel_inbound_with_real_psk(service_env) -> None:
     assert len(rows) == 1
     assert rows[0].text == "hello public"
     assert rows[0].peer_name == "external"
+
+
+@pytest.mark.asyncio
+async def test_inbound_advert_persists_lat_lon(service_env) -> None:
+    """ADVERT mit Geokoordinaten füllt CompanionContact.last_lat/last_lon —
+    Grundlage für die Karten-Ansicht."""
+    svc, sessionmaker, user_id, _sent = service_env
+    loaded = await svc.add_identity(
+        user_id=user_id, name="Antonia", scope="public"
+    )
+    other = CompanionNode(LocalIdentity.generate())
+    app_data = encode_advert_app_data(name="Drusilla", lat=51.0, lon=7.0)
+    pkt = other.make_advert(app_data=app_data, timestamp=1000)
+    await svc.on_inbound_packet(raw=pkt.encode(), scope="public")
+
+    async with sessionmaker() as db:
+        rows = list(
+            (
+                await db.execute(
+                    select(CompanionContact).where(
+                        CompanionContact.identity_id == loaded.id
+                    )
+                )
+            ).scalars()
+        )
+    assert len(rows) == 1
+    assert rows[0].peer_name == "Drusilla"
+    assert rows[0].last_lat == pytest.approx(51.0, abs=1e-5)
+    assert rows[0].last_lon == pytest.approx(7.0, abs=1e-5)
+
+
+@pytest.mark.asyncio
+async def test_inbound_advert_without_lat_lon_keeps_previous(service_env) -> None:
+    """Ein Advert ohne Geo-Flag darf vorhandene Koordinaten nicht löschen."""
+    svc, sessionmaker, user_id, _sent = service_env
+    loaded = await svc.add_identity(
+        user_id=user_id, name="Antonia", scope="public"
+    )
+    other = CompanionNode(LocalIdentity.generate())
+
+    pkt1 = other.make_advert(
+        app_data=encode_advert_app_data(name="Drusilla", lat=51.0, lon=7.0),
+        timestamp=1000,
+    )
+    await svc.on_inbound_packet(raw=pkt1.encode(), scope="public")
+    pkt2 = other.make_advert(
+        app_data=encode_advert_app_data(name="Drusilla"),  # no lat/lon
+        timestamp=1100,
+    )
+    await svc.on_inbound_packet(raw=pkt2.encode(), scope="public")
+
+    async with sessionmaker() as db:
+        row = (
+            await db.execute(
+                select(CompanionContact).where(
+                    CompanionContact.identity_id == loaded.id
+                )
+            )
+        ).scalar_one()
+    assert row.last_lat == pytest.approx(51.0, abs=1e-5)
+    assert row.last_lon == pytest.approx(7.0, abs=1e-5)
 
 
 @pytest.mark.asyncio

@@ -26,6 +26,8 @@ _sessionmaker: async_sessionmaker[AsyncSession] | None = None
 # Spalte, DDL-Snippet). Bis Alembic-Migrations beim Start laufen.
 _COLUMN_PATCHES: tuple[tuple[str, str, str], ...] = (
     ("companion_contacts", "favorite", "BOOLEAN NOT NULL DEFAULT 0"),
+    ("companion_contacts", "last_lat", "FLOAT NULL"),
+    ("companion_contacts", "last_lon", "FLOAT NULL"),
 )
 
 

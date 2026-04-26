@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}MeshCore Spiegel{% endblock %}</title>
+  {% block head_extra %}{% endblock %}
   <style>
     :root {
       --bg: #0f1419;
@@ -236,6 +237,39 @@
     }
     .at-name { color: var(--fg); }
     .at-sub { color: var(--muted); font-size: .75rem; }
+
+    /* Sidebar sections + new-DM picker */
+    .thread-new {
+      margin: 0 0 .4rem;
+      padding-bottom: .4rem;
+      border-bottom: 1px solid var(--border);
+    }
+    .thread-new input { font-size: .85rem; padding: .35rem .45rem; }
+    .thread-section-label {
+      font-size: .7rem;
+      text-transform: uppercase;
+      letter-spacing: .08em;
+      color: var(--muted);
+      padding: .5rem .15rem .15rem;
+    }
+    .msg-hops { color: var(--muted); font-size: .8em; }
+
+    /* Node map */
+    .node-map {
+      width: 100%;
+      height: 540px;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      background: #0a0e14;
+    }
+    /* Leaflet popup über dunklem Theme */
+    .leaflet-popup-content-wrapper, .leaflet-popup-tip {
+      background: var(--card) !important;
+      color: var(--fg) !important;
+      border: 1px solid var(--border);
+    }
+    .leaflet-popup-content code { background: #0a0e14; }
+    .leaflet-container a.leaflet-popup-close-button { color: var(--muted); }
   </style>
 </head>
 <body>

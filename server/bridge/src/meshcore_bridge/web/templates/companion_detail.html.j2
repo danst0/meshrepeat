@@ -1,5 +1,11 @@
 {% extends "base.html.j2" %}
 {% block title %}{{ identity.name }} — Companion{% endblock %}
+{% block head_extra %}
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+        integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+          integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+{% endblock %}
 {% block content %}
   <p style="margin:0 0 .5rem"><a href="/companion/">← Companion-Übersicht</a></p>
 
@@ -15,6 +21,7 @@
 
   <div class="tabs">
     <button class="tab-btn" data-tab="chats">Chats</button>
+    <button class="tab-btn" data-tab="map">Karte</button>
     <button class="tab-btn" data-tab="settings">Settings</button>
   </div>
 
@@ -50,6 +57,21 @@
           <button type="submit">Senden</button>
         </form>
       </div>
+    </div>
+  </section>
+
+  {# ---------- Map ---------- #}
+  <section class="tab-panel" data-tab="map">
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:.5rem;margin-bottom:.5rem">
+        <h2 style="margin:0">Karte beobachteter Knoten</h2>
+        <span id="map-status" style="color:var(--muted);font-size:.85em"></span>
+      </div>
+      <div id="node-map" class="node-map"></div>
+      <p style="margin-top:.5rem;font-size:.85em;color:var(--muted)">
+        Pins basieren auf Lat/Lon-Feldern aus empfangenen ADVERTs. Nodes
+        ohne Geo-Flag erscheinen nicht. Daten werden beim Laden geholt.
+      </p>
     </div>
   </section>
 
@@ -176,6 +198,7 @@
     persistTab(b.dataset.tab);
     showTab(b.dataset.tab);
     if (b.dataset.tab === "chats") loadThreads();
+    else if (b.dataset.tab === "map") ensureMap();
   }));
 
   // ---------- State ----------
@@ -531,6 +554,66 @@
     },
   );
 
+  // ---------- Map ----------
+  let mapInstance = null;
+  let mapMarkers = null;
+
+  async function ensureMap() {
+    const status = document.getElementById("map-status");
+    if (typeof L === "undefined") {
+      status.textContent = "Leaflet konnte nicht geladen werden.";
+      return;
+    }
+    if (!mapInstance) {
+      // Default-Center ~Köln, wird gleich auf Pins gefittet
+      mapInstance = L.map("node-map").setView([51.0, 7.0], 8);
+      L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+        maxZoom: 19,
+        attribution: "© OpenStreetMap-Mitwirkende",
+      }).addTo(mapInstance);
+      mapMarkers = L.layerGroup().addTo(mapInstance);
+    } else {
+      // Tab erst sichtbar geworden → invalidate damit Leaflet die Größe
+      // korrekt neu berechnet.
+      setTimeout(() => mapInstance.invalidateSize(), 50);
+    }
+    await refreshMap();
+  }
+
+  async function refreshMap() {
+    const status = document.getElementById("map-status");
+    try {
+      const r = await fetch(`${API}/identities/${IDENTITY_ID}/map`, {credentials:"same-origin"});
+      if (!r.ok) { status.textContent = "Fehler: " + r.status; return; }
+      const pins = await r.json();
+      mapMarkers.clearLayers();
+      const bounds = [];
+      for (const p of pins) {
+        if (typeof p.lat !== "number" || typeof p.lon !== "number") continue;
+        const popup = `<strong>${escText(p.peer_name || "?")}</strong><br>` +
+                      `<code>${p.peer_pubkey_hex.slice(0,16)}…</code><br>` +
+                      `<small>last seen: ${fmtDate(p.last_seen_at)}</small>`;
+        const marker = L.circleMarker([p.lat, p.lon], {
+          radius: p.favorite ? 8 : 6,
+          color: p.favorite ? "#ffd866" : "#82aaff",
+          weight: 2,
+          fillColor: p.favorite ? "#ffd866" : "#82aaff",
+          fillOpacity: 0.7,
+        }).bindPopup(popup);
+        mapMarkers.addLayer(marker);
+        bounds.push([p.lat, p.lon]);
+      }
+      status.textContent = pins.length + " Knoten mit Geokoordinaten";
+      if (bounds.length === 1) {
+        mapInstance.setView(bounds[0], 12);
+      } else if (bounds.length > 1) {
+        mapInstance.fitBounds(bounds, {padding: [40, 40], maxZoom: 13});
+      }
+    } catch (e) {
+      status.textContent = "Fehler: " + e;
+    }
+  }
+
   // ---------- Init / Restore ----------
   function applyConvSpec(spec) {
     if (!spec) return false;
@@ -545,12 +628,14 @@
     return false;
   }
 
+  const VALID_TABS = ["chats", "map", "settings"];
+
   function restoreState() {
     const s = parseHash();
     // Legacy-Hashes: alte tab=dms / tab=channels mappen auf "chats"
     let tab = s.tab;
     if (tab === "dms" || tab === "channels") tab = "chats";
-    if (!["chats","settings"].includes(tab)) tab = restoredTab() || "chats";
+    if (!VALID_TABS.includes(tab)) tab = restoredTab() || "chats";
     showTab(tab);
 
     // Conv: Hash hat Vorrang, sonst localStorage
@@ -558,6 +643,8 @@
     if (!convSpec) convSpec = restoredConv();
     if (tab === "chats") {
       loadThreads().then(() => applyConvSpec(convSpec));
+    } else if (tab === "map") {
+      ensureMap();
     }
   }
 
@@ -567,7 +654,10 @@
     const s = parseHash();
     let tab = s.tab;
     if (tab === "dms" || tab === "channels") tab = "chats";
-    if (["chats","settings"].includes(tab)) showTab(tab);
+    if (VALID_TABS.includes(tab)) {
+      showTab(tab);
+      if (tab === "map") ensureMap();
+    }
     if (s.conv) applyConvSpec(s.conv);
   });
 })();

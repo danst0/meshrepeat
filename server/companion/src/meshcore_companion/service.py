@@ -458,12 +458,20 @@ class CompanionService:
                         peer_pubkey=advert.pubkey,
                         peer_name=name or None,
                         last_seen_at=datetime.now(UTC),
+                        last_lat=parsed.lat,
+                        last_lon=parsed.lon,
                     )
                     db.add(contact)
                 else:
                     contact.last_seen_at = datetime.now(UTC)
                     if name and contact.peer_name != name:
                         contact.peer_name = name
+                    # Koordinaten nur überschreiben, wenn der Advert welche
+                    # mitbringt (Knoten könnten ohne Lat/Lon adverten —
+                    # dann letzten bekannten Wert behalten).
+                    if parsed.lat is not None and parsed.lon is not None:
+                        contact.last_lat = parsed.lat
+                        contact.last_lon = parsed.lon
                 await db.commit()
 
     async def _handle_inbound_dm(self, *, pkt: Packet, scope: str, raw: bytes) -> None:
