@@ -29,12 +29,9 @@
   <section class="tab-panel" data-tab="chats">
     <div class="card messenger">
       <aside class="thread-list" id="threads">
-        <form id="dm-new" class="thread-new">
-          <div class="at-input-wrap">
-            <input id="dm-new-peer" required maxlength="128" autocomplete="off"
-                   placeholder="Name tippen oder Pubkey-Hex einfügen…">
-            <div class="at-popup" id="dm-new-popup" hidden></div>
-          </div>
+        <form id="dm-search-form" class="thread-new" onsubmit="return false">
+          <input id="dm-search" type="search" autocomplete="off"
+                 placeholder="Suchen oder Pubkey-Hex…">
         </form>
         <div class="thread-section-label">Kanäle</div>
         <div id="ch-list">
@@ -220,6 +217,7 @@
   let activeTimer = null;
   let lastActiveTs = null;
   let threadCache = {dms: [], channels: []};
+  let dmFilter = "";  // aktueller Suchstring im Sidebar-Filter
 
   function fmtTime(iso) {
     if (!iso) return "";
@@ -233,6 +231,54 @@
   }
   function shortHex(hex, n=8) { return hex ? hex.slice(0,n)+"…" : ""; }
   function escText(s) { const d = document.createElement("div"); d.textContent = s ?? ""; return d.innerHTML; }
+
+  // ---------- DM-Suche (filtert die Sidebar-Liste direkt) ----------
+  function normalizeForSearch(s) {
+    return (s || "").toLowerCase()
+      .replace(/[äà-å]/g, "a")
+      .replace(/[ëè-ê]/g, "e")
+      .replace(/[ïì-î]/g, "i")
+      .replace(/[öò-ô]/g, "o")
+      .replace(/[üù-û]/g, "u")
+      .replace(/ß/g, "ss")
+      .replace(/[ck]/g, "k")
+      .replace(/y/g, "i");
+  }
+
+  function applyDmFilter(dms) {
+    const q = (dmFilter || "").trim();
+    if (!q) return dms;
+    // Hex-Pubkey-Suche: 64 Zeichen, exakter Match → nur dieser Eintrag
+    if (/^[0-9a-fA-F]{64}$/.test(q)) {
+      const target = q.toLowerCase();
+      return dms.filter(t => t.peer_pubkey_hex.toLowerCase() === target);
+    }
+    const qN = normalizeForSearch(q);
+    // Index der dms nach pubkey für dedup mit AT_TARGETS
+    const haveByPk = new Map(dms.map(t => [t.peer_pubkey_hex.toLowerCase(), t]));
+    const out = dms.filter(t => normalizeForSearch(t.peer_name || "").includes(qN));
+    // Zusätzlich Treffer aus AT_TARGETS, die nicht in den Top-100-DMs sind:
+    // bekannte Kontakte aus älteren Adverts/Channel-Posts. Klick auf so
+    // einen Eintrag startet einen neuen DM-Thread.
+    for (const t of AT_TARGETS) {
+      if (!t.pubkey_hex) continue;
+      const k = t.pubkey_hex.toLowerCase();
+      if (haveByPk.has(k)) continue;
+      if (!normalizeForSearch(t.name).includes(qN)) continue;
+      out.push({
+        id: null,  // kein Contact-Row mit DB-id für Stern-Toggle
+        peer_pubkey_hex: t.pubkey_hex,
+        peer_name: t.name,
+        favorite: false,
+        last_ts: null,
+        last_text: null,
+        last_direction: null,
+        _from_targets: true,
+      });
+      if (out.length > 50) break;
+    }
+    return out;
+  }
 
   // ---------- Threads ----------
   async function loadThreads() {
@@ -286,34 +332,49 @@
 
   function renderDmList(dms) {
     const box = document.getElementById("dm-list");
-    if (!dms.length) {
-      box.innerHTML = '<div class="thread-empty" style="color:var(--muted);padding:.5rem">Keine DMs. Starte oben einen neuen Thread.</div>';
+    // Filter anwenden: ist der Suchstring eine 64-Zeichen-Hex-Pubkey, dann
+    // nur exakter pubkey-Match. Sonst normalisiertes Substring auf Name.
+    const filtered = applyDmFilter(dms);
+    if (!filtered.length) {
+      const hint = dmFilter
+        ? `kein Treffer für "${escText(dmFilter)}"`
+        : "Keine DMs. Tippe oben einen Namen oder Pubkey-Hex.";
+      box.innerHTML = `<div class="thread-empty" style="color:var(--muted);padding:.5rem">${hint}</div>`;
       return;
     }
     box.innerHTML = "";
-    for (const t of dms) {
+    for (const t of filtered) {
       const wrap = document.createElement("div");
       wrap.className = "thread-row" + (
         active && active.kind === "dm" && active.peer === t.peer_pubkey_hex
           ? " active" : ""
       );
 
-      // Stern-Toggle als eigener klickbarer Button (vor dem Thread-Body)
+      // Stern-Toggle als eigener klickbarer Button (vor dem Thread-Body).
+      // Bei AT_TARGETS-Treffern (kein Contact-Row in der API-Antwort)
+      // ist t.id null — wir zeigen einen disabled grauen Stern statt
+      // POSTen zu lassen.
       const star = document.createElement("button");
       star.type = "button";
       star.className = "thread-star";
       star.textContent = t.favorite ? "★" : "☆";
       star.style.color = t.favorite ? "gold" : "var(--muted)";
-      star.title = t.favorite ? "Favorit entfernen" : "Als Favorit markieren";
-      star.addEventListener("click", async (e) => {
-        e.stopPropagation();
-        try {
-          const r = await fetch(`${API}/contacts/${t.id}/favorite`, {
-            method: "POST", credentials: "same-origin",
-          });
-          if (r.ok) await loadThreads();
-        } catch (err) { console.warn("favorite toggle failed", err); }
-      });
+      if (!t.id) {
+        star.disabled = true;
+        star.style.opacity = ".35";
+        star.title = "Erst öffnen, dann markieren";
+      } else {
+        star.title = t.favorite ? "Favorit entfernen" : "Als Favorit markieren";
+        star.addEventListener("click", async (e) => {
+          e.stopPropagation();
+          try {
+            const r = await fetch(`${API}/contacts/${t.id}/favorite`, {
+              method: "POST", credentials: "same-origin",
+            });
+            if (r.ok) await loadThreads();
+          } catch (err) { console.warn("favorite toggle failed", err); }
+        });
+      }
       wrap.appendChild(star);
 
       const item = document.createElement("button");
@@ -467,24 +528,40 @@
     }
   });
 
-  document.getElementById("dm-new").addEventListener("submit", (e) => {
+  // Sidebar-Suche: filtert die DM-Liste live, fasst dms + AT_TARGETS
+  // zusammen. Enter im Suchfeld öffnet den ersten Treffer (oder Hex
+  // direkt, wenn 64 Zeichen).
+  const searchInput = document.getElementById("dm-search");
+  searchInput.addEventListener("input", (e) => {
+    dmFilter = e.target.value;
+    renderDmList(threadCache.dms);
+  });
+  searchInput.addEventListener("keydown", (e) => {
+    if (e.key !== "Enter") return;
     e.preventDefault();
-    const v = document.getElementById("dm-new-peer").value.trim();
-    // Hex direkt
+    const v = (dmFilter || "").trim();
+    if (!v) return;
     if (/^[0-9a-fA-F]{64}$/.test(v)) {
       selectDm(v.toLowerCase(), null);
-      document.getElementById("dm-new-peer").value = "";
+      searchInput.value = "";
+      dmFilter = "";
+      renderDmList(threadCache.dms);
       return;
     }
-    // exakter Name aus Targets
-    const lower = v.replace(/^@/, "").toLowerCase();
-    const exact = AT_TARGETS.find(t => t.pubkey_hex && t.name.toLowerCase() === lower);
-    if (exact) {
-      selectDm(exact.pubkey_hex.toLowerCase(), exact.name);
-      document.getElementById("dm-new-peer").value = "";
-      return;
+    const filtered = applyDmFilter(threadCache.dms);
+    if (filtered.length > 0) {
+      selectDm(filtered[0].peer_pubkey_hex.toLowerCase(), filtered[0].peer_name);
+      searchInput.value = "";
+      dmFilter = "";
+      renderDmList(threadCache.dms);
     }
-    alert("Kein Kontakt mit diesem Namen, oder Pubkey ist nicht 64 Hex-Zeichen.");
+  });
+  searchInput.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") {
+      searchInput.value = "";
+      dmFilter = "";
+      renderDmList(threadCache.dms);
+    }
   });
 
   // ---------- @-Auto-Complete ----------
@@ -493,21 +570,6 @@
   // mode = "pick"   → onPick(target) callbacken, Input leeren (DM-Picker);
   //   trigger ist jedes Tippen (kein @ nötig). Hex-Pubkey schließt Popup.
   // placement = "above" (default, Compose-Feld) | "below" (Sidebar-Picker)
-
-  // Normalisiert Name + Query: lowercase, häufige Tippfehler-Pärchen
-  // (k↔c, z↔c, y↔i) auf einen Buchstaben mappen, damit "oktavia" auch
-  // "Octavia" findet.
-  function normalizeForSearch(s) {
-    return (s || "").toLowerCase()
-      .replace(/[äà-å]/g, "a")
-      .replace(/[ëè-ê]/g, "e")
-      .replace(/[ïì-î]/g, "i")
-      .replace(/[öò-ô]/g, "o")
-      .replace(/[üù-û]/g, "u")
-      .replace(/ß/g, "ss")
-      .replace(/[ck]/g, "k")  // c und k gleichwertig
-      .replace(/y/g, "i");    // y meistens als i gehört
-  }
 
   function attachAtComplete(input, popup, opts={}) {
     const mode = opts.mode || "insert";
@@ -620,16 +682,6 @@
   attachAtComplete(
     document.getElementById("conv-text"),
     document.getElementById("conv-at-popup"),
-  );
-  attachAtComplete(
-    document.getElementById("dm-new-peer"),
-    document.getElementById("dm-new-popup"),
-    {
-      mode: "pick",
-      placement: "below",
-      filter: (t) => !!t.pubkey_hex,
-      onPick: (t) => selectDm(t.pubkey_hex.toLowerCase(), t.name),
-    },
   );
 
   // ---------- Map ----------
