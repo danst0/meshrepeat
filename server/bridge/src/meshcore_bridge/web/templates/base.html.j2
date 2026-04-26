@@ -156,6 +156,28 @@
       background: rgba(130,170,255,.12);
       border-left-color: var(--accent);
     }
+    /* DM-Sidebar-Zeile mit Stern-Toggle vor dem Thread-Item */
+    .thread-row {
+      display: grid;
+      grid-template-columns: auto 1fr;
+      align-items: stretch;
+      gap: .15rem;
+      border-radius: 4px;
+    }
+    .thread-row.active { background: rgba(130,170,255,.12); }
+    .thread-star {
+      margin: 0;
+      padding: 0 .35rem;
+      background: transparent;
+      border: none;
+      cursor: pointer;
+      font-size: 1rem;
+      line-height: 1;
+      align-self: center;
+    }
+    .thread-star:hover { opacity: .8; }
+    .thread-item-bare { background: transparent; border-left-color: transparent; }
+    .thread-row.active .thread-item-bare { border-left-color: var(--accent); }
     .thread-top {
       display: flex;
       justify-content: space-between;

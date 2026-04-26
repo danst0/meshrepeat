@@ -367,21 +367,16 @@ async def list_identity_threads(
     if not await _user_owns_identity(db, user.id, identity_id):
         raise HTTPException(status_code=404)
 
-    msgs = list(
+    # Top 100 Kontakte (mit Pubkey, sortiert nach last_seen DESC) — die
+    # zeigen wir auch ohne aktiven Thread in der Sidebar, damit man neue
+    # DMs direkt anstossen kann.
+    contact_rows = list(
         (
             await db.execute(
-                select(CompanionMessage)
-                .where(CompanionMessage.identity_id == identity_id)
-                .order_by(desc(CompanionMessage.ts))
-            )
-        ).scalars()
-    )
-    contacts = list(
-        (
-            await db.execute(
-                select(CompanionContact).where(
-                    CompanionContact.identity_id == identity_id
-                )
+                select(CompanionContact)
+                .where(CompanionContact.identity_id == identity_id)
+                .order_by(desc(CompanionContact.last_seen_at))
+                .limit(100)
             )
         ).scalars()
     )
@@ -394,49 +389,50 @@ async def list_identity_threads(
             )
         ).scalars()
     )
-    contacts_by_pk: dict[bytes, CompanionContact] = {
-        c.peer_pubkey: c for c in contacts
-    }
 
-    dm_seen: dict[bytes, dict[str, Any]] = {}
+    # Letzte Nachricht pro peer / channel — Snippet für die Sidebar.
+    msgs = list(
+        (
+            await db.execute(
+                select(CompanionMessage)
+                .where(CompanionMessage.identity_id == identity_id)
+                .order_by(desc(CompanionMessage.ts))
+                .limit(500)
+            )
+        ).scalars()
+    )
+    last_msg_by_peer: dict[bytes, CompanionMessage] = {}
     chan_last: dict[str, CompanionMessage] = {}
     for m in msgs:
-        if m.peer_pubkey is not None and m.peer_pubkey not in dm_seen:
-            contact = contacts_by_pk.get(m.peer_pubkey)
-            dm_seen[m.peer_pubkey] = {
-                "peer_pubkey_hex": m.peer_pubkey.hex(),
-                "peer_name": (contact.peer_name if contact else None) or m.peer_name,
-                "favorite": bool(contact and contact.favorite),
-                "last_ts": _ts_iso(m.ts),
-                "last_text": m.text,
-                "last_direction": m.direction,
-            }
-        if (
+        if m.peer_pubkey is not None and m.peer_pubkey not in last_msg_by_peer:
+            last_msg_by_peer[m.peer_pubkey] = m
+        elif (
             m.peer_pubkey is None
             and m.channel_name
             and m.channel_name not in chan_last
         ):
             chan_last[m.channel_name] = m
 
-    # Auch Kontakte ohne Nachrichten sichtbar machen (mind. Favoriten),
-    # damit man als Erster eine DM starten kann.
-    for c in contacts:
-        if c.peer_pubkey in dm_seen:
-            continue
-        if not c.favorite:
-            continue
-        dm_seen[c.peer_pubkey] = {
-            "peer_pubkey_hex": c.peer_pubkey.hex(),
-            "peer_name": c.peer_name,
-            "favorite": True,
-            "last_ts": _ts_iso(c.last_seen_at),
-            "last_text": None,
-            "last_direction": None,
-        }
-
-    dms = list(dm_seen.values())
+    dms: list[dict[str, Any]] = []
+    for c in contact_rows:
+        last = last_msg_by_peer.get(c.peer_pubkey)
+        last_ts = _ts_iso(last.ts) if last else _ts_iso(c.last_seen_at)
+        dms.append(
+            {
+                "id": str(c.id),
+                "peer_pubkey_hex": c.peer_pubkey.hex(),
+                "peer_name": c.peer_name,
+                "favorite": bool(c.favorite),
+                "last_ts": last_ts,
+                "last_text": last.text if last else None,
+                "last_direction": last.direction if last else None,
+            }
+        )
+    # Reihenfolge: erst die mit Verkehr (last_msg-Snippet), sonst nach
+    # last_seen_at. Favoriten-Priorität wird im Frontend per Stern
+    # visualisiert, nicht durch Pin nach oben — sonst alte Favoriten
+    # verdrängen frische Mesh-Sender.
     dms.sort(key=lambda t: t["last_ts"] or "", reverse=True)
-    dms.sort(key=lambda t: not t["favorite"])  # stable: favorites first
 
     chan_rows = []
     for ch in channels:

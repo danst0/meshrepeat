@@ -292,17 +292,43 @@
     }
     box.innerHTML = "";
     for (const t of dms) {
+      const wrap = document.createElement("div");
+      wrap.className = "thread-row" + (
+        active && active.kind === "dm" && active.peer === t.peer_pubkey_hex
+          ? " active" : ""
+      );
+
+      // Stern-Toggle als eigener klickbarer Button (vor dem Thread-Body)
+      const star = document.createElement("button");
+      star.type = "button";
+      star.className = "thread-star";
+      star.textContent = t.favorite ? "★" : "☆";
+      star.style.color = t.favorite ? "gold" : "var(--muted)";
+      star.title = t.favorite ? "Favorit entfernen" : "Als Favorit markieren";
+      star.addEventListener("click", async (e) => {
+        e.stopPropagation();
+        try {
+          const r = await fetch(`${API}/contacts/${t.id}/favorite`, {
+            method: "POST", credentials: "same-origin",
+          });
+          if (r.ok) await loadThreads();
+        } catch (err) { console.warn("favorite toggle failed", err); }
+      });
+      wrap.appendChild(star);
+
       const item = document.createElement("button");
       item.type = "button";
-      item.className = "thread-item";
-      if (active && active.kind === "dm" && active.peer === t.peer_pubkey_hex) item.classList.add("active");
-      const star = t.favorite ? '<span style="color:gold">★</span> ' : '';
+      item.className = "thread-item thread-item-bare";
       const peer = escText(t.peer_name || shortHex(t.peer_pubkey_hex, 12));
-      const last = t.last_text ? escText(t.last_text).slice(0,40) : '<span style="color:var(--muted)">—</span>';
-      item.innerHTML = `<div class="thread-top">${star}${peer}<span class="thread-time">${fmtTime(t.last_ts)}</span></div>
+      const last = t.last_text
+        ? escText(t.last_text).slice(0, 40)
+        : '<span style="color:var(--muted)">—</span>';
+      item.innerHTML = `<div class="thread-top">${peer}<span class="thread-time">${fmtTime(t.last_ts)}</span></div>
                         <div class="thread-snip">${last}</div>`;
       item.addEventListener("click", () => selectDm(t.peer_pubkey_hex, t.peer_name));
-      box.appendChild(item);
+      wrap.appendChild(item);
+
+      box.appendChild(wrap);
     }
   }
 
