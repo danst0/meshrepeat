@@ -38,7 +38,10 @@ def _coerce_for_cbor(obj: object) -> object:
 
 
 def encode_frame(frame: Frame) -> bytes:
-    payload = _FRAME_ADAPTER.dump_python(frame, mode="python")
+    # exclude_none: Firmware-CBOR-Reader (CborReader::skipItem) unterstützt
+    # CBOR-null (Major-Type 7) nicht — siehe firmware/src/wire/CborReader.h.
+    # Wenn wir None-Felder sparen, hängt sich das Repeater-Parsing nicht auf.
+    payload = _FRAME_ADAPTER.dump_python(frame, mode="python", exclude_none=True)
     payload = _coerce_for_cbor(payload)
     encoded = cbor2.dumps(payload, canonical=True)
     if len(encoded) > MAX_FRAME_BYTES:
