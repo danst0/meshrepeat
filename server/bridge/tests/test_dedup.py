@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from uuid import uuid4
 
-from meshcore_bridge.bridge.dedup import DedupCache, packet_key
+from meshcore_bridge.bridge.dedup import DedupCache, packet_key, payload_dedup_key
+from meshcore_companion.packet import Packet as MCPacket
+from meshcore_companion.packet import PayloadType, RouteType
 
 
 class _Clock:
@@ -93,3 +95,81 @@ def test_seen_sites_returns_set_copy() -> None:
     assert sites == {a, b}
     sites.clear()  # mutating return must not affect cache
     assert cache.seen_sites(b"k") == {a, b}
+
+
+# ---------- payload_dedup_key (hop-invariant) ----------
+
+
+def _build_raw(*, route_type: RouteType, payload_type: PayloadType,
+               path: bytes, payload: bytes,
+               transport_codes: tuple[int, int] = (0, 0)) -> bytes:
+    return MCPacket(
+        route_type=route_type,
+        payload_type=payload_type,
+        path=path,
+        payload=payload,
+        transport_codes=transport_codes,
+    ).encode()
+
+
+def test_payload_dedup_key_ignores_path_changes() -> None:
+    body = b"\x01\x02\x03\x04\x05\x06\x07\x08"
+    raw1 = _build_raw(
+        route_type=RouteType.FLOOD,
+        payload_type=PayloadType.GRP_TXT,
+        path=b"\xaa",
+        payload=body,
+    )
+    raw2 = _build_raw(
+        route_type=RouteType.FLOOD,
+        payload_type=PayloadType.GRP_TXT,
+        path=b"\xaa\xbb\xcc",
+        payload=body,
+    )
+    assert raw1 != raw2
+    assert payload_dedup_key(raw1) == payload_dedup_key(raw2)
+
+
+def test_payload_dedup_key_distinguishes_payload_types() -> None:
+    body = b"hello"
+    a = _build_raw(
+        route_type=RouteType.FLOOD,
+        payload_type=PayloadType.GRP_TXT,
+        path=b"",
+        payload=body,
+    )
+    b = _build_raw(
+        route_type=RouteType.FLOOD,
+        payload_type=PayloadType.TXT_MSG,
+        path=b"",
+        payload=body,
+    )
+    assert payload_dedup_key(a) != payload_dedup_key(b)
+
+
+def test_payload_dedup_key_includes_transport_codes() -> None:
+    body = b"x"
+    a = _build_raw(
+        route_type=RouteType.TRANSPORT_FLOOD,
+        payload_type=PayloadType.TXT_MSG,
+        path=b"",
+        payload=body,
+        transport_codes=(1, 2),
+    )
+    b = _build_raw(
+        route_type=RouteType.TRANSPORT_FLOOD,
+        payload_type=PayloadType.TXT_MSG,
+        path=b"",
+        payload=body,
+        transport_codes=(9, 9),
+    )
+    assert payload_dedup_key(a) != payload_dedup_key(b)
+
+
+def test_payload_dedup_key_falls_back_on_decode_error() -> None:
+    # zu kurz für decode
+    raw = b"\xff"
+    # MUSS keinen Crash werfen und MUSS deterministisch sein
+    k1 = payload_dedup_key(raw)
+    k2 = payload_dedup_key(raw)
+    assert k1 == k2 == packet_key(raw)

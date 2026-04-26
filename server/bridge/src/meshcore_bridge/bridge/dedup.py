@@ -26,8 +26,42 @@ from uuid import UUID
 
 
 def packet_key(raw: bytes) -> bytes:
-    """Stable Dedup-Key über ein on-air-Paket. SHA-256, 32 Bytes."""
+    """Stable Dedup-Key über ein on-air-Paket. SHA-256, 32 Bytes.
+
+    Achtung: hashed das ganze raw inkl. path_len + path_hashes — die ändern
+    sich pro Hop. Für Inter-Site-Dedup, wo derselbe Frame über mehrere
+    Repeater mit unterschiedlichen Hop-Counts hochgereicht wird, lieber
+    ``payload_dedup_key`` verwenden.
+    """
     return hashlib.sha256(raw).digest()
+
+
+def payload_dedup_key(raw: bytes) -> bytes:
+    """Hop-invarianter Dedup-Key.
+
+    Hashed nur die zwischen-Hops konstanten Felder (Header, optional
+    Transport-Codes, Payload-Body) und ignoriert path_len/path_hashes,
+    die jeder Repeater beim Forward inkrementiert. Bei Decode-Fehler
+    Fallback auf ``packet_key`` — so bleiben malformed Frames trotzdem
+    gegen Doppel-Empfang abgesichert.
+    """
+    # Lokaler Import, weil bridge.dedup auch ohne companion-Package
+    # importiert werden können soll (z.B. in Smoke-Tests, wo der
+    # Companion-Service abgeschaltet ist).
+    from meshcore_companion.packet import Packet as MCPacket  # noqa: PLC0415
+
+    try:
+        pkt = MCPacket.decode(raw)
+    except ValueError:
+        return packet_key(raw)
+    h = hashlib.sha256()
+    h.update(bytes([pkt.header_byte]))
+    if pkt.has_transport_codes:
+        h.update(int.to_bytes(pkt.transport_codes[0], 2, "little"))
+        h.update(int.to_bytes(pkt.transport_codes[1], 2, "little"))
+    h.update(bytes([int(pkt.payload_type)]))
+    h.update(pkt.payload)
+    return h.digest()
 
 
 @dataclass

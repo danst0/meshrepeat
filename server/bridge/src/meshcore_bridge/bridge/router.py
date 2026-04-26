@@ -2,10 +2,12 @@
 
 Pro eingehendem ``pkt``-Frame:
 
-1. Dedup-Key berechnen (SHA-256 der raw bytes).
-2. Cache observieren — wenn Quelle das Paket schon hatte: drop (sollte
-   in einem korrekt funktionierenden Mesh nicht passieren, aber wir
-   dropen dann silent).
+1. Hop-invarianten Dedup-Key berechnen (``payload_dedup_key`` — SHA-256
+   über header + transport_codes + payload, ohne path_len/path_hashes).
+2. Cache observieren — wenn Quelle das Paket schon hatte: drop. Tritt
+   regulär auf, sobald derselbe LoRa-Frame über mehrere Repeater
+   reinkommt (zweiter Repeater hatte den Key beim ersten Forward
+   bereits ins seen-set bekommen).
 3. Pro Repeater im selben Scope: senden, sofern dieser Repeater das
    Paket noch nicht hat (laut Cache). Beim Senden wird der Empfänger
    im Cache als "kennt das Paket" markiert.
@@ -18,7 +20,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from meshcore_bridge.bridge.dedup import DedupCache, packet_key
+from meshcore_bridge.bridge.dedup import DedupCache, payload_dedup_key
 from meshcore_bridge.bridge.policy import PolicyEngine
 from meshcore_bridge.bridge.registry import ConnectionRegistry, RepeaterConn
 from meshcore_bridge.bridge.traffic import TrafficLog, make_event
@@ -81,7 +83,7 @@ class Router:
                 )
                 return RouteResult(forwarded_to=[], dropped_policy=decision.reason)
 
-        key = packet_key(packet.raw)
+        key = payload_dedup_key(packet.raw)
         is_new_for_source = self._dedup.observe(key, source.site_id)
         if not is_new_for_source:
             self._log.debug(
