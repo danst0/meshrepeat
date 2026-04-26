@@ -596,6 +596,55 @@ async def companion_detail(
             )
         ).scalars()
     )
+
+    # @-Reply-Targets: bekannte Namen für Auto-Complete im Compose-Feld.
+    # Quelle: DM-Kontakte (Pubkey + Name) plus distinct sender_names aus
+    # Channel-Posts (nur Name; Channel-Posts haben kryptographisch keinen
+    # Pubkey, "@[Name]" ist eine reine Anzeigekonvention).
+    contact_rows = list(
+        (
+            await db.execute(
+                select(CompanionContact).where(
+                    CompanionContact.identity_id == identity_id
+                )
+            )
+        ).scalars()
+    )
+    chan_sender_rows = list(
+        (
+            await db.execute(
+                select(CompanionMessage.peer_name)
+                .where(
+                    CompanionMessage.identity_id == identity_id,
+                    CompanionMessage.channel_name.is_not(None),
+                    CompanionMessage.peer_name.is_not(None),
+                )
+                .distinct()
+            )
+        ).scalars()
+    )
+    seen: set[str] = set()
+    at_targets: list[dict[str, Any]] = []
+    for c in contact_rows:
+        if not c.peer_name:
+            continue
+        key = c.peer_name.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        at_targets.append(
+            {"name": c.peer_name, "pubkey_hex": c.peer_pubkey.hex()}
+        )
+    for name in chan_sender_rows:
+        if not name:
+            continue
+        key = name.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        at_targets.append({"name": name, "pubkey_hex": None})
+    at_targets.sort(key=lambda t: t["name"].lower())
+
     return _templates(request).TemplateResponse(
         request,
         "companion_detail.html.j2",
@@ -603,6 +652,7 @@ async def companion_detail(
             "user": user,
             "identity": identity,
             "channels": channels,
+            "at_targets": at_targets,
             "flash": None,
         },
     )

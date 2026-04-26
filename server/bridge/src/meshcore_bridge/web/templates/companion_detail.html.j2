@@ -101,7 +101,10 @@
         <div id="dm-header" class="thread-header">Wähle einen Thread oder starte einen neuen.</div>
         <div id="dm-messages" class="message-list"></div>
         <form id="dm-compose" class="compose-row" style="display:none">
-          <input id="dm-text" required maxlength="200" placeholder="Nachricht…">
+          <div class="at-input-wrap">
+            <input id="dm-text" required maxlength="200" placeholder="Nachricht… (@ für Auto-Complete)" autocomplete="off">
+            <div class="at-popup" id="dm-at-popup" hidden></div>
+          </div>
           <button type="submit">Senden</button>
         </form>
       </div>
@@ -126,7 +129,10 @@
         <div id="ch-header" class="thread-header">Wähle einen Kanal.</div>
         <div id="ch-messages" class="message-list"></div>
         <form id="ch-compose" class="compose-row" style="display:none">
-          <input id="ch-text" required maxlength="140" placeholder="Wird mit '{{ identity.name }}: ' präfixiert">
+          <div class="at-input-wrap">
+            <input id="ch-text" required maxlength="140" placeholder="Wird mit '{{ identity.name }}: ' präfixiert. @ für Auto-Complete." autocomplete="off">
+            <div class="at-popup" id="ch-at-popup" hidden></div>
+          </div>
           <button type="submit">Posten</button>
         </form>
       </div>
@@ -142,6 +148,7 @@
   const API = "/api/v1/companion";
   const POLL_ACTIVE_MS = 5000;
   const POLL_THREADS_MS = 15000;
+  const AT_TARGETS = {{ at_targets | tojson }};
 
   // ---------- Hash state ----------
   function parseHash() {
@@ -404,6 +411,102 @@
       }
     }
   }
+
+  // ---------- @-Auto-Complete ----------
+  function attachAtComplete(input, popup) {
+    let active = 0;
+    let matches = [];
+    let atIdx = -1;  // Position des "@" im input.value, oder -1 wenn inaktiv
+
+    function close() {
+      popup.hidden = true;
+      popup.innerHTML = "";
+      atIdx = -1;
+      matches = [];
+    }
+
+    function render() {
+      popup.innerHTML = "";
+      matches.forEach((t, i) => {
+        const el = document.createElement("div");
+        el.className = "at-item" + (i === active ? " active" : "");
+        const sub = t.pubkey_hex
+          ? `<span class="at-sub">${t.pubkey_hex.slice(0,8)}…</span>`
+          : '<span class="at-sub">channel</span>';
+        el.innerHTML = `<span class="at-name">${escText(t.name)}</span>${sub}`;
+        // mousedown statt click, damit blur das popup nicht vorher schließt
+        el.addEventListener("mousedown", (e) => {
+          e.preventDefault();
+          apply(i);
+        });
+        popup.appendChild(el);
+      });
+      popup.hidden = matches.length === 0;
+    }
+
+    function apply(idx) {
+      const t = matches[idx];
+      if (!t || atIdx < 0) return;
+      const v = input.value;
+      const cursor = input.selectionStart;
+      const insert = `@[${t.name}] `;
+      input.value = v.slice(0, atIdx) + insert + v.slice(cursor);
+      const newCursor = atIdx + insert.length;
+      input.focus();
+      input.setSelectionRange(newCursor, newCursor);
+      close();
+    }
+
+    function update() {
+      const v = input.value;
+      const cursor = input.selectionStart;
+      const before = v.slice(0, cursor);
+      // Letzter "@", der einen Token einleitet: nicht escaped, nicht in []
+      const m = before.match(/(^|[\s])@([^@\s\[\]]*)$/);
+      if (!m) { close(); return; }
+      atIdx = before.length - m[2].length - 1;  // Index des @
+      const q = m[2].toLowerCase();
+      matches = AT_TARGETS
+        .filter(t => t.name.toLowerCase().includes(q))
+        .slice(0, 8);
+      if (!matches.length) { close(); return; }
+      active = 0;
+      render();
+    }
+
+    input.addEventListener("input", update);
+    input.addEventListener("click", update);  // cursor moved
+    input.addEventListener("keydown", (e) => {
+      if (popup.hidden) return;
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        active = (active + 1) % matches.length;
+        render();
+      } else if (e.key === "ArrowUp") {
+        e.preventDefault();
+        active = (active - 1 + matches.length) % matches.length;
+        render();
+      } else if (e.key === "Enter" || e.key === "Tab") {
+        e.preventDefault();
+        apply(active);
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        close();
+      }
+    });
+    input.addEventListener("blur", () => {
+      // kleiner Delay, damit mousedown noch greift
+      setTimeout(close, 100);
+    });
+  }
+  attachAtComplete(
+    document.getElementById("dm-text"),
+    document.getElementById("dm-at-popup"),
+  );
+  attachAtComplete(
+    document.getElementById("ch-text"),
+    document.getElementById("ch-at-popup"),
+  );
 
   // initial sidebar refresh + periodic
   loadThreads();

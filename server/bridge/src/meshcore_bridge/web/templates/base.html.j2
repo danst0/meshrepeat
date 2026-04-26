@@ -208,6 +208,34 @@
     }
     .compose-row input { flex: 1; margin: 0; }
     .compose-row button { margin: 0; }
+    .at-input-wrap { position: relative; flex: 1; }
+    .at-input-wrap input { width: 100%; }
+    .at-popup {
+      position: absolute;
+      bottom: calc(100% + .25rem);
+      left: 0;
+      right: 0;
+      max-height: 220px;
+      overflow-y: auto;
+      background: var(--card);
+      border: 1px solid var(--accent);
+      border-radius: 4px;
+      box-shadow: 0 4px 12px rgba(0,0,0,.4);
+      z-index: 50;
+    }
+    .at-item {
+      display: flex;
+      justify-content: space-between;
+      gap: .5rem;
+      padding: .35rem .55rem;
+      cursor: pointer;
+      font-size: .9rem;
+    }
+    .at-item:hover, .at-item.active {
+      background: rgba(130,170,255,.18);
+    }
+    .at-name { color: var(--fg); }
+    .at-sub { color: var(--muted); font-size: .75rem; }
   </style>
 </head>
 <body>
