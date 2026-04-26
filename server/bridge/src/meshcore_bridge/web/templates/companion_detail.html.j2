@@ -688,6 +688,7 @@
   let mapInstance = null;
   let mapMarkers = null;
   let mapAutoTimer = null;
+  let userTouchedMap = false;
 
   async function ensureMap() {
     const status = document.getElementById("map-status");
@@ -703,6 +704,13 @@
         attribution: "© OpenStreetMap-Mitwirkende",
       }).addTo(mapInstance);
       mapMarkers = L.layerGroup().addTo(mapInstance);
+      const markTouched = () => { userTouchedMap = true; };
+      const c = mapInstance.getContainer();
+      c.addEventListener("wheel", markTouched, {passive: true});
+      c.addEventListener("mousedown", markTouched);
+      c.addEventListener("touchstart", markTouched, {passive: true});
+      c.addEventListener("dblclick", markTouched);
+      c.addEventListener("keydown", markTouched);
     } else {
       // Tab erst sichtbar geworden → invalidate damit Leaflet die Größe
       // korrekt neu berechnet.
@@ -837,10 +845,12 @@
         bounds.push([p.lat, p.lon]);
       }
       status.textContent = pins.length + " Knoten (letzte 7 Tage)";
-      if (bounds.length === 1) {
-        mapInstance.setView(bounds[0], 12);
-      } else if (bounds.length > 1) {
-        mapInstance.fitBounds(bounds, {padding: [40, 40], maxZoom: 13});
+      if (!userTouchedMap) {
+        if (bounds.length === 1) {
+          mapInstance.setView(bounds[0], 12);
+        } else if (bounds.length > 1) {
+          mapInstance.fitBounds(bounds, {padding: [40, 40], maxZoom: 13});
+        }
       }
     } catch (e) {
       status.textContent = "Fehler: " + e;
