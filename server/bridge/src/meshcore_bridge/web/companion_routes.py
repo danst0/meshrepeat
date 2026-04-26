@@ -428,11 +428,10 @@ async def list_identity_threads(
                 "last_direction": last.direction if last else None,
             }
         )
-    # Reihenfolge: erst die mit Verkehr (last_msg-Snippet), sonst nach
-    # last_seen_at. Favoriten-Priorität wird im Frontend per Stern
-    # visualisiert, nicht durch Pin nach oben — sonst alte Favoriten
-    # verdrängen frische Mesh-Sender.
+    # Reihenfolge: Favoriten zuerst, innerhalb sortiert nach last_ts DESC.
+    # Python sort() ist stable, daher zwei Pässe.
     dms.sort(key=lambda t: t["last_ts"] or "", reverse=True)
+    dms.sort(key=lambda t: not t["favorite"])  # False sortiert vor True
 
     chan_rows = []
     for ch in channels:
