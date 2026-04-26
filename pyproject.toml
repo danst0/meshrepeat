@@ -44,7 +44,7 @@ extend-immutable-calls = [
 "**/tests/**" = ["S", "PLR2004", "B017", "PLC0415"]
 # Web-Layer enthält Singleton-Swaps und FastAPI-Konventionen
 "**/web/auth_routes.py" = ["PLW0603", "PLC0415"]
-"**/db/session.py" = ["PLW0603"]
+"**/db/session.py" = ["PLW0603", "S608"]
 # WebSocket-Handler ist linear lang, splittet aber schlechter als er ist
 "**/web/bridge_ws.py" = ["PLR0911", "PLR0912", "PLR0915", "S110", "SIM105"]
 # CompanionService importiert meshcore_bridge.db lokal (Circular-Vermeidung)
@@ -67,9 +67,12 @@ plugins = ["pydantic.mypy"]
 mypy_path = ["server/bridge/src", "server/companion/src"]
 
 [tool.pytest.ini_options]
-addopts = "-ra --strict-markers --strict-config --import-mode=importlib"
+addopts = "-ra --strict-markers --strict-config --import-mode=importlib -m 'not ui'"
 asyncio_mode = "auto"
 testpaths = ["server/bridge/tests", "server/companion/tests"]
+markers = [
+    "ui: Browser-basierte UI-Tests (Playwright) — separat ausführen via 'pytest -m ui'",
+]
 filterwarnings = [
     "error",
     # aiosqlite + multiple-event-loop interactions in TestClient/AsyncClient

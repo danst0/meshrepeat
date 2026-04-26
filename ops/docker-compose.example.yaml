@@ -42,6 +42,10 @@ services:
       - traefik.http.routers.meshcore.tls=true
       - traefik.http.routers.meshcore.tls.certResolver=default
       - traefik.http.services.meshcore.loadbalancer.server.port=8000
+      # Service-Healthcheck (Traefik prüft /healthz; ergänzt den Image-HEALTHCHECK)
+      - traefik.http.services.meshcore.loadbalancer.healthcheck.path=/healthz
+      - traefik.http.services.meshcore.loadbalancer.healthcheck.interval=30s
+      - traefik.http.services.meshcore.loadbalancer.healthcheck.timeout=5s
       - flame.type=application
       - flame.name=MeshCore Spiegel
       - flame.url=https://meshcore.dumke.me

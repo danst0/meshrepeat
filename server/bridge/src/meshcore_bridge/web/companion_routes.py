@@ -6,14 +6,18 @@ senden / einsehen.
 
 from __future__ import annotations
 
+import asyncio
+import json
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import desc, select
+from sqlalchemy import text as sql_text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meshcore_bridge.db import (
@@ -457,9 +461,14 @@ async def list_dm_messages(
     peer_pubkey_hex: str,
     user: User = Depends(current_user_required),
     db: AsyncSession = Depends(get_db),
-    limit: int = Query(default=200, ge=1, le=1000),
-    since: str | None = Query(default=None),
-) -> list[dict[str, Any]]:
+    limit: int = Query(default=50, ge=1, le=200),
+    before_ts: str | None = Query(default=None),
+) -> dict[str, Any]:
+    """Cursor-paginierte DM-History. Cursor = ``ts`` der ältesten
+    bisherigen Page als ISO-String. Antwort enthält ``messages`` (älteste
+    zuerst, zur direkten Anzeige) und ``next_cursor`` (älteste ts der Page
+    oder ``null`` wenn weniger als ``limit`` zurückkam = Ende erreicht).
+    """
     if not await _user_owns_identity(db, user.id, identity_id):
         raise HTTPException(status_code=404)
     try:
@@ -478,14 +487,18 @@ async def list_dm_messages(
         .order_by(desc(CompanionMessage.ts))
         .limit(limit)
     )
-    if since:
+    if before_ts:
         try:
-            q = q.where(CompanionMessage.ts > datetime.fromisoformat(since))
+            q = q.where(CompanionMessage.ts < datetime.fromisoformat(before_ts))
         except ValueError as e:
-            raise HTTPException(status_code=400, detail="bad since") from e
+            raise HTTPException(status_code=400, detail="bad before_ts") from e
     rows = list((await db.execute(q)).scalars())
+    next_cursor = _ts_iso(rows[-1].ts) if len(rows) == limit and rows else None
     rows.reverse()
-    return [_message_dict(m) for m in rows]
+    return {
+        "messages": [_message_dict(m) for m in rows],
+        "next_cursor": next_cursor,
+    }
 
 
 @router.get("/identities/{identity_id}/contacts")
@@ -618,9 +631,10 @@ async def list_channel_messages(
     channel_id: UUID,
     user: User = Depends(current_user_required),
     db: AsyncSession = Depends(get_db),
-    limit: int = Query(default=200, ge=1, le=1000),
-    since: str | None = Query(default=None),
-) -> list[dict[str, Any]]:
+    limit: int = Query(default=50, ge=1, le=200),
+    before_ts: str | None = Query(default=None),
+) -> dict[str, Any]:
+    """Wie list_dm_messages, aber für einen Channel."""
     if not await _user_owns_identity(db, user.id, identity_id):
         raise HTTPException(status_code=404)
     channel = await db.get(CompanionChannel, channel_id)
@@ -637,14 +651,157 @@ async def list_channel_messages(
         .order_by(desc(CompanionMessage.ts))
         .limit(limit)
     )
-    if since:
+    if before_ts:
         try:
-            q = q.where(CompanionMessage.ts > datetime.fromisoformat(since))
+            q = q.where(CompanionMessage.ts < datetime.fromisoformat(before_ts))
         except ValueError as e:
-            raise HTTPException(status_code=400, detail="bad since") from e
+            raise HTTPException(status_code=400, detail="bad before_ts") from e
     rows = list((await db.execute(q)).scalars())
+    next_cursor = _ts_iso(rows[-1].ts) if len(rows) == limit and rows else None
     rows.reverse()
-    return [_message_dict(m) for m in rows]
+    return {
+        "messages": [_message_dict(m) for m in rows],
+        "next_cursor": next_cursor,
+    }
+
+
+# ---------- Volltext-Suche (FTS5) ----------
+
+
+@router.get("/identities/{identity_id}/search")
+async def search_messages(
+    identity_id: UUID,
+    user: User = Depends(current_user_required),
+    db: AsyncSession = Depends(get_db),
+    q: str = Query(..., min_length=2, max_length=200),
+    limit: int = Query(default=30, ge=1, le=100),
+) -> dict[str, Any]:
+    """FTS5-Volltext-Suche über companion_messages.text der Identity.
+    Liefert Hits mit ``snippet`` (server-side <mark>...</mark>) plus
+    Konvo-Kontext (DM-peer / channel) zum Springen im Frontend.
+    """
+    if not await _user_owns_identity(db, user.id, identity_id):
+        raise HTTPException(status_code=404)
+
+    # FTS5 MATCH-Syntax: einfache Suchterms erlauben, aber Anführungs-/
+    # Spezialzeichen escapen (in Phrase wrappen). Wir verwenden quoted
+    # phrase pro Token, durch Whitespace getrennt — robust gegen
+    # User-Input.
+    tokens = [t.replace('"', "") for t in q.strip().split() if t.strip()]
+    if not tokens:
+        raise HTTPException(status_code=400, detail="empty query")
+    fts_query = " ".join(f'"{t}"' for t in tokens)
+
+    sql = sql_text(
+        """
+        SELECT msg_id, identity_id, peer_pubkey, peer_name,
+               channel_name, ts, direction,
+               snippet(companion_messages_fts, 0, '<mark>', '</mark>', '…', 16) AS snippet
+        FROM companion_messages_fts
+        WHERE companion_messages_fts MATCH :q
+          AND identity_id = :identity_id
+        ORDER BY ts DESC
+        LIMIT :limit
+        """
+    )
+    rows = (
+        await db.execute(
+            sql,
+            {"q": fts_query, "identity_id": identity_id.bytes, "limit": limit},
+        )
+    ).mappings().all()
+
+    # Pro Channel müssen wir die channel_id auflösen (Frontend springt per id).
+    channel_ids: dict[str, str] = {}
+    if any(r["channel_name"] for r in rows):
+        ch_rows = list(
+            (
+                await db.execute(
+                    select(CompanionChannel.id, CompanionChannel.name).where(
+                        CompanionChannel.identity_id == identity_id
+                    )
+                )
+            ).all()
+        )
+        channel_ids = {name: str(cid) for cid, name in ch_rows}
+
+    hits: list[dict[str, Any]] = []
+    for r in rows:
+        msg_id_b = r["msg_id"]
+        peer_b = r["peer_pubkey"]
+        ch_name = r["channel_name"]
+        is_dm = peer_b is not None
+        # ts ist als ISO-String mit/ohne TZ in der UNINDEXED-Spalte gelandet
+        # (SQLite serialisiert DateTime so). Wir lassen ihn 1:1 durch.
+        hit: dict[str, Any] = {
+            "id": _bytes_to_uuid_str(msg_id_b),
+            "kind": "dm" if is_dm else "channel",
+            "ts": r["ts"],
+            "direction": r["direction"],
+            "snippet": r["snippet"],
+        }
+        if is_dm:
+            hit["peer_pubkey_hex"] = peer_b.hex()
+            hit["peer_name"] = r["peer_name"]
+        else:
+            hit["channel_name"] = ch_name
+            hit["channel_id"] = channel_ids.get(ch_name)
+        hits.append(hit)
+
+    return {"hits": hits}
+
+
+def _bytes_to_uuid_str(b: bytes | None) -> str | None:
+    if b is None:
+        return None
+    if isinstance(b, bytes) and len(b) == 16:
+        return str(UUID(bytes=b))
+    return str(b)
+
+
+# ---------- SSE Push-Stream ----------
+
+
+@router.get("/identities/{identity_id}/stream")
+async def companion_stream(
+    request: Request,
+    identity_id: UUID,
+    user: User = Depends(current_user_required),
+    db: AsyncSession = Depends(get_db),
+) -> StreamingResponse:
+    """text/event-stream — ein offener SSE-Channel pro Browser-Tab. Wir
+    pushen DM-/Channel-Empfang, Sent-Echos und Contact-Updates."""
+    if not await _user_owns_identity(db, user.id, identity_id):
+        raise HTTPException(status_code=404)
+    bus = getattr(request.app.state, "companion_events", None)
+    if bus is None:
+        raise HTTPException(status_code=503, detail="event-bus not available")
+
+    queue: asyncio.Queue[dict[str, Any]] = bus.subscribe(identity_id)
+
+    async def gen() -> AsyncIterator[bytes]:
+        try:
+            # Initialer Comment, damit der Browser sofort 200 sieht.
+            yield b": ok\n\n"
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    evt = await asyncio.wait_for(queue.get(), timeout=20.0)
+                except TimeoutError:
+                    yield b": keep-alive\n\n"
+                    continue
+                payload = json.dumps(evt, separators=(",", ":")).encode("utf-8")
+                yield b"data: " + payload + b"\n\n"
+        finally:
+            bus.unsubscribe(identity_id, queue)
+
+    headers = {
+        "Cache-Control": "no-cache, no-transform",
+        "X-Accel-Buffering": "no",
+        "Connection": "keep-alive",
+    }
+    return StreamingResponse(gen(), media_type="text/event-stream", headers=headers)
 
 
 # ---------- UI ----------

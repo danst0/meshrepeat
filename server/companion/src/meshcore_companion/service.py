@@ -59,6 +59,13 @@ _log = structlog.get_logger("companion")
 PacketInjector = Callable[[Packet, str], Awaitable[None]]
 """Callable(packet, scope) — fügt ein Paket in den Mesh-Scope ein."""
 
+EventNotifier = Callable[[UUID, dict], Awaitable[None]]
+"""Callable(identity_id, event) — Push-Event in den UI-Bus (SSE).
+
+``event`` ist ein JSON-serialisierbares dict mit ``type`` ∈
+{"dm","channel","sent_dm","sent_channel","contact_update"} plus
+typ-spezifischen Feldern."""
+
 PUBLIC_CHANNEL_NAME = "public"
 # Offizieller MeshCore-Public-Channel-PSK (base64, 16 Byte real). Quelle:
 # firmware/lib/meshcore/examples/companion_radio/MyMesh.cpp PUBLIC_GROUP_PSK.
@@ -98,6 +105,7 @@ class CompanionService:
     master_key: bytes
     sessionmaker: Callable[[], AsyncSession]
     inject: PacketInjector | None = None
+    notify: EventNotifier | None = None
     advert_interval_s: int = 3600
 
     _by_id: dict[UUID, LoadedIdentity] = field(default_factory=dict)
@@ -107,6 +115,14 @@ class CompanionService:
     # Inbound-Dedup: gleiches raw-Paket kommt pro verbundenem Repeater einmal
     # rein. Ohne dedup persistieren wir GRP_TXT/TXT_MSG mehrfach.
     _seen_raw: dict[bytes, float] = field(default_factory=dict)
+
+    async def _emit(self, identity_id: UUID, event: dict) -> None:
+        if self.notify is None:
+            return
+        try:
+            await self.notify(identity_id, event)
+        except Exception:
+            _log.exception("notify_failed", type=event.get("type"))
 
     async def start(self) -> None:
         """DB → Identitäten laden, Advert-Loop starten."""
@@ -389,19 +405,30 @@ class CompanionService:
         raw = pkt.encode()
 
         async with self.sessionmaker() as db:
-            db.add(
-                CompanionMessage(
-                    identity_id=loaded.id,
-                    direction="out",
-                    payload_type=int(PayloadType.GRP_TXT),
-                    peer_pubkey=None,
-                    peer_name=None,
-                    channel_name=chan_name,
-                    text=text,
-                    raw=raw,
-                )
+            new_msg = CompanionMessage(
+                identity_id=loaded.id,
+                direction="out",
+                payload_type=int(PayloadType.GRP_TXT),
+                peer_pubkey=None,
+                peer_name=None,
+                channel_name=chan_name,
+                text=text,
+                raw=raw,
             )
+            db.add(new_msg)
             await db.commit()
+            await self._emit(
+                loaded.id,
+                {
+                    "type": "sent_channel",
+                    "id": str(new_msg.id),
+                    "ts": (new_msg.ts or datetime.now(UTC)).isoformat(),
+                    "channel_id": str(channel_id),
+                    "channel_name": chan_name,
+                    "text": text,
+                    "direction": "out",
+                },
+            )
 
         if self.inject is not None:
             await self.inject(pkt, loaded.scope)
@@ -505,6 +532,17 @@ class CompanionService:
                         contact.last_lat = parsed.lat
                         contact.last_lon = parsed.lon
                 await db.commit()
+            await self._emit(
+                loaded.id,
+                {
+                    "type": "contact_update",
+                    "peer_pubkey_hex": advert.pubkey.hex(),
+                    "peer_name": name,
+                    "lat": parsed.lat,
+                    "lon": parsed.lon,
+                    "ts": datetime.now(UTC).isoformat(),
+                },
+            )
 
     async def _handle_inbound_dm(self, *, pkt: Packet, scope: str, raw: bytes) -> None:
         from meshcore_bridge.db import CompanionContact, CompanionMessage
@@ -548,19 +586,31 @@ class CompanionService:
                     )
                 ).scalar_one_or_none()
                 if existing is None:
-                    db.add(
-                        CompanionMessage(
-                            identity_id=loaded.id,
-                            direction="in",
-                            payload_type=int(PayloadType.TXT_MSG),
-                            peer_pubkey=decoded.sender_pubkey,
-                            peer_name=peer_name,
-                            text=decoded.text,
-                            raw=raw,
-                            ts=msg_ts,
-                        )
+                    new_msg = CompanionMessage(
+                        identity_id=loaded.id,
+                        direction="in",
+                        payload_type=int(PayloadType.TXT_MSG),
+                        peer_pubkey=decoded.sender_pubkey,
+                        peer_name=peer_name,
+                        text=decoded.text,
+                        raw=raw,
+                        ts=msg_ts,
                     )
+                    db.add(new_msg)
                     await db.commit()
+                    await self._emit(
+                        loaded.id,
+                        {
+                            "type": "dm",
+                            "id": str(new_msg.id),
+                            "ts": msg_ts.isoformat(),
+                            "peer_pubkey_hex": decoded.sender_pubkey.hex(),
+                            "peer_name": peer_name,
+                            "text": decoded.text,
+                            "direction": "in",
+                            "hops": pkt.hop_count,
+                        },
+                    )
                 else:
                     _log.info(
                         "dm_retry_dedup",
@@ -652,20 +702,33 @@ class CompanionService:
             return
         ts = datetime.fromtimestamp(decoded.timestamp, UTC)
         async with self.sessionmaker() as db:
-            db.add(
-                CompanionMessage(
-                    identity_id=target.identity_id,
-                    direction="in",
-                    payload_type=int(PayloadType.GRP_TXT),
-                    peer_pubkey=None,
-                    peer_name=decoded.sender_name or None,
-                    channel_name=target.name,
-                    text=decoded.text,
-                    raw=raw,
-                    ts=ts,
-                )
+            new_msg = CompanionMessage(
+                identity_id=target.identity_id,
+                direction="in",
+                payload_type=int(PayloadType.GRP_TXT),
+                peer_pubkey=None,
+                peer_name=decoded.sender_name or None,
+                channel_name=target.name,
+                text=decoded.text,
+                raw=raw,
+                ts=ts,
             )
+            db.add(new_msg)
             await db.commit()
+            await self._emit(
+                target.identity_id,
+                {
+                    "type": "channel",
+                    "id": str(new_msg.id),
+                    "ts": ts.isoformat(),
+                    "channel_id": str(target.id),
+                    "channel_name": target.name,
+                    "peer_name": decoded.sender_name or None,
+                    "text": decoded.text,
+                    "direction": "in",
+                    "hops": pkt.hop_count,
+                },
+            )
 
     async def _handle_inbound_response(self, *, pkt: Packet, scope: str) -> None:
         """RESPONSE auf einen unserer REQs. Wir kennen den Sender nicht
@@ -760,18 +823,29 @@ class CompanionService:
                     )
                 )
             ).scalar_one_or_none()
-            db.add(
-                CompanionMessage(
-                    identity_id=loaded.id,
-                    direction="out",
-                    payload_type=int(PayloadType.TXT_MSG),
-                    peer_pubkey=peer_pubkey,
-                    peer_name=contact.peer_name if contact else None,
-                    text=text,
-                    raw=raw,
-                )
+            new_msg = CompanionMessage(
+                identity_id=loaded.id,
+                direction="out",
+                payload_type=int(PayloadType.TXT_MSG),
+                peer_pubkey=peer_pubkey,
+                peer_name=contact.peer_name if contact else None,
+                text=text,
+                raw=raw,
             )
+            db.add(new_msg)
             await db.commit()
+            await self._emit(
+                loaded.id,
+                {
+                    "type": "sent_dm",
+                    "id": str(new_msg.id),
+                    "ts": (new_msg.ts or datetime.now(UTC)).isoformat(),
+                    "peer_pubkey_hex": peer_pubkey.hex(),
+                    "peer_name": contact.peer_name if contact else None,
+                    "text": text,
+                    "direction": "out",
+                },
+            )
 
     async def _advert_loop(self) -> None:
         try:

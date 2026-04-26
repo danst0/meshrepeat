@@ -7,14 +7,19 @@ initialisiert DB-Engine und Bridge-State auf ``app.state``.
 from __future__ import annotations
 
 import asyncio
+import os
 import signal
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as _pkg_version
 from importlib.resources import files
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from meshcore_bridge.auth.email import ConsoleEmailSender, SmtpEmailSender
@@ -25,6 +30,7 @@ from meshcore_bridge.bridge import (
     Router,
     TrafficLog,
 )
+from meshcore_bridge.companion_events import CompanionEventBus
 from meshcore_bridge.config import AppConfig
 from meshcore_bridge.db import close_engine, get_session, init_engine
 from meshcore_bridge.log import get_logger
@@ -33,6 +39,7 @@ from meshcore_bridge.web import (
     auth_routes,
     bridge_ws,
     companion_routes,
+    health_routes,
     repeater_routes,
 )
 from meshcore_bridge.wire import Packet as WirePacket
@@ -59,6 +66,18 @@ def _localtime_filter(dt: datetime | str | None, fmt: str = "%Y-%m-%d %H:%M") ->
     return dt.astimezone(_DISPLAY_TZ).strftime(fmt)
 
 
+def _resolve_asset_version() -> str:
+    """Cache-Buster für /static/-URLs. Reihenfolge: Build-SHA aus Env →
+    installierte Package-Version → Fallback "dev"."""
+    sha = os.environ.get("MESHCORE_BUILD_SHA")
+    if sha:
+        return sha[:12]
+    try:
+        return _pkg_version("meshcore-bridge")
+    except PackageNotFoundError:
+        return "dev"
+
+
 def build_app(cfg: AppConfig) -> FastAPI:
     log = get_logger("app")
 
@@ -79,6 +98,8 @@ def build_app(cfg: AppConfig) -> FastAPI:
         app.state.bridge_policy = policy
         app.state.bridge_traffic = traffic
         app.state.bridge_router = Router(registry, dedup, policy, traffic)
+        companion_events = CompanionEventBus()
+        app.state.companion_events = companion_events
 
         # SIGHUP → Config + Policy hot-reload
         def _reload_policy() -> None:
@@ -98,7 +119,10 @@ def build_app(cfg: AppConfig) -> FastAPI:
         templates_dir = files("meshcore_bridge.web") / "templates"
         templates = Jinja2Templates(directory=str(templates_dir))
         templates.env.filters["localtime"] = _localtime_filter
+        asset_version = _resolve_asset_version()
+        templates.env.globals["asset_version"] = asset_version
         app.state.templates = templates
+        app.state.asset_version = asset_version
 
         # CompanionService aufsetzen (sofern db_key vorhanden ist)
         companion_service: CompanionService | None = None
@@ -125,6 +149,7 @@ def build_app(cfg: AppConfig) -> FastAPI:
                 master_key=cfg.db_key,
                 sessionmaker=get_session,
                 inject=_inject,
+                notify=companion_events.publish,
                 advert_interval_s=cfg.companion.advert_interval_s,
             )
             await companion_service.start()
@@ -160,6 +185,9 @@ def build_app(cfg: AppConfig) -> FastAPI:
         await close_engine()
 
     app = FastAPI(title="MeshCore Spiegel", lifespan=lifespan)
+    static_dir = Path(str(files("meshcore_bridge.web") / "static"))
+    app.mount("/static", StaticFiles(directory=static_dir), name="static")
+    app.include_router(health_routes.router)
     app.include_router(auth_routes.router)
     app.include_router(repeater_routes.router)
     app.include_router(bridge_ws.router)

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "meshcore-bridge"
-version = "0.0.9"
+version = "0.1.0"
 description = "MeshCore Internet-Spiegel Bridge-Daemon (asyncio + WebSocket)"
 requires-python = ">=3.12"
 authors = [{ name = "Daniel Dumke", email = "claude.ai.daniel@dumke.me" }]
@@ -35,6 +35,12 @@ dev = [
     "ruff>=0.6",
     "mypy>=1.11",
     "types-PyYAML",
+]
+# Playwright-basierte UI-Tests. Lokal nach `pip install -e ".[ui-test]"`
+# noch `playwright install --with-deps chromium` ausführen.
+ui-test = [
+    "playwright>=1.50",
+    "pytest-playwright>=0.5",
 ]
 
 [project.scripts]
