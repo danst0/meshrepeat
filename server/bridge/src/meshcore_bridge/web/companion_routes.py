@@ -6,7 +6,7 @@ senden / einsehen.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any
 from uuid import UUID, uuid4
 
@@ -579,10 +579,15 @@ async def list_identity_map_pins(
     identity_id: UUID,
     user: User = Depends(current_user_required),
     db: AsyncSession = Depends(get_db),
+    hours: int = Query(default=168, ge=1, le=8760),
 ) -> list[dict[str, Any]]:
-    """Alle bekannten Kontakte mit Geokoordinaten für die Identity."""
+    """Bekannte Kontakte mit Geokoordinaten, deren letzter Advert
+    innerhalb der letzten ``hours`` Stunden eintraf (default 168h = 7
+    Tage). Begrenzung verhindert, dass alte/abgewanderte Knoten die
+    Karte vollmüllen."""
     if not await _user_owns_identity(db, user.id, identity_id):
         raise HTTPException(status_code=404)
+    cutoff = datetime.now(UTC) - timedelta(hours=hours)
     rows = list(
         (
             await db.execute(
@@ -590,6 +595,7 @@ async def list_identity_map_pins(
                     CompanionContact.identity_id == identity_id,
                     CompanionContact.last_lat.is_not(None),
                     CompanionContact.last_lon.is_not(None),
+                    CompanionContact.last_seen_at >= cutoff,
                 )
             )
         ).scalars()

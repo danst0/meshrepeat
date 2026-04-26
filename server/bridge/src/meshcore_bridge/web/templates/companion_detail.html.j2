@@ -69,7 +69,7 @@
       </div>
       <div id="node-map" class="node-map"></div>
       <p style="margin-top:.5rem;font-size:.85em;color:var(--muted)">
-        Pins entstehen aus Lat/Lon in ADVERTs ODER aus
+        Letzte 7 Tage. Pins entstehen aus Lat/Lon in ADVERTs ODER aus
         REQ_TYPE_GET_TELEMETRY_DATA (LPP_GPS) — anfragebar pro Kontakt
         unten. Knoten mit unset-Koordinaten (0,0) werden ignoriert.
       </p>
@@ -758,7 +758,7 @@
         mapMarkers.addLayer(marker);
         bounds.push([p.lat, p.lon]);
       }
-      status.textContent = pins.length + " Knoten mit Geokoordinaten";
+      status.textContent = pins.length + " Knoten (letzte 7 Tage)";
       if (bounds.length === 1) {
         mapInstance.setView(bounds[0], 12);
       } else if (bounds.length > 1) {
