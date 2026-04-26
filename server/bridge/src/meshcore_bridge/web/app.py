@@ -88,6 +88,7 @@ def build_app(cfg: AppConfig) -> FastAPI:
                     scope=scope,
                     targets=len(conns),
                     bytes=len(wire.raw),
+                    head=wire.raw[:8].hex() if wire.raw else "",
                 )
                 for conn in conns:
                     try:

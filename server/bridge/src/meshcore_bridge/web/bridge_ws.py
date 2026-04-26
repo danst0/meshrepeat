@@ -183,6 +183,15 @@ async def bridge_socket(ws: WebSocket) -> None:
                 return
 
             if isinstance(frame, Packet):
+                _payload_type = frame.raw[0] >> 2 & 0x0F if frame.raw else None
+                log.info(
+                    "rx_from_repeater",
+                    site=str(conn.site_id),
+                    name=conn.name,
+                    scope=conn.scope,
+                    bytes=len(frame.raw),
+                    payload_type=_payload_type,
+                )
                 await routing.on_packet(source=conn, packet=frame)
                 companion = getattr(ws.app.state, "companion_service", None)
                 if companion is not None:
