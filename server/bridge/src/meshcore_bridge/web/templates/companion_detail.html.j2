@@ -1,0 +1,416 @@
+{% extends "base.html.j2" %}
+{% block title %}{{ identity.name }} — Companion{% endblock %}
+{% block content %}
+  <p style="margin:0 0 .5rem"><a href="/companion/">← Companion-Übersicht</a></p>
+
+  <div class="card" style="margin-bottom:1rem">
+    <div style="display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap;gap:.5rem">
+      <div>
+        <h1 id="ident-name" style="margin:0">{{ identity.name }}</h1>
+        <span class="scope-{{ 'public' if identity.scope == 'public' else 'pool' }}">{{ identity.scope }}</span>
+        · <code title="{{ identity.pubkey.hex() }}">{{ identity.pubkey.hex()[:16] }}…</code>
+      </div>
+    </div>
+  </div>
+
+  <div class="tabs">
+    <button class="tab-btn" data-tab="settings">Settings</button>
+    <button class="tab-btn" data-tab="dms">DMs</button>
+    <button class="tab-btn" data-tab="channels">Channels</button>
+  </div>
+
+  {# ---------- Settings ---------- #}
+  <section class="tab-panel" data-tab="settings">
+    <div class="card">
+      <h2>Identität</h2>
+      <form method="post" action="/companion/{{ identity.id }}/rename">
+        <label>Name
+          <input name="name" required maxlength="64" value="{{ identity.name }}">
+        </label>
+        <button type="submit">Umbenennen</button>
+      </form>
+      <p style="margin-top:1rem;font-size:.9em;color:var(--muted)">
+        Pubkey: <code>{{ identity.pubkey.hex() }}</code><br>
+        Scope: <code>{{ identity.scope }}</code><br>
+        Created: {{ identity.created_at | localtime }}
+      </p>
+      <div style="display:flex;gap:.5rem;flex-wrap:wrap;margin-top:1rem">
+        <form method="post" action="/companion/{{ identity.id }}/advert" style="margin:0">
+          <button type="submit" style="margin:0">Advert jetzt senden</button>
+        </form>
+        <form method="post" action="/companion/{{ identity.id }}/archive" style="margin:0"
+              onsubmit="return confirm('Identität archivieren? Sie verschwindet aus der Liste und sendet keine Adverts mehr.');">
+          <button type="submit" style="margin:0;background:var(--danger)">archivieren</button>
+        </form>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Kanäle ({{ channels | length }})</h2>
+      {% if channels %}
+        <table>
+          <thead><tr><th>Name</th><th>Hash</th><th></th></tr></thead>
+          <tbody>
+          {% for ch in channels %}
+            <tr>
+              <td>{{ ch.name }}</td>
+              <td><code>{{ ch.channel_hash.hex() }}</code></td>
+              <td>
+                <form method="post" action="/companion/channels/{{ ch.id }}/delete"
+                      style="margin:0"
+                      onsubmit="return confirm('Kanal {{ ch.name }} löschen?');">
+                  <button type="submit"
+                          style="margin:0;padding:.25rem .6rem;background:var(--danger)">
+                    löschen
+                  </button>
+                </form>
+              </td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      {% else %}
+        <p>Noch keine Kanäle.</p>
+      {% endif %}
+
+      <h3 style="margin-top:1rem">Kanal hinzufügen</h3>
+      <form method="post" action="/companion/{{ identity.id }}/channels">
+        <label>Name
+          <input name="name" required maxlength="64" placeholder="z.B. tech">
+        </label>
+        <label>Passwort
+          <input name="password" required maxlength="128"
+                 placeholder="geteiltes Channel-Passwort">
+        </label>
+        <button type="submit">Hinzufügen</button>
+      </form>
+      <p style="font-size:.85em;color:var(--muted)">
+        Secret = <code>sha256(name + ":" + password)[:32]</code>. Alle
+        Teilnehmer brauchen denselben Namen und dasselbe Passwort.
+      </p>
+    </div>
+  </section>
+
+  {# ---------- DMs ---------- #}
+  <section class="tab-panel" data-tab="dms">
+    <div class="card messenger">
+      <aside class="thread-list" id="dm-threads">
+        <div class="thread-empty" style="color:var(--muted);padding:.5rem">lade …</div>
+      </aside>
+      <div class="thread-view">
+        <div id="dm-header" class="thread-header">Wähle einen Thread oder starte einen neuen.</div>
+        <div id="dm-messages" class="message-list"></div>
+        <form id="dm-compose" class="compose-row" style="display:none">
+          <input id="dm-text" required maxlength="200" placeholder="Nachricht…">
+          <button type="submit">Senden</button>
+        </form>
+      </div>
+    </div>
+    <div class="card">
+      <h3 style="margin-top:0">Neuer DM-Thread</h3>
+      <form id="dm-new" class="compose-row">
+        <input id="dm-new-peer" required pattern="[0-9a-fA-F]{64}" maxlength="64" minlength="64"
+               placeholder="Peer-Pubkey-Hex (64 Zeichen)" style="flex:2">
+        <button type="submit">Öffnen</button>
+      </form>
+    </div>
+  </section>
+
+  {# ---------- Channels ---------- #}
+  <section class="tab-panel" data-tab="channels">
+    <div class="card messenger">
+      <aside class="thread-list" id="ch-threads">
+        <div class="thread-empty" style="color:var(--muted);padding:.5rem">lade …</div>
+      </aside>
+      <div class="thread-view">
+        <div id="ch-header" class="thread-header">Wähle einen Kanal.</div>
+        <div id="ch-messages" class="message-list"></div>
+        <form id="ch-compose" class="compose-row" style="display:none">
+          <input id="ch-text" required maxlength="140" placeholder="Wird mit '{{ identity.name }}: ' präfixiert">
+          <button type="submit">Posten</button>
+        </form>
+      </div>
+    </div>
+    {% if not channels %}
+      <p style="color:var(--muted)">Lege im Settings-Tab einen Kanal an, um zu posten.</p>
+    {% endif %}
+  </section>
+
+<script>
+(() => {
+  const IDENTITY_ID = "{{ identity.id }}";
+  const API = "/api/v1/companion";
+  const POLL_ACTIVE_MS = 5000;
+  const POLL_THREADS_MS = 15000;
+
+  // ---------- Hash state ----------
+  function parseHash() {
+    const out = {};
+    const h = (location.hash || "").replace(/^#/, "");
+    for (const kv of h.split("&")) {
+      const [k, v] = kv.split("=");
+      if (k) out[k] = decodeURIComponent(v || "");
+    }
+    return out;
+  }
+  function writeHash(s) {
+    const enc = Object.entries(s).map(([k,v]) => k+"="+encodeURIComponent(v)).join("&");
+    history.replaceState(null, "", "#"+enc);
+  }
+  function patchHash(p) {
+    writeHash({...parseHash(), ...p});
+  }
+
+  // ---------- Tabs ----------
+  const tabBtns = document.querySelectorAll(".tab-btn");
+  const tabPanels = document.querySelectorAll(".tab-panel");
+  function showTab(name) {
+    tabBtns.forEach(b => b.classList.toggle("active", b.dataset.tab === name));
+    tabPanels.forEach(p => p.classList.toggle("active", p.dataset.tab === name));
+  }
+  tabBtns.forEach(b => b.addEventListener("click", () => {
+    patchHash({tab: b.dataset.tab});
+    showTab(b.dataset.tab);
+    onTabEnter(b.dataset.tab);
+  }));
+
+  // ---------- State ----------
+  let active = null;  // {kind: "dm"|"channel", peer?, channel_id?, channel_name?}
+  let activeTimer = null;
+  let lastActiveTs = null;
+
+  function fmtTime(iso) {
+    if (!iso) return "";
+    const d = new Date(iso);
+    return d.toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"});
+  }
+  function fmtDate(iso) {
+    if (!iso) return "";
+    const d = new Date(iso);
+    return d.toLocaleDateString() + " " + fmtTime(iso);
+  }
+  function shortHex(hex, n=8) { return hex ? hex.slice(0,n)+"…" : ""; }
+  function escText(s) { const d = document.createElement("div"); d.textContent = s ?? ""; return d.innerHTML; }
+
+  // ---------- Threads ----------
+  async function loadThreads() {
+    try {
+      const r = await fetch(`${API}/identities/${IDENTITY_ID}/threads`, {credentials:"same-origin"});
+      if (!r.ok) return;
+      const j = await r.json();
+      renderDmThreads(j.dms || []);
+      renderChannelThreads(j.channels || []);
+    } catch (e) {
+      console.warn("threads load failed", e);
+    }
+  }
+
+  function renderDmThreads(dms) {
+    const box = document.getElementById("dm-threads");
+    if (!dms.length) {
+      box.innerHTML = '<div class="thread-empty" style="color:var(--muted);padding:.5rem">Keine DMs. Starte einen neuen Thread unten.</div>';
+      return;
+    }
+    box.innerHTML = "";
+    for (const t of dms) {
+      const item = document.createElement("button");
+      item.type = "button";
+      item.className = "thread-item";
+      if (active && active.kind === "dm" && active.peer === t.peer_pubkey_hex) item.classList.add("active");
+      const star = t.favorite ? '<span style="color:gold">★</span> ' : '';
+      const peer = escText(t.peer_name || shortHex(t.peer_pubkey_hex, 12));
+      const last = t.last_text ? escText(t.last_text).slice(0,40) : '<span style="color:var(--muted)">—</span>';
+      item.innerHTML = `<div class="thread-top">${star}${peer}<span class="thread-time">${fmtTime(t.last_ts)}</span></div>
+                        <div class="thread-snip">${last}</div>`;
+      item.addEventListener("click", () => selectDm(t.peer_pubkey_hex, t.peer_name));
+      box.appendChild(item);
+    }
+  }
+
+  function renderChannelThreads(chs) {
+    const box = document.getElementById("ch-threads");
+    if (!chs.length) {
+      box.innerHTML = '<div class="thread-empty" style="color:var(--muted);padding:.5rem">Keine Kanäle.</div>';
+      return;
+    }
+    box.innerHTML = "";
+    for (const ch of chs) {
+      const item = document.createElement("button");
+      item.type = "button";
+      item.className = "thread-item";
+      if (active && active.kind === "channel" && active.channel_id === ch.id) item.classList.add("active");
+      const last = ch.last_text ? escText(ch.last_text).slice(0,40) : '<span style="color:var(--muted)">—</span>';
+      item.innerHTML = `<div class="thread-top">#${escText(ch.name)}<span class="thread-time">${fmtTime(ch.last_ts)}</span></div>
+                        <div class="thread-snip">${last}</div>`;
+      item.addEventListener("click", () => selectChannel(ch.id, ch.name));
+      box.appendChild(item);
+    }
+  }
+
+  // ---------- DM messages ----------
+  async function selectDm(peerHex, peerName) {
+    active = {kind:"dm", peer: peerHex, peer_name: peerName || null};
+    lastActiveTs = null;
+    patchHash({tab:"dms", conv:"dm:"+peerHex});
+    document.getElementById("dm-header").textContent =
+      (peerName ? peerName+" · " : "") + shortHex(peerHex, 16);
+    document.getElementById("dm-messages").innerHTML = "";
+    document.getElementById("dm-compose").style.display = "flex";
+    await loadDmMessages(peerHex, true);
+    armActiveTimer();
+    markActiveThread();
+  }
+
+  async function loadDmMessages(peerHex, replace) {
+    const url = `${API}/identities/${IDENTITY_ID}/dms/${peerHex}` +
+                (lastActiveTs ? `?since=${encodeURIComponent(lastActiveTs)}` : "");
+    const r = await fetch(url, {credentials:"same-origin"});
+    if (!r.ok) return;
+    const list = await r.json();
+    const box = document.getElementById("dm-messages");
+    if (replace) box.innerHTML = "";
+    for (const m of list) {
+      const cls = m.direction === "out" ? "out" : "in";
+      const who = m.direction === "out" ? "me" : (m.peer_name || shortHex(m.peer_pubkey_hex, 8));
+      const div = document.createElement("div");
+      div.className = "message " + cls;
+      div.innerHTML = `<div class="msg-meta">${escText(who)} · ${fmtDate(m.ts)}</div>
+                       <div class="msg-text">${escText(m.text || "")}</div>`;
+      box.appendChild(div);
+      if (m.ts) lastActiveTs = m.ts;
+    }
+    if (list.length) box.scrollTop = box.scrollHeight;
+  }
+
+  // ---------- Channel messages ----------
+  async function selectChannel(channelId, channelName) {
+    active = {kind:"channel", channel_id: channelId, channel_name: channelName};
+    lastActiveTs = null;
+    patchHash({tab:"channels", conv:"ch:"+channelId});
+    document.getElementById("ch-header").textContent = "#" + channelName;
+    document.getElementById("ch-messages").innerHTML = "";
+    document.getElementById("ch-compose").style.display = "flex";
+    await loadChannelMessages(channelId, true);
+    armActiveTimer();
+    markActiveThread();
+  }
+
+  async function loadChannelMessages(channelId, replace) {
+    const url = `${API}/identities/${IDENTITY_ID}/channels/${channelId}/messages` +
+                (lastActiveTs ? `?since=${encodeURIComponent(lastActiveTs)}` : "");
+    const r = await fetch(url, {credentials:"same-origin"});
+    if (!r.ok) return;
+    const list = await r.json();
+    const box = document.getElementById("ch-messages");
+    if (replace) box.innerHTML = "";
+    for (const m of list) {
+      const cls = m.direction === "out" ? "out" : "in";
+      const who = m.direction === "out" ? "me" : (m.peer_name || "?");
+      const div = document.createElement("div");
+      div.className = "message " + cls;
+      div.innerHTML = `<div class="msg-meta">${escText(who)} · ${fmtDate(m.ts)}</div>
+                       <div class="msg-text">${escText(m.text || "")}</div>`;
+      box.appendChild(div);
+      if (m.ts) lastActiveTs = m.ts;
+    }
+    if (list.length) box.scrollTop = box.scrollHeight;
+  }
+
+  function markActiveThread() {
+    document.querySelectorAll(".thread-item").forEach(el => el.classList.remove("active"));
+    // Re-render via reload triggers it; simpler: skip — next loadThreads will set it
+  }
+
+  function armActiveTimer() {
+    if (activeTimer) clearInterval(activeTimer);
+    activeTimer = setInterval(() => {
+      if (!active) return;
+      if (active.kind === "dm") loadDmMessages(active.peer, false);
+      else if (active.kind === "channel") loadChannelMessages(active.channel_id, false);
+    }, POLL_ACTIVE_MS);
+  }
+
+  // ---------- Send ----------
+  document.getElementById("dm-compose").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    if (!active || active.kind !== "dm") return;
+    const t = document.getElementById("dm-text");
+    const text = t.value.trim();
+    if (!text) return;
+    const fd = new FormData();
+    fd.append("identity_id", IDENTITY_ID);
+    fd.append("peer_pubkey_hex", active.peer);
+    fd.append("text", text);
+    const r = await fetch(`${API}/messages/dm`, {method:"POST", body: fd, credentials:"same-origin"});
+    if (r.ok) {
+      t.value = "";
+      lastActiveTs = null;
+      await loadDmMessages(active.peer, true);
+      loadThreads();
+    } else {
+      alert("send failed: " + r.status);
+    }
+  });
+
+  document.getElementById("ch-compose").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    if (!active || active.kind !== "channel") return;
+    const t = document.getElementById("ch-text");
+    const text = t.value.trim();
+    if (!text) return;
+    const fd = new FormData();
+    fd.append("identity_id", IDENTITY_ID);
+    fd.append("channel_id", active.channel_id);
+    fd.append("text", text);
+    const r = await fetch(`${API}/messages/channel`, {method:"POST", body: fd, credentials:"same-origin"});
+    if (r.ok) {
+      t.value = "";
+      lastActiveTs = null;
+      await loadChannelMessages(active.channel_id, true);
+      loadThreads();
+    } else {
+      alert("send failed: " + r.status);
+    }
+  });
+
+  document.getElementById("dm-new").addEventListener("submit", (e) => {
+    e.preventDefault();
+    const v = document.getElementById("dm-new-peer").value.trim();
+    if (!/^[0-9a-fA-F]{64}$/.test(v)) { alert("64-Zeichen-Hex erwartet"); return; }
+    selectDm(v.toLowerCase(), null);
+  });
+
+  // ---------- Init ----------
+  function onTabEnter(name) {
+    if (name === "dms" || name === "channels") {
+      loadThreads();
+    }
+  }
+
+  function restoreFromHash() {
+    const s = parseHash();
+    const tab = ["settings","dms","channels"].includes(s.tab) ? s.tab : "settings";
+    showTab(tab);
+    onTabEnter(tab);
+    if (s.conv) {
+      if (s.conv.startsWith("dm:")) {
+        const peer = s.conv.slice(3);
+        if (/^[0-9a-fA-F]{64}$/.test(peer)) selectDm(peer.toLowerCase(), null);
+      } else if (s.conv.startsWith("ch:")) {
+        const id = s.conv.slice(3);
+        // wir haben den Channel-Namen noch nicht; loadThreads liefert ihn,
+        // bis dahin zeigen wir Header mit ID
+        selectChannel(id, id.slice(0,8));
+      }
+    }
+  }
+
+  // initial sidebar refresh + periodic
+  loadThreads();
+  setInterval(loadThreads, POLL_THREADS_MS);
+
+  restoreFromHash();
+  window.addEventListener("hashchange", restoreFromHash);
+})();
+</script>
+{% endblock %}

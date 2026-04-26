@@ -314,6 +314,194 @@ async def send_channel_message(
     return {"ok": ok, "ts": datetime.now(UTC).isoformat()}
 
 
+# ---------- Conversations (per identity) ----------
+
+
+def _message_dict(m: CompanionMessage) -> dict[str, Any]:
+    return {
+        "id": str(m.id),
+        "direction": m.direction,
+        "payload_type": m.payload_type,
+        "peer_pubkey_hex": m.peer_pubkey.hex() if m.peer_pubkey else None,
+        "peer_name": m.peer_name,
+        "channel_name": m.channel_name,
+        "text": m.text,
+        "ts": m.ts.isoformat() if m.ts else None,
+    }
+
+
+@router.get("/identities/{identity_id}/threads")
+async def list_identity_threads(
+    identity_id: UUID,
+    user: User = Depends(current_user_required),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """DM-Threads (gruppiert nach peer_pubkey) und Channel-Threads für eine
+    Identity. Channels erscheinen auch ohne Posts."""
+    if not await _user_owns_identity(db, user.id, identity_id):
+        raise HTTPException(status_code=404)
+
+    msgs = list(
+        (
+            await db.execute(
+                select(CompanionMessage)
+                .where(CompanionMessage.identity_id == identity_id)
+                .order_by(desc(CompanionMessage.ts))
+            )
+        ).scalars()
+    )
+    contacts = list(
+        (
+            await db.execute(
+                select(CompanionContact).where(
+                    CompanionContact.identity_id == identity_id
+                )
+            )
+        ).scalars()
+    )
+    channels = list(
+        (
+            await db.execute(
+                select(CompanionChannel)
+                .where(CompanionChannel.identity_id == identity_id)
+                .order_by(CompanionChannel.name)
+            )
+        ).scalars()
+    )
+    contacts_by_pk: dict[bytes, CompanionContact] = {
+        c.peer_pubkey: c for c in contacts
+    }
+
+    dm_seen: dict[bytes, dict[str, Any]] = {}
+    chan_last: dict[str, CompanionMessage] = {}
+    for m in msgs:
+        if m.peer_pubkey is not None and m.peer_pubkey not in dm_seen:
+            contact = contacts_by_pk.get(m.peer_pubkey)
+            dm_seen[m.peer_pubkey] = {
+                "peer_pubkey_hex": m.peer_pubkey.hex(),
+                "peer_name": (contact.peer_name if contact else None) or m.peer_name,
+                "favorite": bool(contact and contact.favorite),
+                "last_ts": m.ts.isoformat() if m.ts else None,
+                "last_text": m.text,
+                "last_direction": m.direction,
+            }
+        if (
+            m.peer_pubkey is None
+            and m.channel_name
+            and m.channel_name not in chan_last
+        ):
+            chan_last[m.channel_name] = m
+
+    # Auch Kontakte ohne Nachrichten sichtbar machen (mind. Favoriten),
+    # damit man als Erster eine DM starten kann.
+    for c in contacts:
+        if c.peer_pubkey in dm_seen:
+            continue
+        if not c.favorite:
+            continue
+        dm_seen[c.peer_pubkey] = {
+            "peer_pubkey_hex": c.peer_pubkey.hex(),
+            "peer_name": c.peer_name,
+            "favorite": True,
+            "last_ts": c.last_seen_at.isoformat() if c.last_seen_at else None,
+            "last_text": None,
+            "last_direction": None,
+        }
+
+    dms = list(dm_seen.values())
+    dms.sort(key=lambda t: t["last_ts"] or "", reverse=True)
+    dms.sort(key=lambda t: not t["favorite"])  # stable: favorites first
+
+    chan_rows = []
+    for ch in channels:
+        last = chan_last.get(ch.name)
+        chan_rows.append(
+            {
+                "id": str(ch.id),
+                "name": ch.name,
+                "channel_hash_hex": ch.channel_hash.hex(),
+                "last_ts": last.ts.isoformat() if last and last.ts else None,
+                "last_text": last.text if last else None,
+                "last_direction": last.direction if last else None,
+            }
+        )
+    chan_rows.sort(key=lambda c: c["last_ts"] or "", reverse=True)
+
+    return {"dms": dms, "channels": chan_rows}
+
+
+@router.get("/identities/{identity_id}/dms/{peer_pubkey_hex}")
+async def list_dm_messages(
+    identity_id: UUID,
+    peer_pubkey_hex: str,
+    user: User = Depends(current_user_required),
+    db: AsyncSession = Depends(get_db),
+    limit: int = Query(default=200, ge=1, le=1000),
+    since: str | None = Query(default=None),
+) -> list[dict[str, Any]]:
+    if not await _user_owns_identity(db, user.id, identity_id):
+        raise HTTPException(status_code=404)
+    try:
+        peer = bytes.fromhex(peer_pubkey_hex.strip())
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail="bad pubkey hex") from e
+    if len(peer) != 32:
+        raise HTTPException(status_code=400, detail="pubkey must be 32 bytes")
+
+    q = (
+        select(CompanionMessage)
+        .where(
+            CompanionMessage.identity_id == identity_id,
+            CompanionMessage.peer_pubkey == peer,
+        )
+        .order_by(desc(CompanionMessage.ts))
+        .limit(limit)
+    )
+    if since:
+        try:
+            q = q.where(CompanionMessage.ts > datetime.fromisoformat(since))
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail="bad since") from e
+    rows = list((await db.execute(q)).scalars())
+    rows.reverse()
+    return [_message_dict(m) for m in rows]
+
+
+@router.get("/identities/{identity_id}/channels/{channel_id}/messages")
+async def list_channel_messages(
+    identity_id: UUID,
+    channel_id: UUID,
+    user: User = Depends(current_user_required),
+    db: AsyncSession = Depends(get_db),
+    limit: int = Query(default=200, ge=1, le=1000),
+    since: str | None = Query(default=None),
+) -> list[dict[str, Any]]:
+    if not await _user_owns_identity(db, user.id, identity_id):
+        raise HTTPException(status_code=404)
+    channel = await db.get(CompanionChannel, channel_id)
+    if channel is None or channel.identity_id != identity_id:
+        raise HTTPException(status_code=404)
+
+    q = (
+        select(CompanionMessage)
+        .where(
+            CompanionMessage.identity_id == identity_id,
+            CompanionMessage.peer_pubkey.is_(None),
+            CompanionMessage.channel_name == channel.name,
+        )
+        .order_by(desc(CompanionMessage.ts))
+        .limit(limit)
+    )
+    if since:
+        try:
+            q = q.where(CompanionMessage.ts > datetime.fromisoformat(since))
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail="bad since") from e
+    rows = list((await db.execute(q)).scalars())
+    rows.reverse()
+    return [_message_dict(m) for m in rows]
+
+
 # ---------- UI ----------
 
 @ui_router.get("/", response_class=HTMLResponse)
@@ -325,92 +513,21 @@ async def companion_index(
     identities = list(
         (
             await db.execute(
-                select(CompanionIdentity).where(
+                select(CompanionIdentity)
+                .where(
                     CompanionIdentity.user_id == user.id,
                     CompanionIdentity.archived_at.is_(None),
                 )
+                .order_by(CompanionIdentity.created_at)
             )
         ).scalars()
     )
-    own_ids = [i.id for i in identities]
-    contacts: list[CompanionContact] = []
-    channels: list[CompanionChannel] = []
-    if own_ids:
-        contacts = list(
-            (
-                await db.execute(
-                    select(CompanionContact)
-                    .where(CompanionContact.identity_id.in_(own_ids))
-                    .order_by(
-                        desc(CompanionContact.favorite),
-                        desc(CompanionContact.last_seen_at),
-                    )
-                )
-            ).scalars()
-        )
-        channels = list(
-            (
-                await db.execute(
-                    select(CompanionChannel)
-                    .where(CompanionChannel.identity_id.in_(own_ids))
-                    .order_by(CompanionChannel.name)
-                )
-            ).scalars()
-        )
-
-    # Datalist für DM-Picker: alle Kontakte pro Identity, Favoriten zuerst
-    contacts_by_identity: dict[str, list[dict[str, Any]]] = {}
-    for c in contacts:
-        contacts_by_identity.setdefault(str(c.identity_id), []).append(
-            {
-                "id": str(c.id),
-                "peer_pubkey_hex": c.peer_pubkey.hex(),
-                "peer_name": c.peer_name,
-                "last_seen_at": c.last_seen_at.isoformat() if c.last_seen_at else None,
-                "favorite": c.favorite,
-            }
-        )
-
-    # Tabellen-Anzeige: Favoriten immer + die letzten 5 Nicht-Favoriten
-    NON_FAVORITE_LIMIT = 5
-    favorite_contacts = [c for c in contacts if c.favorite]
-    non_favorite_contacts = [c for c in contacts if not c.favorite][:NON_FAVORITE_LIMIT]
-    visible_contacts = favorite_contacts + non_favorite_contacts
-    visible_rows = [
-        {
-            "id": str(c.id),
-            "identity_id": str(c.identity_id),
-            "peer_pubkey_hex": c.peer_pubkey.hex(),
-            "peer_name": c.peer_name,
-            "last_seen_at": c.last_seen_at.isoformat() if c.last_seen_at else None,
-            "favorite": c.favorite,
-        }
-        for c in visible_contacts
-    ]
-    hidden_count = max(0, len(contacts) - len(visible_rows))
-    channels_by_identity: dict[str, list[dict[str, Any]]] = {}
-    identity_names: dict[str, str] = {str(i.id): i.name for i in identities}
-    for ch in channels:
-        channels_by_identity.setdefault(str(ch.identity_id), []).append(
-            {
-                "id": str(ch.id),
-                "name": ch.name,
-                "channel_hash_hex": ch.channel_hash.hex(),
-            }
-        )
-
     return _templates(request).TemplateResponse(
         request,
         "companion_index.html.j2",
         {
             "user": user,
             "identities": identities,
-            "contacts_by_identity": contacts_by_identity,
-            "visible_contacts": visible_rows,
-            "hidden_contact_count": hidden_count,
-            "channels_by_identity": channels_by_identity,
-            "channels": channels,
-            "identity_names": identity_names,
             "flash": None,
         },
     )
@@ -448,15 +565,65 @@ async def companion_contact_toggle_favorite(
     return RedirectResponse(url="/companion/", status_code=303)
 
 
-@ui_router.post("/identities/{identity_id}/advert", response_model=None)
-async def companion_advert_send(
+@ui_router.get("/{identity_id}/", response_class=HTMLResponse)
+async def companion_detail(
+    request: Request,
+    identity_id: UUID,
+    user: User = Depends(current_user_required),
+    db: AsyncSession = Depends(get_db),
+) -> HTMLResponse:
+    identity = await db.get(CompanionIdentity, identity_id)
+    if identity is None or identity.user_id != user.id:
+        raise HTTPException(status_code=404)
+    channels = list(
+        (
+            await db.execute(
+                select(CompanionChannel)
+                .where(CompanionChannel.identity_id == identity_id)
+                .order_by(CompanionChannel.name)
+            )
+        ).scalars()
+    )
+    return _templates(request).TemplateResponse(
+        request,
+        "companion_detail.html.j2",
+        {
+            "user": user,
+            "identity": identity,
+            "channels": channels,
+            "flash": None,
+        },
+    )
+
+
+@ui_router.post("/{identity_id}/rename", response_model=None)
+async def companion_identity_rename(
+    request: Request,
+    identity_id: UUID,
+    name: Annotated[str, Form()],
+    user: User = Depends(current_user_required),
+    db: AsyncSession = Depends(get_db),
+) -> RedirectResponse:
+    if not await _user_owns_identity(db, user.id, identity_id):
+        raise HTTPException(status_code=404)
+    svc = _service(request)
+    if svc is None:
+        raise HTTPException(status_code=503)
+    if not await svc.rename_identity(identity_id, name):
+        raise HTTPException(status_code=400, detail="invalid name")
+    return RedirectResponse(
+        url=f"/companion/{identity_id}/#tab=settings", status_code=303
+    )
+
+
+@ui_router.post("/{identity_id}/advert", response_model=None)
+async def companion_identity_advert(
     request: Request,
     identity_id: UUID,
     user: User = Depends(current_user_required),
     db: AsyncSession = Depends(get_db),
 ) -> RedirectResponse:
-    row = await db.get(CompanionIdentity, identity_id)
-    if row is None or row.user_id != user.id:
+    if not await _user_owns_identity(db, user.id, identity_id):
         raise HTTPException(status_code=404)
     svc = _service(request)
     if svc is None:
@@ -465,38 +632,31 @@ async def companion_advert_send(
     if loaded is None:
         raise HTTPException(status_code=409, detail="identity not loaded in service")
     await svc._send_advert(loaded)
-    return RedirectResponse(url="/companion/", status_code=303)
+    return RedirectResponse(
+        url=f"/companion/{identity_id}/#tab=settings", status_code=303
+    )
 
 
-@ui_router.post("/messages/dm", response_model=None)
-async def companion_dm_send(
+@ui_router.post("/{identity_id}/archive", response_model=None)
+async def companion_identity_archive(
     request: Request,
-    identity_id: Annotated[UUID, Form()],
-    peer_pubkey_hex: Annotated[str, Form()],
-    text: Annotated[str, Form()],
+    identity_id: UUID,
     user: User = Depends(current_user_required),
     db: AsyncSession = Depends(get_db),
 ) -> RedirectResponse:
-    row = await db.get(CompanionIdentity, identity_id)
-    if row is None or row.user_id != user.id:
+    if not await _user_owns_identity(db, user.id, identity_id):
         raise HTTPException(status_code=404)
-    try:
-        peer = bytes.fromhex(peer_pubkey_hex.strip())
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail="bad pubkey hex") from e
-    if len(peer) != 32:
-        raise HTTPException(status_code=400, detail="pubkey must be 32 bytes")
     svc = _service(request)
     if svc is None:
         raise HTTPException(status_code=503)
-    await svc.send_dm(identity_id=identity_id, peer_pubkey=peer, text=text)
+    await svc.archive_identity(identity_id)
     return RedirectResponse(url="/companion/", status_code=303)
 
 
-@ui_router.post("/channels", response_model=None)
-async def companion_channel_create(
+@ui_router.post("/{identity_id}/channels", response_model=None)
+async def companion_identity_channel_create(
     request: Request,
-    identity_id: Annotated[UUID, Form()],
+    identity_id: UUID,
     name: Annotated[str, Form()],
     password: Annotated[str, Form()],
     user: User = Depends(current_user_required),
@@ -508,22 +668,29 @@ async def companion_channel_create(
     if svc is None:
         raise HTTPException(status_code=503)
     await svc.add_channel(identity_id=identity_id, name=name.strip(), password=password)
-    return RedirectResponse(url="/companion/", status_code=303)
+    return RedirectResponse(
+        url=f"/companion/{identity_id}/#tab=settings", status_code=303
+    )
 
 
-@ui_router.post("/messages/channel", response_model=None)
-async def companion_channel_send(
+@ui_router.post("/channels/{channel_id}/delete", response_model=None)
+async def companion_channel_delete(
     request: Request,
-    identity_id: Annotated[UUID, Form()],
-    channel_id: Annotated[UUID, Form()],
-    text: Annotated[str, Form()],
+    channel_id: UUID,
     user: User = Depends(current_user_required),
     db: AsyncSession = Depends(get_db),
 ) -> RedirectResponse:
-    if not await _user_owns_identity(db, user.id, identity_id):
+    channel = await db.get(CompanionChannel, channel_id)
+    if channel is None:
+        raise HTTPException(status_code=404)
+    ident = await db.get(CompanionIdentity, channel.identity_id)
+    if ident is None or ident.user_id != user.id:
         raise HTTPException(status_code=404)
     svc = _service(request)
     if svc is None:
         raise HTTPException(status_code=503)
-    await svc.send_channel(identity_id=identity_id, channel_id=channel_id, text=text)
-    return RedirectResponse(url="/companion/", status_code=303)
+    identity_id = channel.identity_id
+    await svc.delete_channel(channel_id)
+    return RedirectResponse(
+        url=f"/companion/{identity_id}/#tab=settings", status_code=303
+    )

@@ -10,7 +10,7 @@
     <h2>Deine Identitäten ({{ identities | length }})</h2>
     {% if identities %}
       <table>
-        <thead><tr><th>Name</th><th>Scope</th><th>Pubkey</th><th>Aktion</th></tr></thead>
+        <thead><tr><th>Name</th><th>Scope</th><th>Pubkey</th><th></th></tr></thead>
         <tbody>
         {% for i in identities %}
           <tr>
@@ -18,14 +18,11 @@
             <td class="scope-{{ 'public' if i.scope == 'public' else 'pool' }}">{{ i.scope }}</td>
             <td><code>{{ i.pubkey.hex()[:24] }}…</code></td>
             <td>
-              <form method="post" action="/companion/identities/{{ i.id }}/advert"
-                    style="display:inline">
-                <button type="submit" style="margin:0;padding:.2rem .5rem">Advert senden</button>
-              </form>
-              <form method="post" action="/api/v1/companion/identities/{{ i.id }}/archive"
-                    style="display:inline" onsubmit="return confirm('Identität archivieren?');">
-                <button type="submit" style="margin:0;padding:.2rem .5rem;background:var(--danger)">archivieren</button>
-              </form>
+              <a href="/companion/{{ i.id }}/"
+                 style="display:inline-block;padding:.3rem .7rem;background:var(--accent);
+                        color:var(--bg);border-radius:4px;font-weight:bold;text-decoration:none">
+                öffnen →
+              </a>
             </td>
           </tr>
         {% endfor %}
@@ -50,190 +47,5 @@
       </label>
       <button type="submit">Anlegen</button>
     </form>
-  </div>
-
-  <div class="card">
-    <h2>Kontakte (aus beobachteten Adverts)</h2>
-    {% if visible_contacts %}
-      <table>
-        <thead><tr><th>Fav</th><th>Identity</th><th>Peer</th><th>Pubkey</th><th>Last seen</th></tr></thead>
-        <tbody>
-        {% for c in visible_contacts %}
-          <tr>
-            <td>
-              <form method="post" action="/companion/contacts/{{ c.id }}/favorite"
-                    style="display:inline">
-                <button type="submit"
-                        title="{{ 'Favorit entfernen' if c.favorite else 'als Favorit markieren' }}"
-                        style="margin:0;padding:.1rem .4rem;background:transparent;
-                               color:{{ 'gold' if c.favorite else 'var(--muted)' }};
-                               border:none;font-size:1.1em;cursor:pointer">{{ '★' if c.favorite else '☆' }}</button>
-              </form>
-            </td>
-            <td>{{ identity_names.get(c.identity_id, c.identity_id[:8]) }}</td>
-            <td>{{ c.peer_name or '–' }}</td>
-            <td><code>{{ c.peer_pubkey_hex[:16] }}…</code></td>
-            <td>{{ c.last_seen_at | localtime }}</td>
-          </tr>
-        {% endfor %}
-        </tbody>
-      </table>
-      {% if hidden_contact_count %}
-        <p style="font-size:.85em;color:var(--muted)">
-          … {{ hidden_contact_count }} weitere nicht-favorisierte Kontakte
-          ausgeblendet. Markiere die wichtigsten als Favorit, um sie
-          dauerhaft zu sehen.
-        </p>
-      {% endif %}
-    {% else %}
-      <p>Noch keine Kontakte. Wird automatisch befüllt, sobald andere
-         Mesh-Teilnehmer im gleichen Scope ihre Adverts senden.</p>
-    {% endif %}
-    <p style="font-size:.85em;color:var(--muted)"><a href="/api/v1/companion/contacts">JSON</a></p>
-  </div>
-
-  <div class="card">
-    <h2>DM senden</h2>
-    {% if identities %}
-      <form method="post" action="/companion/messages/dm" id="dmform">
-        <label>Identität
-          <select name="identity_id" id="dm-identity" required>
-            {% for i in identities %}
-              <option value="{{ i.id }}">{{ i.name }} ({{ i.scope }})</option>
-            {% endfor %}
-          </select>
-        </label>
-        <label>Empfänger (Name oder Pubkey-Hex tippen — Liste filtert)
-          <input name="peer_pubkey_hex" id="dm-peer"
-                 list="contacts-{{ identities[0].id }}"
-                 required minlength="64" maxlength="64" pattern="[0-9a-fA-F]{64}"
-                 placeholder="64-Zeichen Pubkey-Hex oder aus Liste wählen">
-        </label>
-        {% for i in identities %}
-          <datalist id="contacts-{{ i.id }}">
-            {% for c in contacts_by_identity.get(i.id|string, []) %}
-              <option value="{{ c.peer_pubkey_hex }}">{{ '★ ' if c.favorite else '' }}{{ c.peer_name or c.peer_pubkey_hex[:8] }}</option>
-            {% endfor %}
-          </datalist>
-        {% endfor %}
-        <label>Text
-          <input name="text" required maxlength="200">
-        </label>
-        <button type="submit">Senden</button>
-      </form>
-      <script>
-        (() => {
-          const sel = document.getElementById('dm-identity');
-          const inp = document.getElementById('dm-peer');
-          if (!sel || !inp) return;
-          sel.addEventListener('change', () => {
-            inp.setAttribute('list', 'contacts-' + sel.value);
-            inp.value = '';
-          });
-        })();
-      </script>
-    {% else %}
-      <p>Erst eine Identität anlegen.</p>
-    {% endif %}
-  </div>
-
-  <div class="card">
-    <h2>Kanäle</h2>
-    {% if channels %}
-      <table>
-        <thead><tr><th>Identity</th><th>Name</th><th>Hash</th></tr></thead>
-        <tbody>
-        {% for ch in channels %}
-          <tr>
-            <td>{{ identity_names.get(ch.identity_id|string, '?') }}</td>
-            <td>{{ ch.name }}</td>
-            <td><code>{{ ch.channel_hash.hex() }}</code></td>
-          </tr>
-        {% endfor %}
-        </tbody>
-      </table>
-    {% else %}
-      <p>Noch keine Kanäle angelegt.</p>
-    {% endif %}
-
-    {% if identities %}
-      <h3 style="margin-top:1rem">Kanal hinzufügen</h3>
-      <form method="post" action="/companion/channels">
-        <label>Identität
-          <select name="identity_id" required>
-            {% for i in identities %}
-              <option value="{{ i.id }}">{{ i.name }} ({{ i.scope }})</option>
-            {% endfor %}
-          </select>
-        </label>
-        <label>Channel-Name
-          <input name="name" required maxlength="64" placeholder="z.B. public">
-        </label>
-        <label>Passwort
-          <input name="password" required maxlength="128"
-                 placeholder="geteiltes Channel-Passwort">
-        </label>
-        <button type="submit">Hinzufügen</button>
-      </form>
-      <p style="font-size:.85em;color:var(--muted)">
-        Secret wird aus <code>sha256(name + ":" + password)[:32]</code>
-        abgeleitet — gleiche Konvention wie einige MeshCore-Apps. Alle
-        Teilnehmer müssen denselben Namen und dasselbe Passwort verwenden.
-      </p>
-    {% endif %}
-  </div>
-
-  <div class="card">
-    <h2>Channel-Post senden</h2>
-    {% if channels %}
-      <form method="post" action="/companion/messages/channel" id="chform">
-        <label>Identität
-          <select name="identity_id" id="ch-identity" required>
-            {% for i in identities %}
-              {% if channels_by_identity.get(i.id|string) %}
-                <option value="{{ i.id }}">{{ i.name }} ({{ i.scope }})</option>
-              {% endif %}
-            {% endfor %}
-          </select>
-        </label>
-        <label>Kanal
-          <select name="channel_id" id="ch-channel" required>
-            {# Initial: Channels der ersten Identity, die welche hat #}
-          </select>
-        </label>
-        <label>Text
-          <input name="text" required maxlength="140"
-                 placeholder="Wird mit '<Identity-Name>: ' präfixiert">
-        </label>
-        <button type="submit">Senden</button>
-      </form>
-      <script>
-        (() => {
-          const channelsByIdentity = {{ channels_by_identity | tojson }};
-          const idSel = document.getElementById('ch-identity');
-          const chSel = document.getElementById('ch-channel');
-          if (!idSel || !chSel) return;
-          const refresh = () => {
-            const list = channelsByIdentity[idSel.value] || [];
-            chSel.innerHTML = '';
-            for (const c of list) {
-              const opt = document.createElement('option');
-              opt.value = c.id;
-              opt.textContent = c.name;
-              chSel.appendChild(opt);
-            }
-          };
-          idSel.addEventListener('change', refresh);
-          refresh();
-        })();
-      </script>
-    {% else %}
-      <p>Erst einen Kanal hinzufügen.</p>
-    {% endif %}
-  </div>
-
-  <div class="card">
-    <h2>Letzte Nachrichten</h2>
-    <p><a href="/api/v1/companion/messages">JSON-Liste</a> (UI-Tabelle folgt).</p>
   </div>
 {% endblock %}

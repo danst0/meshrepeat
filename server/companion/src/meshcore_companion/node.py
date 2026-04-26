@@ -30,6 +30,7 @@ import time
 from dataclasses import dataclass
 
 from meshcore_companion.crypto import (
+    CIPHER_MAC_SIZE,
     PATH_HASH_SIZE,
     Identity,
     LocalIdentity,
@@ -264,3 +265,70 @@ class CompanionNode:
         if not Identity(adv.pubkey).verify(adv.signature, adv.signed_message):
             return None
         return adv
+
+
+# ---------- CHANNEL receive ----------
+
+
+@dataclass
+class IncomingChannelMessage:
+    """Geparster GRP_TXT-Channel-Post.
+
+    ``sender_name`` ist nur kosmetisch — MeshCore-Channels signieren den
+    Inhalt nicht, jeder mit Channel-Secret kann beliebige Namen senden.
+    """
+
+    channel_secret: bytes
+    timestamp: int
+    sender_name: str
+    text: str
+
+
+def try_decrypt_grp_txt(
+    *,
+    packet: Packet,
+    channels: list[tuple[bytes, bytes]],
+) -> IncomingChannelMessage | None:
+    """Versucht, einen GRP_TXT-Paket-Body mit einem der bekannten
+    Channel-Secrets zu entschlüsseln.
+
+    ``channels`` ist eine Liste von ``(channel_hash[:1], channel_secret[32])``.
+    Wir matchen zuerst den 1-Byte-Hash; bei Treffer wird ``mac_then_decrypt``
+    versucht. Erste erfolgreiche Dekryption gewinnt.
+    """
+    if packet.payload_type != PayloadType.GRP_TXT:
+        return None
+    body = packet.payload
+    if len(body) < PATH_HASH_SIZE + CIPHER_MAC_SIZE:
+        return None
+    chash = body[:PATH_HASH_SIZE]
+    encrypted = body[PATH_HASH_SIZE:]
+    for ch_hash, ch_secret in channels:
+        if ch_hash[:PATH_HASH_SIZE] != chash:
+            continue
+        plain = mac_then_decrypt(ch_secret, encrypted)
+        if plain is None:
+            continue
+        if len(plain) < _TIMESTAMP_LEN + 1:
+            continue
+        ts = int.from_bytes(plain[:_TIMESTAMP_LEN], "little", signed=False)
+        txt_type = plain[_TIMESTAMP_LEN]
+        if txt_type & 0xFC:  # high 6 bits must be zero
+            continue
+        try:
+            body_str = (
+                plain[_TIMESTAMP_LEN + 1 :].rstrip(b"\x00").decode("utf-8")
+            )
+        except UnicodeDecodeError:
+            continue
+        if ": " in body_str:
+            sender, _, text = body_str.partition(": ")
+        else:
+            sender, text = "", body_str
+        return IncomingChannelMessage(
+            channel_secret=ch_secret,
+            timestamp=ts,
+            sender_name=sender,
+            text=text,
+        )
+    return None

@@ -62,6 +62,8 @@ async def app_and_outbox(tmp_path: Path):
     cfg.web.signup.require_email_verification = True
     # disables Secure-flag on session cookie for tests
     cfg.web.base_url = "http://t"
+    # CompanionService aktivieren — braucht 32-byte db_key
+    cfg.db_key = b"\x42" * 32
 
     sender = _RecordingEmailSender()
 
@@ -195,6 +197,110 @@ async def test_websocket_rejects_bad_token(app_and_outbox) -> None:
             )
         )
         ws.receive_bytes()
+
+
+@pytest.mark.asyncio
+async def test_companion_detail_page_and_settings(app_and_outbox) -> None:
+    app, sender = app_and_outbox
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://t") as client:
+        await client.post(
+            "/signup",
+            data={"email": "comp@example.com", "password": PASSWORD},
+        )
+        verify_tok = sender.outbox[-1]["body"].split("token=")[1].strip()
+        await client.get(f"/verify-email?token={verify_tok}")
+        await client.post(
+            "/login",
+            data={"email": "comp@example.com", "password": PASSWORD},
+            follow_redirects=False,
+        )
+
+        # Identity anlegen via REST → liefert id zurück
+        resp = await client.post(
+            "/api/v1/companion/identities",
+            data={"name": "Antonia", "scope": "public"},
+        )
+        assert resp.status_code == 200, resp.text
+        ident_id = resp.json()["id"]
+
+        # Detail-Page erreichbar mit Tabs
+        resp = await client.get(f"/companion/{ident_id}/")
+        assert resp.status_code == 200
+        body = resp.text
+        assert "Antonia" in body
+        assert 'data-tab="settings"' in body
+        assert 'data-tab="dms"' in body
+        assert 'data-tab="channels"' in body
+
+        # Rename
+        resp = await client.post(
+            f"/companion/{ident_id}/rename",
+            data={"name": "Beatrice"},
+            follow_redirects=False,
+        )
+        assert resp.status_code == 303
+        resp = await client.get(f"/companion/{ident_id}/")
+        assert "Beatrice" in resp.text
+
+        # Channel anlegen via UI-Form
+        resp = await client.post(
+            f"/companion/{ident_id}/channels",
+            data={"name": "tech", "password": "hunter2"},
+            follow_redirects=False,
+        )
+        assert resp.status_code == 303
+
+        # Threads-API listet den Channel
+        resp = await client.get(
+            f"/api/v1/companion/identities/{ident_id}/threads"
+        )
+        assert resp.status_code == 200
+        j = resp.json()
+        chan_names = [c["name"] for c in j["channels"]]
+        assert "public" in chan_names
+        assert "tech" in chan_names
+
+        # Channel löschen
+        chan_id = next(c["id"] for c in j["channels"] if c["name"] == "tech")
+        resp = await client.post(
+            f"/companion/channels/{chan_id}/delete",
+            follow_redirects=False,
+        )
+        assert resp.status_code == 303
+
+        resp = await client.get(
+            f"/api/v1/companion/identities/{ident_id}/threads"
+        )
+        chan_names = [c["name"] for c in resp.json()["channels"]]
+        assert "tech" not in chan_names
+
+
+@pytest.mark.asyncio
+async def test_companion_index_lists_identities(app_and_outbox) -> None:
+    app, sender = app_and_outbox
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://t") as client:
+        await client.post(
+            "/signup",
+            data={"email": "list@example.com", "password": PASSWORD},
+        )
+        verify_tok = sender.outbox[-1]["body"].split("token=")[1].strip()
+        await client.get(f"/verify-email?token={verify_tok}")
+        await client.post(
+            "/login",
+            data={"email": "list@example.com", "password": PASSWORD},
+            follow_redirects=False,
+        )
+        await client.post(
+            "/api/v1/companion/identities",
+            data={"name": "Frieda", "scope": "public"},
+        )
+        resp = await client.get("/companion/")
+        assert resp.status_code == 200
+        assert "Frieda" in resp.text
+        # Detail-Link sichtbar
+        assert "/companion/" in resp.text and "öffnen" in resp.text
 
 
 @pytest.mark.asyncio

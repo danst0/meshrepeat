@@ -38,9 +38,11 @@ from meshcore_companion.crypto import (
 from meshcore_companion.node import (
     ADV_TYPE_CHAT,
     CompanionNode,
+    IncomingChannelMessage,
     IncomingTextMessage,
     encode_advert_app_data,
     parse_advert_app_data,
+    try_decrypt_grp_txt,
 )
 from meshcore_companion.packet import Packet, PayloadType
 from meshcore_companion.storage import decrypt_seed, encrypt_seed
@@ -183,6 +185,34 @@ class CompanionService:
             self._by_pubkey.pop(loaded.pubkey, None)
         return True
 
+    async def rename_identity(self, identity_id: UUID, new_name: str) -> bool:
+        from meshcore_bridge.db import CompanionIdentity
+
+        clean = new_name.strip()
+        if not clean:
+            return False
+        async with self.sessionmaker() as db:
+            row = await db.get(CompanionIdentity, identity_id)
+            if row is None or row.archived_at is not None:
+                return False
+            row.name = clean
+            await db.commit()
+        loaded = self._by_id.get(identity_id)
+        if loaded is not None:
+            loaded.name = clean
+        return True
+
+    async def delete_channel(self, channel_id: UUID) -> bool:
+        from meshcore_bridge.db import CompanionChannel
+
+        async with self.sessionmaker() as db:
+            row = await db.get(CompanionChannel, channel_id)
+            if row is None:
+                return False
+            await db.delete(row)
+            await db.commit()
+        return True
+
     async def send_dm(
         self,
         *,
@@ -319,6 +349,8 @@ class CompanionService:
             await self._handle_inbound_advert(pkt=pkt, scope=scope)
         elif pkt.payload_type == PayloadType.TXT_MSG:
             await self._handle_inbound_dm(pkt=pkt, scope=scope, raw=raw)
+        elif pkt.payload_type == PayloadType.GRP_TXT:
+            await self._handle_inbound_grp_txt(pkt=pkt, scope=scope, raw=raw)
 
     # ---------- internal ----------
 
@@ -399,6 +431,62 @@ class CompanionService:
                 )
                 await db.commit()
             return  # erste Identity, die's lesen kann, gewinnt
+
+    async def _handle_inbound_grp_txt(
+        self, *, pkt: Packet, scope: str, raw: bytes
+    ) -> None:
+        from meshcore_bridge.db import CompanionChannel, CompanionMessage
+
+        in_scope = [li for li in self._by_id.values() if li.scope == scope]
+        if not in_scope:
+            return
+        own_ids = [li.id for li in in_scope]
+        async with self.sessionmaker() as db:
+            channels = list(
+                (
+                    await db.execute(
+                        select(CompanionChannel).where(
+                            CompanionChannel.identity_id.in_(own_ids)
+                        )
+                    )
+                ).scalars()
+            )
+        if not channels:
+            return
+        pairs = [(ch.channel_hash, ch.secret) for ch in channels]
+        decoded: IncomingChannelMessage | None = try_decrypt_grp_txt(
+            packet=pkt, channels=pairs
+        )
+        if decoded is None:
+            return
+        target = next(
+            (ch for ch in channels if ch.secret == decoded.channel_secret), None
+        )
+        if target is None:
+            return
+        loaded = self._by_id.get(target.identity_id)
+        if loaded is None:
+            return
+        # Eigene Outbox-Echos best-effort filtern: gleiche Identity, gleicher
+        # sender_name. Channels haben keine kryptographische Sender-Auth.
+        if decoded.sender_name and decoded.sender_name == loaded.name:
+            return
+        ts = datetime.fromtimestamp(decoded.timestamp, UTC)
+        async with self.sessionmaker() as db:
+            db.add(
+                CompanionMessage(
+                    identity_id=target.identity_id,
+                    direction="in",
+                    payload_type=int(PayloadType.GRP_TXT),
+                    peer_pubkey=None,
+                    peer_name=decoded.sender_name or None,
+                    channel_name=target.name,
+                    text=decoded.text,
+                    raw=raw,
+                    ts=ts,
+                )
+            )
+            await db.commit()
 
     async def _persist_outgoing(
         self,

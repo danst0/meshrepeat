@@ -1,7 +1,5 @@
-"""Tests für GRP_TXT-Channel-Encoding (CompanionNode.make_channel_message).
-
-Decoding/Empfang ist in Phase 5 noch nicht implementiert, daher
-verifizieren wir hier wire-Format und Roundtrip-Decrypt manuell.
+"""Tests für GRP_TXT-Channel-Encoding (CompanionNode.make_channel_message)
+und -Decoding (try_decrypt_grp_txt).
 """
 
 from __future__ import annotations
@@ -12,10 +10,11 @@ from meshcore_companion.crypto import (
     PATH_HASH_SIZE,
     LocalIdentity,
     derive_channel_secret,
+    encrypt_then_mac,
     mac_then_decrypt,
 )
-from meshcore_companion.node import CompanionNode
-from meshcore_companion.packet import PayloadType, RouteType
+from meshcore_companion.node import CompanionNode, try_decrypt_grp_txt
+from meshcore_companion.packet import Packet, PayloadType, RouteType
 
 
 def _channel_hash(secret: bytes) -> bytes:
@@ -101,3 +100,98 @@ def test_channel_message_empty_sender_name() -> None:
     assert plain is not None
     body = plain[5:].rstrip(b"\x00").decode("utf-8")
     assert body == ": anon"
+
+
+# ---------- try_decrypt_grp_txt ----------
+
+
+def test_decrypt_grp_txt_roundtrip() -> None:
+    secret = derive_channel_secret("alpha", "secret")
+    chash = _channel_hash(secret)
+    alice = CompanionNode(LocalIdentity.generate())
+    pkt = alice.make_channel_message(
+        channel_secret=secret,
+        channel_hash=chash,
+        text="hi channel",
+        sender_name="alice",
+        timestamp=12345,
+    )
+    decoded = try_decrypt_grp_txt(packet=pkt, channels=[(chash, secret)])
+    assert decoded is not None
+    assert decoded.timestamp == 12345
+    assert decoded.sender_name == "alice"
+    assert decoded.text == "hi channel"
+    assert decoded.channel_secret == secret
+
+
+def test_decrypt_grp_txt_picks_matching_channel() -> None:
+    s1 = derive_channel_secret("a", "p1")
+    s2 = derive_channel_secret("b", "p2")
+    h1, h2 = _channel_hash(s1), _channel_hash(s2)
+    alice = CompanionNode(LocalIdentity.generate())
+    pkt = alice.make_channel_message(
+        channel_secret=s2, channel_hash=h2, text="x", sender_name="a", timestamp=1
+    )
+    decoded = try_decrypt_grp_txt(packet=pkt, channels=[(h1, s1), (h2, s2)])
+    assert decoded is not None
+    assert decoded.channel_secret == s2
+
+
+def test_decrypt_grp_txt_no_hash_match_returns_none() -> None:
+    s1 = derive_channel_secret("a", "p1")
+    s2 = derive_channel_secret("b", "p2")
+    h1, h2 = _channel_hash(s1), _channel_hash(s2)
+    if h1 == h2:  # 1-byte hashes können kollidieren — Test ist dann moot
+        return
+    alice = CompanionNode(LocalIdentity.generate())
+    pkt = alice.make_channel_message(
+        channel_secret=s2, channel_hash=h2, text="x", sender_name="a", timestamp=1
+    )
+    assert try_decrypt_grp_txt(packet=pkt, channels=[(h1, s1)]) is None
+
+
+def test_decrypt_grp_txt_wrong_secret_returns_none() -> None:
+    """Ein Channel mit gleichem 1-Byte-Hash aber falschem Secret schlägt am
+    MAC fehl. Wir simulieren den Hash-Match, indem wir denselben Hash
+    angeben aber falsches Secret verwenden."""
+    s1 = derive_channel_secret("a", "p1")
+    s_bad = derive_channel_secret("a", "different")
+    chash = _channel_hash(s1)
+    alice = CompanionNode(LocalIdentity.generate())
+    pkt = alice.make_channel_message(
+        channel_secret=s1, channel_hash=chash, text="x", sender_name="a", timestamp=1
+    )
+    assert try_decrypt_grp_txt(packet=pkt, channels=[(chash, s_bad)]) is None
+
+
+def test_decrypt_grp_txt_too_short_body() -> None:
+    pkt = Packet(
+        route_type=RouteType.FLOOD,
+        payload_type=PayloadType.GRP_TXT,
+        payload=b"\x00",  # nur Hash, kein MAC + Body
+    )
+    assert try_decrypt_grp_txt(packet=pkt, channels=[(b"\x00", b"\x00" * 32)]) is None
+
+
+def test_decrypt_grp_txt_rejects_high_txt_type_bits() -> None:
+    secret = derive_channel_secret("c", "p")
+    chash = _channel_hash(secret)
+    # synthetisch: txt_type-Byte mit gesetztem high bit → muss verworfen werden
+    plain = (1234).to_bytes(4, "little") + bytes([0x80]) + b"alice: hi"
+    encrypted = encrypt_then_mac(secret, plain)
+    pkt = Packet(
+        route_type=RouteType.FLOOD,
+        payload_type=PayloadType.GRP_TXT,
+        payload=chash + encrypted,
+    )
+    assert try_decrypt_grp_txt(packet=pkt, channels=[(chash, secret)]) is None
+
+
+def test_decrypt_grp_txt_wrong_payload_type() -> None:
+    # ein TXT_MSG-Paket darf den Channel-Decoder nicht triggern
+    pkt = Packet(
+        route_type=RouteType.FLOOD,
+        payload_type=PayloadType.TXT_MSG,
+        payload=b"\x00" * 32,
+    )
+    assert try_decrypt_grp_txt(packet=pkt, channels=[(b"\x00", b"\x00" * 32)]) is None
