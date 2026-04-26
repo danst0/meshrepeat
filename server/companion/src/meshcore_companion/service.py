@@ -568,12 +568,17 @@ class CompanionService:
                         ts=decoded.timestamp,
                     )
 
-            # ACK + PATH-Return: der Sender lernt damit die Out-Path zu uns
-            # und markiert die DM in seiner UI als 'delivered'. Pflicht bei
-            # FLOOD-RX laut firmware BaseChatMesh.cpp:224.
-            if pkt.route_type == RouteType.FLOOD and self.inject is not None:
-                # firmware-Konvention: ACK-Hash = sha256(plaintext || sender_pubkey).
-                # ``sender`` ist HIER der Absender der DM (Octavia), nicht wir.
+            # ACK senden — bei FLOOD-RX zusätzlich PATH-Return (lernt
+            # Out-Path) gemäß firmware BaseChatMesh.cpp:217-231:
+            #   FLOOD  → createPathReturn(... ACK + ack_hash) per FLOOD
+            #   DIRECT → sendAckTo() — separater ACK-Frame (FLOOD-Fallback,
+            #            wenn out_path unbekannt; bei uns immer der Fall,
+            #            weil wir Senders out_path nicht tracken).
+            # Wir senden in beiden Fällen den separaten ACK-Frame —
+            # firmware tut das bei DIRECT-RX explizit und manche Mobile-
+            # Apps werten den im PATH eingebetteten ACK nicht zuverlässig
+            # aus, der unverschlüsselte ACK-Frame greift dafür sicher.
+            if self.inject is not None:
                 ack_hash = compute_dm_ack_hash(
                     timestamp=decoded.timestamp,
                     flags=decoded.flags,
@@ -581,20 +586,15 @@ class CompanionService:
                     sender_pubkey=decoded.sender_pubkey,
                 )
                 try:
-                    path_pkt = loaded.node.make_path_return(
-                        peer_pubkey=decoded.sender_pubkey,
-                        rx_path_len_byte=pkt.path_len_byte,
-                        rx_path_bytes=pkt.path,
-                        extra_type=int(PayloadType.ACK),
-                        extra_data=ack_hash,
-                    )
-                    await self.inject(path_pkt, scope)
-                    # Zusätzlicher unverschlüsselter ACK-Frame
-                    # (PAYLOAD_TYPE_ACK = 0x03, payload = 4-Byte-Hash). Die
-                    # firmware sendet bei FLOOD-RX zwar nur PATH+embedded
-                    # ACK, aber manche Mobile-Apps werten den embedded-ACK
-                    # nicht zuverlässig aus — der separate ACK-Frame wird
-                    # im firmware-onAckRecv-Pfad direkt verarbeitet.
+                    if pkt.route_type == RouteType.FLOOD:
+                        path_pkt = loaded.node.make_path_return(
+                            peer_pubkey=decoded.sender_pubkey,
+                            rx_path_len_byte=pkt.path_len_byte,
+                            rx_path_bytes=pkt.path,
+                            extra_type=int(PayloadType.ACK),
+                            extra_data=ack_hash,
+                        )
+                        await self.inject(path_pkt, scope)
                     ack_pkt = loaded.node.make_ack(ack_hash)
                     await self.inject(ack_pkt, scope)
                     _log.info(
@@ -604,6 +604,7 @@ class CompanionService:
                         flags=decoded.flags,
                         text_len=len(text_bytes),
                         ack=ack_hash.hex(),
+                        route=pkt.route_type.name,
                         rx_hops=pkt.hop_count,
                     )
                 except Exception:

@@ -578,6 +578,55 @@ async def test_inbound_dm_emits_path_ack_on_flood(service_env) -> None:
 
 
 @pytest.mark.asyncio
+async def test_inbound_dm_direct_emits_ack_only_no_path(service_env) -> None:
+    """Bei DIRECT-RX (Sender hat Out-Path bereits gelernt) reicht ein
+    separater ACK-Frame — KEIN PATH-Return, sonst lernt der Sender
+    eine alte Path-Variante zurück."""
+    import struct
+
+    svc, sessionmaker, user_id, sent = service_env
+    loaded = await svc.add_identity(
+        user_id=user_id, name="Antonia", scope="public"
+    )
+    peer = LocalIdentity.generate()
+    async with sessionmaker() as db:
+        db.add(
+            CompanionContact(
+                identity_id=loaded.id,
+                peer_pubkey=peer.pub_key,
+                peer_name="Octavia",
+                last_seen_at=datetime.now(UTC),
+            )
+        )
+        await db.commit()
+
+    sender_ts = 1700000500
+    plaintext = struct.pack("<I", sender_ts) + bytes([0]) + b"direct"
+    secret = peer.calc_shared_secret(loaded.pubkey)
+    encrypted = encrypt_then_mac(secret, plaintext)
+    body = loaded.pubkey[:1] + peer.pub_key[:1] + encrypted
+    pkt = Packet(
+        route_type=RouteType.DIRECT,
+        payload_type=PayloadType.TXT_MSG,
+        path=b"\xaa",
+        payload=body,
+    )
+    sent.clear()
+    await svc.on_inbound_packet(raw=pkt.encode(), scope="public")
+
+    path_frames = [
+        (raw, sc) for raw, sc in sent
+        if Packet.decode(raw).payload_type == PayloadType.PATH
+    ]
+    ack_frames = [
+        (raw, sc) for raw, sc in sent
+        if Packet.decode(raw).payload_type == PayloadType.ACK
+    ]
+    assert len(path_frames) == 0  # KEIN PATH bei DIRECT-RX
+    assert len(ack_frames) == 1   # nur ACK
+
+
+@pytest.mark.asyncio
 async def test_telemetry_request_emits_req_packet(service_env) -> None:
     """request_telemetry baut ein REQ und schickt es via inject."""
     svc, _sessionmaker, user_id, sent = service_env
