@@ -15,7 +15,7 @@
             <td>{{ r.name }}</td>
             <td><code>{{ r.site_id }}</code></td>
             <td class="scope-{{ 'public' if r.scope == 'public' else 'pool' }}">{{ r.scope }}</td>
-            <td>{% if r.last_seen_at %}zuletzt: {{ r.last_seen_at.strftime('%Y-%m-%d %H:%M') }}{% else %}—{% endif %}</td>
+            <td>{% if r.last_seen_at %}zuletzt: {{ r.last_seen_at | localtime }}{% else %}—{% endif %}</td>
             <td><a href="/repeaters/{{ r.id }}">Details</a></td>
           </tr>
         {% endfor %}

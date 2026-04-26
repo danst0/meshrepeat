@@ -73,7 +73,7 @@
             <td>{{ identity_names.get(c.identity_id, c.identity_id[:8]) }}</td>
             <td>{{ c.peer_name or '–' }}</td>
             <td><code>{{ c.peer_pubkey_hex[:16] }}…</code></td>
-            <td>{{ c.last_seen_at or '–' }}</td>
+            <td>{{ c.last_seen_at | localtime }}</td>
           </tr>
         {% endfor %}
         </tbody>

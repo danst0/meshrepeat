@@ -10,7 +10,9 @@ import asyncio
 import signal
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from importlib.resources import files
+from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI
 from fastapi.templating import Jinja2Templates
@@ -36,6 +38,25 @@ from meshcore_bridge.web import (
 from meshcore_bridge.wire import Packet as WirePacket
 from meshcore_companion.packet import Packet as MCPacket
 from meshcore_companion.service import CompanionService
+
+# Server-rendered Templates zeigen Timestamps in dieser Zeitzone an.
+# UTC-Werte aus der DB werden mit Berlin-Lokalzeit ausgegeben — dezent
+# pragmatisch für single-user Self-Host. SSE/Live-JS rendert eh per
+# Browser-Locale (siehe admin_traffic.html.j2:fmtTime).
+_DISPLAY_TZ = ZoneInfo("Europe/Berlin")
+
+
+def _localtime_filter(dt: datetime | str | None, fmt: str = "%Y-%m-%d %H:%M") -> str:
+    if dt is None or dt == "":
+        return "—"
+    if isinstance(dt, str):
+        try:
+            dt = datetime.fromisoformat(dt)
+        except ValueError:
+            return dt
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    return dt.astimezone(_DISPLAY_TZ).strftime(fmt)
 
 
 def build_app(cfg: AppConfig) -> FastAPI:
@@ -75,7 +96,9 @@ def build_app(cfg: AppConfig) -> FastAPI:
             log.warning("sighup_handler_not_installed")
 
         templates_dir = files("meshcore_bridge.web") / "templates"
-        app.state.templates = Jinja2Templates(directory=str(templates_dir))
+        templates = Jinja2Templates(directory=str(templates_dir))
+        templates.env.filters["localtime"] = _localtime_filter
+        app.state.templates = templates
 
         # CompanionService aufsetzen (sofern db_key vorhanden ist)
         companion_service: CompanionService | None = None

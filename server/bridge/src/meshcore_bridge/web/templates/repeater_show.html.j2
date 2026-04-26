@@ -7,9 +7,9 @@
       <tr><th>ID</th><td><code>{{ repeater.id }}</code></td></tr>
       <tr><th>Site-ID</th><td><code>{{ repeater.site_id }}</code></td></tr>
       <tr><th>Scope</th><td class="scope-{{ 'public' if repeater.scope == 'public' else 'pool' }}">{{ repeater.scope }}</td></tr>
-      <tr><th>Angelegt</th><td>{{ repeater.created_at.strftime('%Y-%m-%d %H:%M') }}</td></tr>
-      <tr><th>Letzte Verbindung</th><td>{% if repeater.last_seen_at %}{{ repeater.last_seen_at.strftime('%Y-%m-%d %H:%M') }}{% else %}noch nie{% endif %}</td></tr>
-      <tr><th>Widerrufen</th><td>{% if repeater.revoked_at %}{{ repeater.revoked_at.strftime('%Y-%m-%d %H:%M') }}{% else %}—{% endif %}</td></tr>
+      <tr><th>Angelegt</th><td>{{ repeater.created_at | localtime }}</td></tr>
+      <tr><th>Letzte Verbindung</th><td>{% if repeater.last_seen_at %}{{ repeater.last_seen_at | localtime }}{% else %}noch nie{% endif %}</td></tr>
+      <tr><th>Widerrufen</th><td>{% if repeater.revoked_at %}{{ repeater.revoked_at | localtime }}{% else %}—{% endif %}</td></tr>
     </table>
   </div>
 
