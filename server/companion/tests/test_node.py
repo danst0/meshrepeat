@@ -252,6 +252,25 @@ def test_dm_ack_hash_matches_firmware_formula() -> None:
     assert actual == expected
 
 
+def test_make_ack_wire_format() -> None:
+    """ACK-Frame: payload_type=ACK, payload = 4-Byte-Hash unverschlüsselt
+    (firmware Mesh::createAck Mesh.cpp:546)."""
+    alice = CompanionNode(LocalIdentity.generate())
+    ack_hash = b"\xde\xad\xbe\xef"
+    pkt = alice.make_ack(ack_hash)
+    assert pkt.payload_type == PayloadType.ACK
+    assert pkt.route_type == RouteType.FLOOD
+    assert pkt.payload == ack_hash
+
+
+def test_make_ack_rejects_wrong_length() -> None:
+    import pytest
+
+    alice = CompanionNode(LocalIdentity.generate())
+    with pytest.raises(ValueError):
+        alice.make_ack(b"\x00\x01\x02")  # nur 3 Byte
+
+
 def test_path_return_wire_format() -> None:
     """PATH-Datagram: payload = dest_hash + src_hash + encrypt_then_mac(
     path_len_byte + path_bytes + extra_type + extra_data)."""

@@ -589,10 +589,20 @@ class CompanionService:
                         extra_data=ack_hash,
                     )
                     await self.inject(path_pkt, scope)
+                    # Zusätzlicher unverschlüsselter ACK-Frame
+                    # (PAYLOAD_TYPE_ACK = 0x03, payload = 4-Byte-Hash). Die
+                    # firmware sendet bei FLOOD-RX zwar nur PATH+embedded
+                    # ACK, aber manche Mobile-Apps werten den embedded-ACK
+                    # nicht zuverlässig aus — der separate ACK-Frame wird
+                    # im firmware-onAckRecv-Pfad direkt verarbeitet.
+                    ack_pkt = loaded.node.make_ack(ack_hash)
+                    await self.inject(ack_pkt, scope)
                     _log.info(
                         "dm_ack_sent",
                         peer=decoded.sender_pubkey[:4].hex(),
                         ts=decoded.timestamp,
+                        flags=decoded.flags,
+                        text_len=len(text_bytes),
                         ack=ack_hash.hex(),
                         rx_hops=pkt.hop_count,
                     )

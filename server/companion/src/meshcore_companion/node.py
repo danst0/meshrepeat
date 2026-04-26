@@ -30,6 +30,7 @@ import os
 import struct
 import time
 from dataclasses import dataclass
+from typing import ClassVar
 
 from meshcore_companion.crypto import (
     CIPHER_MAC_SIZE,
@@ -370,6 +371,26 @@ class CompanionNode:
             route_type=RouteType.FLOOD if flood else RouteType.DIRECT,
             payload_type=PayloadType.GRP_TXT,
             payload=payload,
+        )
+
+    # ---------- ACK (PAYLOAD_TYPE_ACK = 0x03) ----------
+
+    _ACK_HASH_LEN: ClassVar[int] = 4
+
+    def make_ack(self, ack_hash: bytes, *, flood: bool = True) -> Packet:
+        """Reiner ACK-Frame (firmware ``Mesh::createAck`` Mesh.cpp:546).
+
+        Payload ist 4 Byte unverschlüsselter ack_hash. Wir schicken den
+        zusätzlich zum PATH-Return, weil manche MeshCore-Implementierungen
+        den im PATH eingebetteten ACK nicht zuverlässig auswerten — der
+        separate ACK-Frame wird in firmware ``onAckRecv``-Pfad direkt
+        verarbeitet."""
+        if len(ack_hash) != self._ACK_HASH_LEN:
+            raise ValueError(f"ack_hash must be {self._ACK_HASH_LEN} bytes")
+        return Packet(
+            route_type=RouteType.FLOOD if flood else RouteType.DIRECT,
+            payload_type=PayloadType.ACK,
+            payload=ack_hash,
         )
 
     # ---------- PATH-Return (Out-Path-Lernen + ACK piggyback) ----------

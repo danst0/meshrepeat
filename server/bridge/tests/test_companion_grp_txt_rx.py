@@ -556,16 +556,25 @@ async def test_inbound_dm_emits_path_ack_on_flood(service_env) -> None:
     sent.clear()
     await svc.on_inbound_packet(raw=pkt.encode(), scope="public")
 
-    # Erster gesendeter Frame nach RX = unser PATH-Return
+    # Erwartung: PATH-Return (ACK piggybacked) + zusätzlich separater ACK-Frame
     path_frames = [
         (raw, sc) for raw, sc in sent
         if Packet.decode(raw).payload_type == PayloadType.PATH
     ]
+    ack_frames = [
+        (raw, sc) for raw, sc in sent
+        if Packet.decode(raw).payload_type == PayloadType.ACK
+    ]
     assert len(path_frames) == 1
+    assert len(ack_frames) == 1
     path_raw, _ = path_frames[0]
     path_pkt = Packet.decode(path_raw)
     assert path_pkt.payload[:1] == peer.pub_key[:1]
     assert path_pkt.payload[1:2] == loaded.pubkey[:1]
+    # ACK-Payload = 4-Byte-Hash unverschlüsselt
+    ack_raw, _ = ack_frames[0]
+    ack_pkt = Packet.decode(ack_raw)
+    assert len(ack_pkt.payload) == 4
 
 
 @pytest.mark.asyncio
