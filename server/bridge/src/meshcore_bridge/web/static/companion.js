@@ -186,11 +186,15 @@
       const k = t.pubkey_hex.toLowerCase();
       if (haveByPk.has(k)) continue;
       if (!normalizeForSearch(t.name).includes(qN)) continue;
+      // contact_id + favorite kommen aus dem Backend (companion_detail) —
+      // wenn der Kontakt schon in der DB ist, behalten wir id und
+      // favorite-Flag, damit der Stern korrekt rendert und beim Klick der
+      // normale toggle-Endpoint verwendet wird statt Upsert.
       out.push({
-        id: null,
+        id: t.contact_id || null,
         peer_pubkey_hex: t.pubkey_hex,
         peer_name: t.name,
-        favorite: false,
+        favorite: !!t.favorite,
         last_ts: null,
         last_text: null,
         last_direction: null,

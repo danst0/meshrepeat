@@ -1131,8 +1131,17 @@ async def companion_detail(
         if key in seen:
             continue
         seen.add(key)
+        # contact_id + favorite mitgeben — sonst fällt das Frontend bei
+        # alten Kontakten (nicht in den Top-100 von /threads) auf einen
+        # AT_TARGETS-Pseudo-Eintrag mit favorite=false zurück, der den
+        # echten DB-Stand maskiert.
         at_targets.append(
-            {"name": c.peer_name, "pubkey_hex": c.peer_pubkey.hex()}
+            {
+                "name": c.peer_name,
+                "pubkey_hex": c.peer_pubkey.hex(),
+                "contact_id": str(c.id),
+                "favorite": bool(c.favorite),
+            }
         )
     for name in chan_sender_rows:
         if not name:
@@ -1141,7 +1150,9 @@ async def companion_detail(
         if key in seen:
             continue
         seen.add(key)
-        at_targets.append({"name": name, "pubkey_hex": None})
+        at_targets.append(
+            {"name": name, "pubkey_hex": None, "contact_id": None, "favorite": False}
+        )
     at_targets.sort(key=lambda t: t["name"].lower())
 
     return _templates(request).TemplateResponse(
