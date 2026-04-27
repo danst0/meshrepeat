@@ -38,7 +38,15 @@ COPY server/companion /app/server/companion
 COPY ops/config-examples/app.yaml /config/app.yaml
 # tools/ (CLI-Helfer wie meshcore-spiegel-ctl) folgt in Phase 3
 
-ENV PYTHONPATH=/app/server/bridge/src:/app/server/companion/src \
+# Pakete installieren, damit importlib.metadata.version("meshcore-bridge")
+# funktioniert (App-Version im Footer + Cache-Bust für /static/-URLs).
+# --no-deps weil Runtime-Deps oben schon liegen.
+RUN pip install --no-deps ./server/bridge ./server/companion
+
+# Optionaler Build-SHA-Cache-Bust: CI kann ARG MESHCORE_BUILD_SHA setzen,
+# wir reichen das als ENV durch (überschreibt asset_version).
+ARG MESHCORE_BUILD_SHA=""
+ENV MESHCORE_BUILD_SHA=$MESHCORE_BUILD_SHA \
     MESHCORE_CONFIG=/config/app.yaml \
     MESHCORE_DB_PATH=/data/meshcore.sqlite
 
