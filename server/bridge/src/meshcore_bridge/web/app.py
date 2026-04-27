@@ -78,6 +78,15 @@ def _resolve_asset_version() -> str:
         return "dev"
 
 
+def _resolve_app_version() -> str:
+    """Lesbare App-Version für UI (Footer). Bevorzugt Package-Version;
+    Fallback "dev" wenn nicht installiert."""
+    try:
+        return _pkg_version("meshcore-bridge")
+    except PackageNotFoundError:
+        return "dev"
+
+
 def build_app(cfg: AppConfig) -> FastAPI:
     log = get_logger("app")
 
@@ -120,9 +129,12 @@ def build_app(cfg: AppConfig) -> FastAPI:
         templates = Jinja2Templates(directory=str(templates_dir))
         templates.env.filters["localtime"] = _localtime_filter
         asset_version = _resolve_asset_version()
+        app_version = _resolve_app_version()
         templates.env.globals["asset_version"] = asset_version
+        templates.env.globals["app_version"] = app_version
         app.state.templates = templates
         app.state.asset_version = asset_version
+        app.state.app_version = app_version
 
         # CompanionService aufsetzen (sofern db_key vorhanden ist)
         companion_service: CompanionService | None = None

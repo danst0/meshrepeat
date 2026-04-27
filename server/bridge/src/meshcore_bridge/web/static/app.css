@@ -51,6 +51,24 @@ header nav a, header nav span, header nav form { font-size: .9rem; }
 header nav .muted { color: var(--muted); max-width: 14rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 main { padding: 1rem; max-width: 960px; margin: 0 auto; }
+
+.site-footer {
+  border-top: 1px solid var(--border);
+  padding: 1rem 1.5rem;
+  margin-top: 2rem;
+  color: var(--muted);
+  font-size: .8rem;
+  text-align: center;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: .5rem;
+}
+.site-footer .version {
+  color: var(--accent);
+  font-family: ui-monospace, monospace;
+  opacity: .7;
+}
 h1, h2 { color: var(--accent); }
 label { display: block; margin-top: 1rem; font-size: 0.9rem; color: var(--muted); }
 input, select, textarea {
