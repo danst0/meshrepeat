@@ -5,7 +5,14 @@ from __future__ import annotations
 
 import struct
 
-from meshcore_companion.node import parse_repeater_stats
+from meshcore_companion.crypto import LocalIdentity
+from meshcore_companion.node import (
+    CompanionNode,
+    LoginResponse,
+    parse_login_response,
+    parse_repeater_stats,
+)
+from meshcore_companion.packet import PayloadType
 
 
 def test_parse_repeater_stats_round_trip() -> None:
@@ -50,3 +57,35 @@ def test_parse_repeater_stats_round_trip() -> None:
 
 def test_parse_repeater_stats_too_short() -> None:
     assert parse_repeater_stats(b"\x00" * 30) is None
+
+
+def test_parse_login_response_ok() -> None:
+    # reply[0]=0 (RESP_SERVER_LOGIN_OK), reply[1]=0, reply[2]=1 (admin),
+    # reply[3]=0xc1 (perms), Rest egal
+    buf = bytes([0x00, 0x00, 0x01, 0xC1, 0xDE, 0xAD])
+    login = parse_login_response(buf)
+    assert isinstance(login, LoginResponse)
+    assert login.is_admin is True
+    assert login.permissions == 0xC1
+
+
+def test_parse_login_response_not_login() -> None:
+    # buf[0] != 0 → keine Login-Antwort
+    assert parse_login_response(bytes([0xFF, 0, 0, 0])) is None
+
+
+def test_make_anon_login_req_wire_format() -> None:
+    """Wire: payload_type=ANON_REQ, body = dest_hash(1) + sender_pub(32) +
+    encrypted. Plaintext-Länge = 4 (ts) + len(pw) + 1 (\\0).
+    encrypted = plaintext + MAC (encrypt_then_mac fügt MAC an)."""
+    sender = LocalIdentity.generate()
+    peer_pubkey = LocalIdentity.generate().pub_key
+    node = CompanionNode(sender)
+    pkt, tag = node.make_anon_login_req(peer_pubkey=peer_pubkey, password="")
+    assert pkt.payload_type == PayloadType.ANON_REQ
+    # Body-Header: 1B dest_hash + 32B sender_pubkey
+    assert pkt.payload[0:1] == peer_pubkey[:1]
+    assert pkt.payload[1:33] == sender.pub_key
+    # encrypted-Teil hat mind. plaintext_len(=5 für "" + null) + MAC
+    assert len(pkt.payload) > 1 + 32 + 5
+    assert tag > 0

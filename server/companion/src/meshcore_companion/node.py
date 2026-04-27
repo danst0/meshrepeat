@@ -254,6 +254,49 @@ class CompanionNode:
 
     # ---------- REQ / RESPONSE (Admin-Telemetrie etc.) ----------
 
+    def make_anon_login_req(
+        self,
+        *,
+        peer_pubkey: bytes,
+        password: str = "",
+        tag: int | None = None,
+        timestamp: int | None = None,
+        flood: bool = True,
+    ) -> tuple[Packet, int]:
+        """ANON_REQ-Paket für Repeater-Login. Anders als REQ trägt
+        ANON_REQ den Sender-Pubkey *klartext* im Body — der Empfänger
+        kennt uns ja noch nicht und braucht das Pubkey, um den
+        Shared-Secret zu rechnen.
+
+        Wire (firmware ``Mesh::createAnonDatagram``): payload_type=ANON_REQ,
+        body = ``[dest_hash:1] [sender_pubkey:32]
+        [encrypt_then_mac(plaintext)]``,
+        plaintext = ``ts(4 LE) || password_bytes || \\x00``.
+
+        Bei leerem Passwort matched der Repeater (firmware ``handleLoginReq``)
+        gegen ``_prefs.guest_password`` — bei vielen Repeatern leer →
+        Guest-ACL-Eintrag. Returns ``(packet, tag)`` für RTT-Tracking.
+        """
+        ts = timestamp if timestamp is not None else int(time.time())
+        if tag is None:
+            tag = ts & 0xFFFFFFFF
+        pw_bytes = password.encode("utf-8")
+        plaintext = (
+            int.to_bytes(tag, 4, "little", signed=False)
+            + pw_bytes
+            + b"\x00"
+        )
+        secret = self.local.calc_shared_secret(peer_pubkey)
+        encrypted = encrypt_then_mac(secret, plaintext)
+        peer = Identity(peer_pubkey)
+        body = peer.hash_prefix() + self.pub_key + encrypted
+        pkt = Packet(
+            route_type=RouteType.FLOOD if flood else RouteType.DIRECT,
+            payload_type=PayloadType.ANON_REQ,
+            payload=body,
+        )
+        return pkt, tag
+
     def make_status_req(
         self,
         *,
@@ -582,6 +625,38 @@ class RepeaterStats:
 
 
 _STATS_STRUCT_LEN = 56
+
+# Firmware-Konstante (firmware/src/MyMesh.cpp:53)
+RESP_SERVER_LOGIN_OK = 0x00
+
+
+@dataclass
+class LoginResponse:
+    """Geparste Antwort auf einen ANON_REQ-Login (firmware
+    ``handleLoginReq``)."""
+
+    is_admin: bool
+    permissions: int
+
+
+def parse_login_response(buf: bytes) -> LoginResponse | None:
+    """Decoded ``RESP_SERVER_LOGIN_OK``-Antwort.
+
+    ``buf`` ist ``IncomingResponse.reply_data`` (also ohne tag-Prefix).
+    Layout firmware ``handleLoginReq``:
+      reply[0]    = RESP_SERVER_LOGIN_OK (0)
+      reply[1]    = legacy keep-alive (deprecated, immer 0)
+      reply[2]    = isAdmin (0/1)
+      reply[3]    = client.permissions
+    """
+    if len(buf) < _LOGIN_REPLY_LEN:
+        return None
+    if buf[0] != RESP_SERVER_LOGIN_OK:
+        return None
+    return LoginResponse(is_admin=bool(buf[2]), permissions=buf[3])
+
+
+_LOGIN_REPLY_LEN = 4
 
 
 def parse_repeater_stats(buf: bytes) -> RepeaterStats | None:

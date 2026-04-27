@@ -226,6 +226,32 @@ async def test_sse_stream_subscribes_and_publishes(app_and_outbox) -> None:
 
 
 @pytest.mark.asyncio
+async def test_login_request_endpoint(app_and_outbox) -> None:
+    """POST /contacts/{hex}/login: Endpoint funktioniert + Validierung +
+    Pending-Tracker bekommt einen REQ_TYPE_LOGIN-Eintrag."""
+    from meshcore_companion.crypto import LocalIdentity
+
+    app, sender = app_and_outbox
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://t") as client:
+        ident_id = await _login_and_create_identity(client, sender, email="login@example.com")
+        peer_hex = LocalIdentity.generate().pub_key.hex()
+
+        r = await client.post(
+            f"/api/v1/companion/identities/{ident_id}/contacts/{peer_hex}/login",
+            data={"password": ""},
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["ok"] is True
+
+        svc = app.state.companion_service
+        login_pendings = [
+            v for v in svc._pending_reqs.values() if v[1] == svc.REQ_TYPE_LOGIN
+        ]
+        assert len(login_pendings) == 1
+
+
+@pytest.mark.asyncio
 async def test_status_request_endpoint(app_and_outbox) -> None:
     """POST /contacts/{hex}/status: Endpoint funktioniert + Validierung.
     Wir nutzen einen *echten* Ed25519-Pubkey, weil

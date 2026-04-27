@@ -595,6 +595,31 @@ async def request_contact_telemetry(
     return {"ok": True, "ts": datetime.now(UTC).isoformat()}
 
 
+@router.post("/identities/{identity_id}/contacts/{peer_pubkey_hex}/login", response_model=None)
+async def request_contact_login(
+    request: Request,
+    identity_id: UUID,
+    peer_pubkey_hex: str,
+    user: User = Depends(current_user_required),
+    db: AsyncSession = Depends(get_db),
+    password: Annotated[str, Form()] = "",
+) -> dict[str, Any]:
+    """ANON_REQ-Login bei einem Repeater. Voraussetzung dafür, dass dieser
+    auf nachfolgende REQ_TYPE_GET_STATUS / GET_TELEMETRY_DATA antwortet —
+    Repeater verwerfen REQs von unbekannten Sendern (ACL-Check).
+    Leeres Passwort = Guest-Login (bei den meisten Repeatern OK)."""
+    peer = await _validate_peer_for_request(db, user.id, identity_id, peer_pubkey_hex)
+    svc = _service(request)
+    if svc is None:
+        raise HTTPException(status_code=503, detail="companion-service not running")
+    ok = await svc.request_login(
+        identity_id=identity_id, peer_pubkey=peer, password=password
+    )
+    if not ok:
+        raise HTTPException(status_code=409, detail="identity not loaded in service")
+    return {"ok": True, "ts": datetime.now(UTC).isoformat()}
+
+
 @router.post("/identities/{identity_id}/contacts/{peer_pubkey_hex}/status", response_model=None)
 async def request_contact_status(
     request: Request,

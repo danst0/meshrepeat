@@ -717,22 +717,36 @@
   const convBack = document.querySelector(".conv-back");
   if (convBack) convBack.addEventListener("click", () => setMobileView("threads"));
 
-  // ---------- DM-Action-Buttons (Status/Telemetrie anfragen) ----------
+  // ---------- DM-Action-Buttons (Login/Status/Telemetrie anfragen) ----------
+  const ACTION_LABELS = {
+    login: "🔑 Login",
+    status: "ℹ Status",
+    telemetry: "📡 Telemetrie",
+  };
   async function requestDmAction(kind) {
     if (!active || active.kind !== "dm") return;
-    const btn = document.getElementById(kind === "status" ? "btn-status" : "btn-telemetry");
+    const btnId = {login: "btn-login", status: "btn-status", telemetry: "btn-telemetry"}[kind];
+    const btn = btnId ? document.getElementById(btnId) : null;
     if (btn) btn.disabled = true;
     try {
       const url = `${API}/identities/${IDENTITY_ID}/contacts/${active.peer}/${kind}`;
-      const r = await fetch(url, {method: "POST", credentials: "same-origin"});
+      // Login akzeptiert optional Password (form). Aktuell senden wir leer
+      // = Guest-Login. Spätere UI-Erweiterung: Password-Prompt.
+      const init = {method: "POST", credentials: "same-origin"};
+      if (kind === "login") {
+        const fd = new FormData();
+        fd.append("password", "");
+        init.body = fd;
+      }
+      const r = await fetch(url, init);
+      const label = ACTION_LABELS[kind] || kind;
       if (!r.ok) {
         appendIncomingMessage({
           direction: "system",
           ts: new Date().toISOString(),
-          text: `⚠ ${kind} fehlgeschlagen (${r.status})`,
+          text: `⚠ ${label} fehlgeschlagen (${r.status})`,
         });
       } else {
-        const label = kind === "status" ? "ℹ Status" : "📡 Telemetrie";
         appendIncomingMessage({
           direction: "system",
           ts: new Date().toISOString(),
@@ -749,6 +763,8 @@
       if (btn) setTimeout(() => { btn.disabled = false; }, 5000);
     }
   }
+  const btnLogin = document.getElementById("btn-login");
+  if (btnLogin) btnLogin.addEventListener("click", () => requestDmAction("login"));
   const btnStatus = document.getElementById("btn-status");
   if (btnStatus) btnStatus.addEventListener("click", () => requestDmAction("status"));
   const btnTele = document.getElementById("btn-telemetry");
@@ -966,7 +982,7 @@
         maybeNotify(evt);
       }
       loadThreads();
-    } else if (t === "status_response" || t === "telemetry_response") {
+    } else if (t === "status_response" || t === "telemetry_response" || t === "login_response") {
       // System-Antwort auf einen Status/Telemetrie-Request — nur in der
       // betroffenen DM-Konvo inline rendern, keinen Unread-Counter
       // hochzählen (war ein User-getriggerter Request).

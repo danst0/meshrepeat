@@ -45,6 +45,7 @@ from meshcore_companion.node import (
     compute_dm_ack_hash,
     encode_advert_app_data,
     parse_advert_app_data,
+    parse_login_response,
     parse_lpp_gps,
     parse_repeater_stats,
     try_decrypt_grp_txt,
@@ -258,8 +259,12 @@ class CompanionService:
         return True
 
     _PENDING_REQ_TTL_S = 120.0
+    # Echte MeshCore-REQ-Typen
     REQ_TYPE_STATUS = 0x01
     REQ_TYPE_TELEMETRY = 0x03
+    # Pseudo-Marker für eigenen Tag-Tracker (kein Wire-Code) — ANON_REQ
+    # ist ein eigener PayloadType, kein REQ-Subtyp.
+    REQ_TYPE_LOGIN = 0xF1
 
     def _track_pending_req(
         self,
@@ -307,6 +312,39 @@ class CompanionService:
             identity=loaded.name,
             peer=peer_pubkey[:4].hex(),
             tag=tag,
+        )
+        if self.inject is not None:
+            await self.inject(pkt, loaded.scope)
+        return True
+
+    async def request_login(
+        self,
+        *,
+        identity_id: UUID,
+        peer_pubkey: bytes,
+        password: str = "",
+    ) -> bool:
+        """ANON_REQ-Login bei einem Repeater. Bei leerem Passwort versucht
+        der Repeater einen Guest-Match (oft erlaubt). Antwort kommt als
+        RESPONSE mit ``RESP_SERVER_LOGIN_OK``."""
+        loaded = self._by_id.get(identity_id)
+        if loaded is None:
+            return False
+        pkt, tag = loaded.node.make_anon_login_req(
+            peer_pubkey=peer_pubkey, password=password
+        )
+        self._track_pending_req(
+            tag=tag,
+            req_type=self.REQ_TYPE_LOGIN,
+            identity_id=identity_id,
+            peer_pubkey=peer_pubkey,
+        )
+        _log.info(
+            "login_req",
+            identity=loaded.name,
+            peer=peer_pubkey[:4].hex(),
+            tag=tag,
+            with_password=bool(password),
         )
         if self.inject is not None:
             await self.inject(pkt, loaded.scope)
@@ -856,7 +894,30 @@ class CompanionService:
                 event_type: str = "system"
                 event_extra: dict[str, object] = {}
 
-                if req_type == self.REQ_TYPE_STATUS:
+                if req_type == self.REQ_TYPE_LOGIN:
+                    login = parse_login_response(decoded.reply_data)
+                    if login is None:
+                        _log.info(
+                            "login_response_unparsable",
+                            peer=decoded.sender_pubkey[:4].hex(),
+                            tag=decoded.tag,
+                            reply_len=len(decoded.reply_data),
+                        )
+                        return
+                    rtt_part = f"{rtt_ms} ms" if rtt_ms is not None else "?"
+                    role = "admin" if login.is_admin else "guest"
+                    text = (
+                        f"🔑 Login OK · RTT {rtt_part} · "
+                        f"Rolle {role} · Permissions 0x{login.permissions:02x}"
+                    )
+                    event_type = "login_response"
+                    event_extra = {
+                        "rtt_ms": rtt_ms,
+                        "is_admin": login.is_admin,
+                        "permissions": login.permissions,
+                    }
+
+                elif req_type == self.REQ_TYPE_STATUS:
                     stats = parse_repeater_stats(decoded.reply_data)
                     if stats is None:
                         _log.info(
