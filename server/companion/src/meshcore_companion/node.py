@@ -254,6 +254,27 @@ class CompanionNode:
 
     # ---------- REQ / RESPONSE (Admin-Telemetrie etc.) ----------
 
+    def make_status_req(
+        self,
+        *,
+        peer_pubkey: bytes,
+        tag: int | None = None,
+        timestamp: int | None = None,
+        flood: bool = True,
+    ) -> tuple[Packet, int]:
+        """REQ-Paket für ``REQ_TYPE_GET_STATUS`` (0x01). Wrapper über
+        ``make_telemetry_req`` mit anderem ``req_type``. Antwort liefert
+        eine ``RepeaterStats``-Struktur (56 Byte LE) — siehe
+        ``parse_repeater_stats``.
+        """
+        return self.make_telemetry_req(
+            peer_pubkey=peer_pubkey,
+            tag=tag,
+            req_type=0x01,
+            timestamp=timestamp,
+            flood=flood,
+        )
+
     def make_telemetry_req(
         self,
         *,
@@ -523,6 +544,74 @@ _LPP_DATA_SIZE: dict[int, int] = {
     142: 1,  # SWITCH
 }
 _LPP_GPS_TYPE = 136
+
+
+@dataclass
+class RepeaterStats:
+    """Geparste Antwort auf ``REQ_TYPE_GET_STATUS`` (Firmware
+    ``RepeaterStats``-Struct, 56 Byte LE, native alignment ohne Padding).
+    Quelle: ``firmware/src/MyMesh.h``.
+    """
+
+    batt_milli_volts: int
+    curr_tx_queue_len: int
+    noise_floor: int
+    last_rssi: int
+    n_packets_recv: int
+    n_packets_sent: int
+    total_air_time_secs: int
+    total_up_time_secs: int
+    n_sent_flood: int
+    n_sent_direct: int
+    n_recv_flood: int
+    n_recv_direct: int
+    err_events: int
+    last_snr_q: int  # SNR x 4 — siehe ``snr_db`` für Float
+    n_direct_dups: int
+    n_flood_dups: int
+    total_rx_air_time_secs: int
+    n_recv_errors: int
+
+    @property
+    def snr_db(self) -> float:
+        return self.last_snr_q / 4.0
+
+    @property
+    def battery_volts(self) -> float:
+        return self.batt_milli_volts / 1000.0
+
+
+_STATS_STRUCT_LEN = 56
+
+
+def parse_repeater_stats(buf: bytes) -> RepeaterStats | None:
+    """Decoded ``RepeaterStats`` aus ``reply_data`` einer GET_STATUS-Antwort.
+    ``reply_data`` ist bereits ohne tag-Prefix (siehe ``IncomingResponse``)."""
+    if len(buf) < _STATS_STRUCT_LEN:
+        return None
+    u16 = lambda o: int.from_bytes(buf[o : o + 2], "little", signed=False)  # noqa: E731
+    i16 = lambda o: int.from_bytes(buf[o : o + 2], "little", signed=True)  # noqa: E731
+    u32 = lambda o: int.from_bytes(buf[o : o + 4], "little", signed=False)  # noqa: E731
+    return RepeaterStats(
+        batt_milli_volts=u16(0),
+        curr_tx_queue_len=u16(2),
+        noise_floor=i16(4),
+        last_rssi=i16(6),
+        n_packets_recv=u32(8),
+        n_packets_sent=u32(12),
+        total_air_time_secs=u32(16),
+        total_up_time_secs=u32(20),
+        n_sent_flood=u32(24),
+        n_sent_direct=u32(28),
+        n_recv_flood=u32(32),
+        n_recv_direct=u32(36),
+        err_events=u16(40),
+        last_snr_q=i16(42),
+        n_direct_dups=u16(44),
+        n_flood_dups=u16(46),
+        total_rx_air_time_secs=u32(48),
+        n_recv_errors=u32(52),
+    )
 
 
 def parse_lpp_gps(buf: bytes) -> TelemetryGPS | None:

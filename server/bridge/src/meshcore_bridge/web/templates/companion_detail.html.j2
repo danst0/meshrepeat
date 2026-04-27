@@ -48,6 +48,10 @@
         <div id="conv-header" class="thread-header">
           <button type="button" class="conv-back" aria-label="Zurück zur Liste">←</button>
           <span id="conv-title">Wähle einen Chat oder starte einen DM.</span>
+          <div id="conv-actions" class="conv-actions" hidden>
+            <button type="button" id="btn-status" class="conv-action-btn" title="Status (Ping + Repeater-Stats) anfragen">ℹ</button>
+            <button type="button" id="btn-telemetry" class="conv-action-btn" title="Telemetrie (GPS + Sensoren) anfragen">📡</button>
+          </div>
           <span id="sse-dot" class="sse-dot" title="verbinde…"></span>
         </div>
         <div id="conv-messages" class="message-list"></div>

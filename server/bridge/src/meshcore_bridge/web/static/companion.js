@@ -137,6 +137,19 @@
   function shortHex(hex, n=8) { return hex ? hex.slice(0,n)+"…" : ""; }
   function escText(s) { const d = document.createElement("div"); d.textContent = s ?? ""; return d.innerHTML; }
 
+  function liveClass(iso) {
+    // Liveness-Indikator pro Sidebar-Zeile aus last_ts. Schwellen
+    // pragmatisch nach Mesh-Verkehrsmustern (Adverts ~1 h, ACK/Status
+    // sofort). null/undef → kein Dot.
+    if (!iso) return "live-dot--gone";
+    const age = Date.now() - new Date(iso).getTime();
+    if (isNaN(age)) return "live-dot--gone";
+    if (age < 15 * 60_000) return "live-dot--fresh";
+    if (age < 60 * 60_000) return "live-dot--recent";
+    if (age < 24 * 60 * 60_000) return "live-dot--stale";
+    return "live-dot--gone";
+  }
+
   // ---------- DM-Suche (filtert die Sidebar-Liste direkt) ----------
   function normalizeForSearch(s) {
     return (s || "").toLowerCase()
@@ -292,7 +305,8 @@
       const last = t.last_text
         ? escText(t.last_text).slice(0, 40)
         : '<span style="color:var(--muted)">—</span>';
-      item.innerHTML = `<div class="thread-top"><span class="thread-name">${peer}</span><span class="thread-time">${fmtTime(t.last_ts)}</span></div>
+      const dot = `<span class="live-dot ${liveClass(t.last_ts)}" title="letzter Verkehr: ${t.last_ts || 'nie'}"></span>`;
+      item.innerHTML = `<div class="thread-top"><span class="thread-name">${dot}${peer}</span><span class="thread-time">${fmtTime(t.last_ts)}</span></div>
                         <div class="thread-snip">${last}</div>`;
       item.addEventListener("click", () => selectDm(t.peer_pubkey_hex, t.peer_name));
       wrap.appendChild(item);
@@ -361,6 +375,9 @@
       input.maxLength = 140;
       input.placeholder = `Wird mit '${IDENTITY_NAME}: ' präfixiert. @ für Auto-Complete.`;
     }
+    // Action-Buttons (Status/Telemetrie) nur bei DMs zeigen
+    const actions = document.getElementById("conv-actions");
+    if (actions) actions.hidden = kind !== "dm";
   }
 
   async function loadDmMessages(peerHex, opts={}) {
@@ -404,7 +421,9 @@
   }
 
   function renderMessageEl(m) {
-    const cls = m.direction === "out" ? "out" : "in";
+    const cls = m.direction === "system"
+      ? "system"
+      : (m.direction === "out" ? "out" : "in");
     const who = m.direction === "out"
       ? "me"
       : (m.peer_name || (m.peer_pubkey_hex ? shortHex(m.peer_pubkey_hex, 8) : "?"));
@@ -412,8 +431,12 @@
     const div = document.createElement("div");
     div.className = "message " + cls;
     div.dataset.msgId = m.id;
-    div.innerHTML = `<div class="msg-meta">${escText(who)} · ${fmtDate(m.ts)}${hopsTxt}</div>
-                     <div class="msg-text">${escText(m.text || "")}</div>`;
+    if (cls === "system") {
+      div.innerHTML = `<div class="msg-text">${escText(m.text || "")} · ${fmtTime(m.ts)}</div>`;
+    } else {
+      div.innerHTML = `<div class="msg-meta">${escText(who)} · ${fmtDate(m.ts)}${hopsTxt}</div>
+                       <div class="msg-text">${escText(m.text || "")}</div>`;
+    }
     return div;
   }
 
@@ -694,6 +717,43 @@
   const convBack = document.querySelector(".conv-back");
   if (convBack) convBack.addEventListener("click", () => setMobileView("threads"));
 
+  // ---------- DM-Action-Buttons (Status/Telemetrie anfragen) ----------
+  async function requestDmAction(kind) {
+    if (!active || active.kind !== "dm") return;
+    const btn = document.getElementById(kind === "status" ? "btn-status" : "btn-telemetry");
+    if (btn) btn.disabled = true;
+    try {
+      const url = `${API}/identities/${IDENTITY_ID}/contacts/${active.peer}/${kind}`;
+      const r = await fetch(url, {method: "POST", credentials: "same-origin"});
+      if (!r.ok) {
+        appendIncomingMessage({
+          direction: "system",
+          ts: new Date().toISOString(),
+          text: `⚠ ${kind} fehlgeschlagen (${r.status})`,
+        });
+      } else {
+        const label = kind === "status" ? "ℹ Status" : "📡 Telemetrie";
+        appendIncomingMessage({
+          direction: "system",
+          ts: new Date().toISOString(),
+          text: `${label} angefragt — warte auf Antwort…`,
+        });
+      }
+    } catch (e) {
+      appendIncomingMessage({
+        direction: "system",
+        ts: new Date().toISOString(),
+        text: `⚠ ${kind}: ${e}`,
+      });
+    } finally {
+      if (btn) setTimeout(() => { btn.disabled = false; }, 5000);
+    }
+  }
+  const btnStatus = document.getElementById("btn-status");
+  if (btnStatus) btnStatus.addEventListener("click", () => requestDmAction("status"));
+  const btnTele = document.getElementById("btn-telemetry");
+  if (btnTele) btnTele.addEventListener("click", () => requestDmAction("telemetry"));
+
   // ---------- Map ----------
   let mapInstance = null;
   let mapMarkers = null;
@@ -904,6 +964,15 @@
       } else if (t === "channel") {
         bumpUnread("ch:" + chId);
         maybeNotify(evt);
+      }
+      loadThreads();
+    } else if (t === "status_response" || t === "telemetry_response") {
+      // System-Antwort auf einen Status/Telemetrie-Request — nur in der
+      // betroffenen DM-Konvo inline rendern, keinen Unread-Counter
+      // hochzählen (war ein User-getriggerter Request).
+      const peerHex = evt.peer_pubkey_hex;
+      if (active && active.kind === "dm" && active.peer === peerHex) {
+        appendIncomingMessage(evt);
       }
       loadThreads();
     } else if (t === "contact_update") {

@@ -558,6 +558,22 @@ async def toggle_contact_favorite_rest(
     return {"id": str(contact.id), "favorite": contact.favorite}
 
 
+async def _validate_peer_for_request(
+    db: AsyncSession, user_id: UUID, identity_id: UUID, peer_pubkey_hex: str
+) -> bytes:
+    """Owns-Identity-Check + Pubkey-Hex-Parse. Hilft den /status- und
+    /telemetry-Endpoints, identische Eingabe-Validierung zu teilen."""
+    if not await _user_owns_identity(db, user_id, identity_id):
+        raise HTTPException(status_code=404)
+    try:
+        peer = bytes.fromhex(peer_pubkey_hex.strip())
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail="bad pubkey hex") from e
+    if len(peer) != 32:
+        raise HTTPException(status_code=400, detail="pubkey must be 32 bytes")
+    return peer
+
+
 @router.post("/identities/{identity_id}/contacts/{peer_pubkey_hex}/telemetry", response_model=None)
 async def request_contact_telemetry(
     request: Request,
@@ -569,18 +585,32 @@ async def request_contact_telemetry(
     """Schickt einen REQ_TYPE_GET_TELEMETRY_DATA an den angegebenen Peer.
     Antwort kommt asynchron zurück und füllt last_lat/last_lon, falls
     der Peer LPP_GPS in der Telemetrie liefert."""
-    if not await _user_owns_identity(db, user.id, identity_id):
-        raise HTTPException(status_code=404)
-    try:
-        peer = bytes.fromhex(peer_pubkey_hex.strip())
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail="bad pubkey hex") from e
-    if len(peer) != 32:
-        raise HTTPException(status_code=400, detail="pubkey must be 32 bytes")
+    peer = await _validate_peer_for_request(db, user.id, identity_id, peer_pubkey_hex)
     svc = _service(request)
     if svc is None:
         raise HTTPException(status_code=503, detail="companion-service not running")
     ok = await svc.request_telemetry(identity_id=identity_id, peer_pubkey=peer)
+    if not ok:
+        raise HTTPException(status_code=409, detail="identity not loaded in service")
+    return {"ok": True, "ts": datetime.now(UTC).isoformat()}
+
+
+@router.post("/identities/{identity_id}/contacts/{peer_pubkey_hex}/status", response_model=None)
+async def request_contact_status(
+    request: Request,
+    identity_id: UUID,
+    peer_pubkey_hex: str,
+    user: User = Depends(current_user_required),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Schickt einen REQ_TYPE_GET_STATUS — wirkt wie ein Ping mit Stats.
+    Antwort kommt asynchron zurück: System-Message in der Konvo + SSE-Event
+    ``status_response`` mit ``rtt_ms`` und ``stats``."""
+    peer = await _validate_peer_for_request(db, user.id, identity_id, peer_pubkey_hex)
+    svc = _service(request)
+    if svc is None:
+        raise HTTPException(status_code=503, detail="companion-service not running")
+    ok = await svc.request_status(identity_id=identity_id, peer_pubkey=peer)
     if not ok:
         raise HTTPException(status_code=409, detail="identity not loaded in service")
     return {"ok": True, "ts": datetime.now(UTC).isoformat()}

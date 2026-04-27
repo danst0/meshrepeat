@@ -226,6 +226,37 @@ async def test_sse_stream_subscribes_and_publishes(app_and_outbox) -> None:
 
 
 @pytest.mark.asyncio
+async def test_status_request_endpoint(app_and_outbox) -> None:
+    """POST /contacts/{hex}/status: Endpoint funktioniert + Validierung.
+    Wir nutzen einen *echten* Ed25519-Pubkey, weil
+    ``calc_shared_secret`` ihn zu Curve25519 konvertiert."""
+    from meshcore_companion.crypto import LocalIdentity
+
+    app, sender = app_and_outbox
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://t") as client:
+        ident_id = await _login_and_create_identity(client, sender, email="status@example.com")
+        peer_hex = LocalIdentity.generate().pub_key.hex()
+
+        r = await client.post(
+            f"/api/v1/companion/identities/{ident_id}/contacts/{peer_hex}/status"
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["ok"] is True
+
+        # Tag in pending_reqs — bestätigt, dass Service den REQ getrackt hat
+        svc = app.state.companion_service
+        assert len(svc._pending_reqs) >= 1, "expected pending status request"
+
+        # Falsches Pubkey-Format → 400
+        r = await client.post(
+            f"/api/v1/companion/identities/{ident_id}/contacts/notvalidhex/status"
+        )
+        assert r.status_code == 400
+
+
+@pytest.mark.asyncio
 async def test_sse_endpoint_requires_auth(app_and_outbox) -> None:
     """Ohne Login redirected /stream auf /login (current_user_required).
     Den 200-Pfad testen wir nicht über ASGITransport — der puffert
