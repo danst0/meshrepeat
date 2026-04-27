@@ -289,9 +289,22 @@
       star.textContent = t.favorite ? "★" : "☆";
       star.style.color = t.favorite ? "gold" : "var(--muted)";
       if (!t.id) {
-        star.disabled = true;
-        star.style.opacity = ".35";
-        star.title = "Erst öffnen, dann markieren";
+        // AT_TARGETS-Eintrag (z.B. aus Channel-Posts), kein DB-Contact.
+        // Klick legt Contact an + setzt favorite=true.
+        star.title = "Als Favorit markieren (legt Kontakt an)";
+        star.addEventListener("click", async (e) => {
+          e.stopPropagation();
+          const fd = new FormData();
+          fd.append("peer_pubkey_hex", t.peer_pubkey_hex);
+          if (t.peer_name) fd.append("peer_name", t.peer_name);
+          fd.append("favorite", "true");
+          try {
+            const r = await fetch(`${API}/identities/${IDENTITY_ID}/contacts`, {
+              method: "POST", body: fd, credentials: "same-origin",
+            });
+            if (r.ok) await loadThreads();
+          } catch (err) { console.warn("upsert contact failed", err); }
+        });
       } else {
         star.title = t.favorite ? "Favorit entfernen" : "Als Favorit markieren";
         star.addEventListener("click", async (e) => {

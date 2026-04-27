@@ -550,6 +550,66 @@ async def list_identity_contacts(
     ]
 
 
+@router.post("/identities/{identity_id}/contacts", response_model=None)
+async def upsert_contact(
+    identity_id: UUID,
+    peer_pubkey_hex: Annotated[str, Form()],
+    peer_name: Annotated[str, Form()] = "",
+    favorite: Annotated[bool, Form()] = False,
+    user: User = Depends(current_user_required),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Erzeugt oder aktualisiert einen CompanionContact ohne Mesh-Advert.
+    Use case: User markiert einen aus Channel-Posts bekannten Sender (im
+    AT_TARGETS-Pool, aber noch ohne DB-Row) als Favorit — der Klick legt
+    den Contact an und setzt favorite=true gleichzeitig.
+
+    Bei bestehendem Contact: peer_name nur überschreiben falls leer,
+    favorite nur setzen wenn explizit ``favorite=true`` gesendet wird
+    (kein versehentliches Demoten).
+    """
+    if not await _user_owns_identity(db, user.id, identity_id):
+        raise HTTPException(status_code=404)
+    try:
+        peer = bytes.fromhex(peer_pubkey_hex.strip())
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail="bad pubkey hex") from e
+    if len(peer) != 32:
+        raise HTTPException(status_code=400, detail="pubkey must be 32 bytes")
+
+    contact = (
+        await db.execute(
+            select(CompanionContact).where(
+                CompanionContact.identity_id == identity_id,
+                CompanionContact.peer_pubkey == peer,
+            )
+        )
+    ).scalar_one_or_none()
+    name_clean = peer_name.strip() or None
+    if contact is None:
+        contact = CompanionContact(
+            identity_id=identity_id,
+            peer_pubkey=peer,
+            peer_name=name_clean,
+            last_seen_at=datetime.now(UTC),
+            favorite=favorite,
+        )
+        db.add(contact)
+    else:
+        if name_clean and not contact.peer_name:
+            contact.peer_name = name_clean
+        if favorite:
+            contact.favorite = True
+    await db.commit()
+    await db.refresh(contact)
+    return {
+        "id": str(contact.id),
+        "peer_pubkey_hex": contact.peer_pubkey.hex(),
+        "peer_name": contact.peer_name,
+        "favorite": contact.favorite,
+    }
+
+
 @router.post("/contacts/{contact_id}/favorite", response_model=None)
 async def toggle_contact_favorite_rest(
     contact_id: UUID,
