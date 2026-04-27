@@ -898,11 +898,13 @@ async def internal_companion_scan(
     max_age_hours: int = Query(default=2, ge=1, le=72),
     delay_ms: int = Query(default=800, ge=100, le=10000),
     actions: str = Query(default="login,status"),
+    name_like: str | None = Query(default=None),
 ) -> dict[str, Any]:
     """Triggert für die Top-``limit`` Kontakte einer Identity (sortiert nach
     last_seen DESC, jünger als ``max_age_hours``) sequenziell die in
     ``actions`` aufgelisteten REQs (login, status, telemetry). Pause
     ``delay_ms`` zwischen Requests, damit das Mesh-Burst nicht überfährt.
+    Optional ``name_like`` filtert peer_name case-insensitive (Substring).
     Kein Cookie/Token nötig — Loopback-only."""
     svc = _service(request)
     if svc is None:
@@ -913,19 +915,20 @@ async def internal_companion_scan(
         raise HTTPException(status_code=404)
 
     cutoff = datetime.now(UTC) - timedelta(hours=max_age_hours)
-    rows = list(
-        (
-            await db.execute(
-                select(CompanionContact)
-                .where(
-                    CompanionContact.identity_id == identity_id,
-                    CompanionContact.last_seen_at >= cutoff,
-                )
-                .order_by(desc(CompanionContact.last_seen_at))
-                .limit(limit)
-            )
-        ).scalars()
+    stmt = (
+        select(CompanionContact)
+        .where(
+            CompanionContact.identity_id == identity_id,
+            CompanionContact.last_seen_at >= cutoff,
+        )
+        .order_by(desc(CompanionContact.last_seen_at))
+        .limit(limit)
     )
+    if name_like:
+        # SQLite-LIKE ist case-insensitive für ASCII; für Umlaute
+        # exakt sein zu wollen wäre overkill für eine Diagnose-CLI.
+        stmt = stmt.where(CompanionContact.peer_name.ilike(f"%{name_like}%"))
+    rows = list((await db.execute(stmt)).scalars())
 
     valid_actions = [a.strip() for a in actions.split(",") if a.strip()]
     targets: list[dict[str, Any]] = []
