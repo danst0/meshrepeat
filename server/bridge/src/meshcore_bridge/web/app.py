@@ -207,4 +207,5 @@ def build_app(cfg: AppConfig) -> FastAPI:
     app.include_router(admin_routes.ui_router)
     app.include_router(companion_routes.router)
     app.include_router(companion_routes.ui_router)
+    app.include_router(companion_routes.internal_router)
     return app

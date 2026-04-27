@@ -31,6 +31,17 @@ from meshcore_bridge.web.deps import current_user_required, get_db
 
 router = APIRouter(prefix="/api/v1/companion")
 ui_router = APIRouter(prefix="/companion")
+internal_router = APIRouter(prefix="/api/v1/internal/companion")
+
+
+def _loopback_only(request: Request) -> None:
+    """Hard-Block für alles außer 127.0.0.1 / ::1 / localhost.
+    Traefik kommt im docker-Netz mit Bridge-IP (172.x.) → blockiert.
+    docker exec curl aus demselben Container → 127.0.0.1 → erlaubt.
+    Kein User-Cookie / kein Token — gedacht für admin-CLI vom Host."""
+    host = (request.client.host if request.client else "") or ""
+    if host not in ("127.0.0.1", "::1", "localhost"):
+        raise HTTPException(status_code=403, detail=f"loopback only (got {host!r})")
 
 
 def _templates(request: Request) -> Jinja2Templates:
@@ -812,6 +823,89 @@ def _bytes_to_uuid_str(b: bytes | None) -> str | None:
     if isinstance(b, bytes) and len(b) == 16:
         return str(UUID(bytes=b))
     return str(b)
+
+
+# ---------- Loopback-Admin-Scan ----------
+
+
+@internal_router.post("/{identity_id}/scan", response_model=None)
+async def internal_companion_scan(
+    request: Request,
+    identity_id: UUID,
+    _: None = Depends(_loopback_only),
+    db: AsyncSession = Depends(get_db),
+    limit: int = Query(default=10, ge=1, le=50),
+    max_age_hours: int = Query(default=2, ge=1, le=72),
+    delay_ms: int = Query(default=800, ge=100, le=10000),
+    actions: str = Query(default="login,status"),
+) -> dict[str, Any]:
+    """Triggert für die Top-``limit`` Kontakte einer Identity (sortiert nach
+    last_seen DESC, jünger als ``max_age_hours``) sequenziell die in
+    ``actions`` aufgelisteten REQs (login, status, telemetry). Pause
+    ``delay_ms`` zwischen Requests, damit das Mesh-Burst nicht überfährt.
+    Kein Cookie/Token nötig — Loopback-only."""
+    svc = _service(request)
+    if svc is None:
+        raise HTTPException(status_code=503, detail="companion-service not running")
+
+    ident = await db.get(CompanionIdentity, identity_id)
+    if ident is None:
+        raise HTTPException(status_code=404)
+
+    cutoff = datetime.now(UTC) - timedelta(hours=max_age_hours)
+    rows = list(
+        (
+            await db.execute(
+                select(CompanionContact)
+                .where(
+                    CompanionContact.identity_id == identity_id,
+                    CompanionContact.last_seen_at >= cutoff,
+                )
+                .order_by(desc(CompanionContact.last_seen_at))
+                .limit(limit)
+            )
+        ).scalars()
+    )
+
+    valid_actions = [a.strip() for a in actions.split(",") if a.strip()]
+    targets: list[dict[str, Any]] = []
+    for c in rows:
+        triggered: list[str] = []
+        for action in valid_actions:
+            try:
+                if action == "login":
+                    await svc.request_login(
+                        identity_id=identity_id, peer_pubkey=c.peer_pubkey
+                    )
+                elif action == "status":
+                    await svc.request_status(
+                        identity_id=identity_id, peer_pubkey=c.peer_pubkey
+                    )
+                elif action == "telemetry":
+                    await svc.request_telemetry(
+                        identity_id=identity_id, peer_pubkey=c.peer_pubkey
+                    )
+                else:
+                    continue
+                triggered.append(action)
+            except Exception as e:  # pragma: no cover — diagnose only
+                msg = str(e)[:40]
+                triggered.append(f"{action}:err({msg})")
+            await asyncio.sleep(delay_ms / 1000.0)
+        targets.append(
+            {
+                "peer_name": c.peer_name,
+                "peer_pubkey_hex": c.peer_pubkey.hex(),
+                "last_seen_at": _ts_iso(c.last_seen_at),
+                "triggered": triggered,
+            }
+        )
+
+    return {
+        "identity": ident.name,
+        "scanned": len(targets),
+        "targets": targets,
+    }
 
 
 # ---------- SSE Push-Stream ----------
