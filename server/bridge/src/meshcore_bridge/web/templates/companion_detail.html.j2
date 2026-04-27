@@ -77,10 +77,19 @@
         <span id="map-status" style="color:var(--muted);font-size:.85em"></span>
       </div>
       <div id="node-map" class="node-map"></div>
+      <div class="map-legend">
+        <span><span class="legend-dot legend-dot--fresh"></span>letzte 15 Min</span>
+        <span><span class="legend-dot legend-dot--recent"></span>letzte Stunde</span>
+        <span><span class="legend-dot legend-dot--stale"></span>letzte 24 h</span>
+        <span><span class="legend-dot legend-dot--gone"></span>älter</span>
+        <span><span class="legend-dot legend-dot--favorite"></span>Favorit</span>
+      </div>
       <p style="margin-top:.5rem;font-size:.85em;color:var(--muted)">
         Letzte 7 Tage. Pins entstehen aus Lat/Lon in ADVERTs ODER aus
         REQ_TYPE_GET_TELEMETRY_DATA (LPP_GPS) — anfragebar pro Kontakt
         unten. Knoten mit unset-Koordinaten (0,0) werden ignoriert.
+        Pin-Farbe = Frische der letzten Aktivität. Klick aufs Popup
+        öffnet die DM.
       </p>
     </div>
 

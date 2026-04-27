@@ -137,18 +137,26 @@
   function shortHex(hex, n=8) { return hex ? hex.slice(0,n)+"…" : ""; }
   function escText(s) { const d = document.createElement("div"); d.textContent = s ?? ""; return d.innerHTML; }
 
-  function liveClass(iso) {
-    // Liveness-Indikator pro Sidebar-Zeile aus last_ts. Schwellen
-    // pragmatisch nach Mesh-Verkehrsmustern (Adverts ~1 h, ACK/Status
-    // sofort). null/undef → kein Dot.
-    if (!iso) return "live-dot--gone";
+  function liveTier(iso) {
+    // Frische-Klassifikation aus last_ts. Tier-Namen werden 1:1 für
+    // .live-dot--<tier> (Sidebar) und Pin-Farbe (Map) genutzt.
+    if (!iso) return "gone";
     const age = Date.now() - new Date(iso).getTime();
-    if (isNaN(age)) return "live-dot--gone";
-    if (age < 15 * 60_000) return "live-dot--fresh";
-    if (age < 60 * 60_000) return "live-dot--recent";
-    if (age < 24 * 60 * 60_000) return "live-dot--stale";
-    return "live-dot--gone";
+    if (isNaN(age)) return "gone";
+    if (age < 15 * 60_000) return "fresh";
+    if (age < 60 * 60_000) return "recent";
+    if (age < 24 * 60 * 60_000) return "stale";
+    return "gone";
   }
+  function liveClass(iso) { return "live-dot--" + liveTier(iso); }
+  // Map-Pin-Farben pro Tier — passend zu .live-dot--*-CSS-Variablen,
+  // damit Karten-Farben und Sidebar-Dots dieselbe Sprache sprechen.
+  const TIER_COLORS = {
+    fresh:  "#addb67",  // var(--ok)
+    recent: "#ffd866",
+    stale:  "#82aaff",  // var(--accent)
+    gone:   "#5f7e97",  // var(--muted)
+  };
 
   // ---------- DM-Suche (filtert die Sidebar-Liste direkt) ----------
   function normalizeForSearch(s) {
@@ -796,6 +804,13 @@
       c.addEventListener("touchstart", markTouched, {passive: true});
       c.addEventListener("dblclick", markTouched);
       c.addEventListener("keydown", markTouched);
+      // Event-Delegation: Klick auf "Chat öffnen"-Link in einem Popup
+      c.addEventListener("click", (ev) => {
+        const t = ev.target;
+        if (!(t instanceof HTMLElement) || !t.classList.contains("map-open-dm")) return;
+        ev.preventDefault();
+        openDmFromMap(t.dataset.peerHex, t.dataset.peerName);
+      });
     } else {
       setTimeout(() => mapInstance.invalidateSize(), 50);
     }
@@ -908,15 +923,32 @@
       const bounds = [];
       for (const p of pins) {
         if (typeof p.lat !== "number" || typeof p.lon !== "number") continue;
-        const popup = `<strong>${escText(p.peer_name || "?")}</strong><br>` +
-                      `<code>${p.peer_pubkey_hex.slice(0,16)}…</code><br>` +
-                      `<small>last seen: ${fmtDate(p.last_seen_at)}</small>`;
+        const tier = liveTier(p.last_seen_at);
+        const fillColor = TIER_COLORS[tier];
+        // Favorit: gold-Border über dem Tier-Fill — Frische bleibt
+        // erkennbar, Lieblingsknoten stechen zusätzlich heraus.
+        const borderColor = p.favorite ? "#ffd866" : fillColor;
+        const radius = p.favorite ? 9 : 7;
+        const tierLabel = {
+          fresh: "letzte 15 Min",
+          recent: "letzte Stunde",
+          stale: "letzte 24 h",
+          gone: "älter",
+        }[tier];
+        const peerHexEsc = escText(p.peer_pubkey_hex);
+        const peerNameEsc = escText(p.peer_name || "?");
+        const popup =
+          `<strong>${peerNameEsc}</strong><br>` +
+          `<code>${p.peer_pubkey_hex.slice(0,16)}…</code><br>` +
+          `<small>letzter Verkehr: ${fmtDate(p.last_seen_at)} · ${tierLabel}</small><br>` +
+          `<a href="#" class="map-open-dm" ` +
+          `   data-peer-hex="${peerHexEsc}" data-peer-name="${peerNameEsc}">→ Chat öffnen</a>`;
         const marker = L.circleMarker([p.lat, p.lon], {
-          radius: p.favorite ? 8 : 6,
-          color: p.favorite ? "#ffd866" : "#82aaff",
-          weight: 2,
-          fillColor: p.favorite ? "#ffd866" : "#82aaff",
-          fillOpacity: 0.7,
+          radius,
+          color: borderColor,
+          weight: p.favorite ? 3 : 2,
+          fillColor,
+          fillOpacity: 0.75,
         }).bindPopup(popup);
         mapMarkers.addLayer(marker);
         bounds.push([p.lat, p.lon]);
@@ -929,6 +961,15 @@
     } catch (e) {
       status.textContent = "Fehler: " + e;
     }
+  }
+
+  function openDmFromMap(peerHex, peerName) {
+    if (!peerHex) return;
+    // Tab-Switch: "chats" → showTab + Hash + LocalStorage
+    showTab("chats");
+    patchHash({tab: "chats"});
+    persistTab("chats");
+    selectDm(peerHex.toLowerCase(), peerName || null);
   }
 
   // ---------- SSE Push-Updates ----------
