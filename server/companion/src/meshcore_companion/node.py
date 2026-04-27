@@ -42,7 +42,9 @@ from meshcore_companion.crypto import (
 )
 from meshcore_companion.packet import Advert, Packet, PayloadType, RouteType
 
-_TIMESTAMP_LEN = 4  # le-uint32, prepended to encrypted DM body
+_TIMESTAMP_LEN = 4
+# Minimal-Größe eines entschlüsselten PATH-Plaintexts: 1B path_byte + 1B extra_type
+_PATH_HEADER_MIN_LEN = 2  # le-uint32, prepended to encrypted DM body
 
 # AdvertDataHelpers (firmware/lib/meshcore/src/helpers/AdvertDataHelpers.h):
 # app_data := flags(1) [lat(4) lon(4)]? [feat1(2)]? [feat2(2)]? [name…]?
@@ -360,6 +362,55 @@ class CompanionNode:
             payload=body,
         )
         return pkt, tag
+
+    def try_decrypt_path(
+        self,
+        *,
+        packet: Packet,
+        peer_candidates: list[Identity],
+    ) -> tuple[Identity, bytes, int, bytes] | None:
+        """PATH-Body decoden (firmware ``Mesh.cpp:124-162``).
+
+        Wire: ``[dest_hash:1] [src_hash:1] [encrypt_then_mac(plain)]``,
+        plain = ``[path_byte:1] [path_hashes:N*hash_size]
+        [extra_type:1] [extra:?]``. ``path_byte`` high 2 bits = hash_size-1,
+        low 6 bits = hash_count.
+
+        Returns ``(peer_identity, path_bytes, extra_type, extra_data)``
+        oder ``None`` wenn nicht für uns / Decrypt fehlschlägt.
+        Genutzt vor allem für ANON_REQ-Login-Antworten: der Repeater
+        verpackt RESPONSE in PATH (Sender lernt Pfad + bekommt Antwort).
+        """
+        if packet.payload_type != PayloadType.PATH:
+            return None
+        body = packet.payload
+        if len(body) < 2 * PATH_HASH_SIZE + CIPHER_MAC_SIZE:
+            return None
+        dest_hash = body[:PATH_HASH_SIZE]
+        if dest_hash != self.pub_hash:
+            return None
+        src_hash = body[PATH_HASH_SIZE : 2 * PATH_HASH_SIZE]
+        encrypted = body[2 * PATH_HASH_SIZE :]
+        for peer in peer_candidates:
+            if peer.hash_prefix() != src_hash:
+                continue
+            secret = self.local.calc_shared_secret(peer.pub_key)
+            plain = mac_then_decrypt(secret, encrypted)
+            if plain is None:
+                continue
+            if len(plain) < _PATH_HEADER_MIN_LEN:
+                continue
+            path_byte = plain[0]
+            hash_size = (path_byte >> 6) + 1
+            hash_count = path_byte & 0x3F
+            path_end = 1 + hash_size * hash_count
+            if path_end + 1 > len(plain):
+                continue
+            path_bytes = bytes(plain[1:path_end])
+            extra_type = plain[path_end] & 0x0F  # high 4 bits reserved
+            extra_data = bytes(plain[path_end + 1 :])
+            return peer, path_bytes, extra_type, extra_data
+        return None
 
     def try_decrypt_response(
         self,

@@ -74,6 +74,46 @@ def test_parse_login_response_not_login() -> None:
     assert parse_login_response(bytes([0xFF, 0, 0, 0])) is None
 
 
+def test_try_decrypt_path_extracts_embedded_response() -> None:
+    """PATH-Wrapper enthält bei FLOOD-ANON_REQ eine eingebettete RESPONSE.
+    Wire-Format firmware ``Mesh.cpp:124-162``: dest_hash + src_hash +
+    encrypt(path_byte + path_hashes + extra_type + extra_data).
+    Wir simulieren den Repeater-Reply, decoden ihn mit Antonia."""
+    from meshcore_companion.crypto import (
+        Identity,
+        encrypt_then_mac,
+    )
+    from meshcore_companion.packet import Packet, PayloadType
+
+    me = LocalIdentity.generate()  # Antonia (Empfänger)
+    repeater = LocalIdentity.generate()
+    secret = repeater.calc_shared_secret(me.pub_key)
+
+    # Plaintext-Payload bauen: 2 Pfad-Hashes (1 Byte je), extra_type=RESPONSE,
+    # extra=tag(4 LE)+reply_data
+    path_byte = (0 << 6) | 2  # hash_size=1, hash_count=2
+    path_hashes = b"\xaa\xbb"
+    extra_type = int(PayloadType.RESPONSE)
+    tag_bytes = (0xDEADBEEF).to_bytes(4, "little")
+    reply_data = b"\x00\x00\x01\xc1"  # RESP_SERVER_LOGIN_OK + admin + perms
+    plain = bytes([path_byte]) + path_hashes + bytes([extra_type]) + tag_bytes + reply_data
+
+    encrypted = encrypt_then_mac(secret, plain)
+    body = me.pub_key[:1] + repeater.pub_key[:1] + encrypted
+    pkt = Packet(payload_type=PayloadType.PATH, payload=body)
+
+    node = CompanionNode(me)
+    out = node.try_decrypt_path(packet=pkt, peer_candidates=[Identity(repeater.pub_key)])
+    assert out is not None
+    peer, decoded_path, decoded_extra_type, decoded_extra = out
+    assert peer.pub_key == repeater.pub_key
+    assert decoded_path == path_hashes
+    assert decoded_extra_type == int(PayloadType.RESPONSE)
+    # encrypt_then_mac padded auf Block-Größe — firmware-Kommentar
+    # "may be padded with zeroes!" — daher startswith statt exakter Match
+    assert decoded_extra.startswith(tag_bytes + reply_data)
+
+
 def test_make_anon_login_req_wire_format() -> None:
     """Wire: payload_type=ANON_REQ, body = dest_hash(1) + sender_pub(32) +
     encrypted. Plaintext-Länge = 4 (ts) + len(pw) + 1 (\\0).

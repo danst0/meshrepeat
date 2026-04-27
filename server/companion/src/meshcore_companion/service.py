@@ -58,6 +58,9 @@ if TYPE_CHECKING:
 
 _log = structlog.get_logger("companion")
 
+# Tag-Prefix einer Reply (4 Byte LE timestamp/tag, vor reply_data)
+_TAG_BYTES = 4
+
 PacketInjector = Callable[[Packet, str], Awaitable[None]]
 """Callable(packet, scope) — fügt ein Paket in den Mesh-Scope ein."""
 
@@ -587,6 +590,8 @@ class CompanionService:
             await self._handle_inbound_grp_txt(pkt=pkt, scope=scope, raw=raw)
         elif pkt.payload_type == PayloadType.RESPONSE:
             await self._handle_inbound_response(pkt=pkt, scope=scope)
+        elif pkt.payload_type == PayloadType.PATH:
+            await self._handle_inbound_path(pkt=pkt, scope=scope)
 
     # ---------- internal ----------
 
@@ -833,19 +838,8 @@ class CompanionService:
             )
 
     async def _handle_inbound_response(self, *, pkt: Packet, scope: str) -> None:
-        """RESPONSE auf einen unserer REQs. Wir kennen den Sender nicht
-        per src_hash eindeutig, daher iterieren wir über alle Identities
-        im scope und ihre bekannten Contacts. Erste erfolgreiche
-        Dekryption gewinnt.
-
-        Verzweigung nach pending REQ-Typ:
-          * STATUS    → RepeaterStats parsen, RTT berechnen,
-                        System-Message persistieren, SSE pushen.
-          * TELEMETRY → LPP-Buffer auf GPS prüfen → ggf. lat/lon
-                        speichern + System-Message mit Telemetrie-Snippet.
-          * unbekannt → Telemetrie-Fallback (Legacy).
-        """
-        from meshcore_bridge.db import CompanionContact, CompanionMessage
+        """RESPONSE auf einen unserer REQs (DIRECT-Variante)."""
+        from meshcore_bridge.db import CompanionContact
 
         for loaded in self._by_id.values():
             if loaded.scope != scope:
@@ -866,148 +860,223 @@ class CompanionService:
             )
             if decoded is None:
                 continue
-
-            pending = self._pending_reqs.pop(decoded.tag, None)
-            now_mono = time.monotonic()
-            rtt_ms = int((now_mono - pending[0]) * 1000) if pending else None
-            req_type = pending[1] if pending else self.REQ_TYPE_TELEMETRY
-            now_ts = datetime.now(UTC)
-            peer_name = next(
-                (c.peer_name for c in contacts if c.peer_pubkey == decoded.sender_pubkey),
-                None,
-            )
-
-            # last_seen aktualisieren — egal welcher Response-Typ
-            async with self.sessionmaker() as db:
-                contact = (
-                    await db.execute(
-                        select(CompanionContact).where(
-                            CompanionContact.identity_id == loaded.id,
-                            CompanionContact.peer_pubkey == decoded.sender_pubkey,
-                        )
-                    )
-                ).scalar_one_or_none()
-                if contact is not None:
-                    contact.last_seen_at = now_ts
-
-                text: str | None = None
-                event_type: str = "system"
-                event_extra: dict[str, object] = {}
-
-                if req_type == self.REQ_TYPE_LOGIN:
-                    login = parse_login_response(decoded.reply_data)
-                    if login is None:
-                        _log.info(
-                            "login_response_unparsable",
-                            peer=decoded.sender_pubkey[:4].hex(),
-                            tag=decoded.tag,
-                            reply_len=len(decoded.reply_data),
-                        )
-                        return
-                    rtt_part = f"{rtt_ms} ms" if rtt_ms is not None else "?"
-                    role = "admin" if login.is_admin else "guest"
-                    text = (
-                        f"🔑 Login OK · RTT {rtt_part} · "
-                        f"Rolle {role} · Permissions 0x{login.permissions:02x}"
-                    )
-                    event_type = "login_response"
-                    event_extra = {
-                        "rtt_ms": rtt_ms,
-                        "is_admin": login.is_admin,
-                        "permissions": login.permissions,
-                    }
-
-                elif req_type == self.REQ_TYPE_STATUS:
-                    stats = parse_repeater_stats(decoded.reply_data)
-                    if stats is None:
-                        _log.info(
-                            "status_response_unparsable",
-                            peer=decoded.sender_pubkey[:4].hex(),
-                            tag=decoded.tag,
-                            reply_len=len(decoded.reply_data),
-                        )
-                        return
-                    rtt_part = f"{rtt_ms} ms" if rtt_ms is not None else "?"
-                    up_h = stats.total_up_time_secs / 3600.0
-                    text = (
-                        f"ℹ Status · RTT {rtt_part} · "
-                        f"Uptime {up_h:.1f} h · "
-                        f"Batt {stats.battery_volts:.2f} V · "
-                        f"SNR {stats.snr_db:.1f} dB · RSSI {stats.last_rssi} · "
-                        f"RX {stats.n_packets_recv}/TX {stats.n_packets_sent}"
-                    )
-                    event_type = "status_response"
-                    event_extra = {
-                        "rtt_ms": rtt_ms,
-                        "stats": {
-                            "battery_volts": stats.battery_volts,
-                            "snr_db": stats.snr_db,
-                            "last_rssi": stats.last_rssi,
-                            "uptime_s": stats.total_up_time_secs,
-                            "n_packets_recv": stats.n_packets_recv,
-                            "n_packets_sent": stats.n_packets_sent,
-                            "tx_queue_len": stats.curr_tx_queue_len,
-                        },
-                    }
-
-                elif req_type == self.REQ_TYPE_TELEMETRY:
-                    gps = parse_lpp_gps(decoded.reply_data)
-                    parts: list[str] = []
-                    if rtt_ms is not None:
-                        parts.append(f"RTT {rtt_ms} ms")
-                    if gps is not None and not (gps.lat == 0.0 and gps.lon == 0.0):
-                        if contact is not None:
-                            contact.last_lat = gps.lat
-                            contact.last_lon = gps.lon
-                        parts.append(f"GPS {gps.lat:.4f}, {gps.lon:.4f}")
-                    else:
-                        parts.append("kein GPS")
-                    text = "📡 Telemetrie · " + " · ".join(parts)
-                    event_type = "telemetry_response"
-                    event_extra = {
-                        "rtt_ms": rtt_ms,
-                        "lat": gps.lat if gps else None,
-                        "lon": gps.lon if gps else None,
-                    }
-
-                if text is None:
-                    await db.commit()
-                    return
-
-                sys_msg = CompanionMessage(
-                    identity_id=loaded.id,
-                    direction="system",
-                    payload_type=int(PayloadType.RESPONSE),
-                    peer_pubkey=decoded.sender_pubkey,
-                    peer_name=peer_name,
-                    text=text,
-                    raw=b"",
-                    ts=now_ts,
-                )
-                db.add(sys_msg)
-                await db.commit()
-
-                emit_payload: dict[str, object] = {
-                    "type": event_type,
-                    "id": str(sys_msg.id),
-                    "ts": now_ts.isoformat(),
-                    "peer_pubkey_hex": decoded.sender_pubkey.hex(),
-                    "peer_name": peer_name,
-                    "text": text,
-                    "direction": "system",
-                }
-                emit_payload.update(event_extra)
-                await self._emit(loaded.id, emit_payload)
-
-            _log.info(
-                "response_handled",
-                identity=loaded.name,
-                peer=decoded.sender_pubkey[:4].hex(),
+            await self._process_response_payload(
+                loaded=loaded,
+                sender_pubkey=decoded.sender_pubkey,
                 tag=decoded.tag,
-                req_type=req_type,
-                rtt_ms=rtt_ms,
+                reply_data=decoded.reply_data,
+                contacts=contacts,
             )
             return
+
+    async def _handle_inbound_path(self, *, pkt: Packet, scope: str) -> None:
+        """PATH-Wrapper auf einen FLOOD-REQ (insb. ANON_REQ-Login).
+        Repeater verpackt die RESPONSE in PATH, damit der Sender
+        gleichzeitig den out_path lernt. Wir extrahieren das eingebettete
+        ``extra``-Payload und routen es analog zur RESPONSE.
+        """
+        from meshcore_bridge.db import CompanionContact
+
+        for loaded in self._by_id.values():
+            if loaded.scope != scope:
+                continue
+            async with self.sessionmaker() as db:
+                contacts = list(
+                    (
+                        await db.execute(
+                            select(CompanionContact).where(
+                                CompanionContact.identity_id == loaded.id
+                            )
+                        )
+                    ).scalars()
+                )
+            cands = [Identity(c.peer_pubkey) for c in contacts]
+            decoded = loaded.node.try_decrypt_path(packet=pkt, peer_candidates=cands)
+            if decoded is None:
+                continue
+            peer, path_bytes, extra_type, extra = decoded
+            _log.info(
+                "path_recv",
+                identity=loaded.name,
+                peer=peer.pub_key[:4].hex(),
+                path_hops=len(path_bytes),
+                extra_type=extra_type,
+                extra_len=len(extra),
+            )
+            # Nur eingebettete RESPONSE interessiert uns (REQ/Login-Reply).
+            # extra = [tag:4 LE] [reply_data...]
+            if extra_type != int(PayloadType.RESPONSE) or len(extra) < _TAG_BYTES:
+                return
+            tag = int.from_bytes(extra[:_TAG_BYTES], "little", signed=False)
+            reply_data = extra[_TAG_BYTES:]
+            await self._process_response_payload(
+                loaded=loaded,
+                sender_pubkey=peer.pub_key,
+                tag=tag,
+                reply_data=reply_data,
+                contacts=contacts,
+            )
+            return
+
+    async def _process_response_payload(
+        self,
+        *,
+        loaded: LoadedIdentity,
+        sender_pubkey: bytes,
+        tag: int,
+        reply_data: bytes,
+        contacts: list,
+    ) -> None:
+        """Persistiert eine eingegangene Reply (egal ob RESPONSE oder PATH-
+        embedded) als System-Message und pusht ein SSE-Event.
+
+        Verzweigung nach pending REQ-Typ:
+          * LOGIN     → RESP_SERVER_LOGIN_OK + permissions
+          * STATUS    → RepeaterStats
+          * TELEMETRY → LPP-Buffer (LPP_GPS optional)
+          * unbekannt → Telemetrie-Fallback (Legacy).
+        """
+        from meshcore_bridge.db import CompanionContact, CompanionMessage
+
+        pending = self._pending_reqs.pop(tag, None)
+        now_mono = time.monotonic()
+        rtt_ms = int((now_mono - pending[0]) * 1000) if pending else None
+        req_type = pending[1] if pending else self.REQ_TYPE_TELEMETRY
+        now_ts = datetime.now(UTC)
+        peer_name = next(
+            (c.peer_name for c in contacts if c.peer_pubkey == sender_pubkey),
+            None,
+        )
+
+        async with self.sessionmaker() as db:
+            contact = (
+                await db.execute(
+                    select(CompanionContact).where(
+                        CompanionContact.identity_id == loaded.id,
+                        CompanionContact.peer_pubkey == sender_pubkey,
+                    )
+                )
+            ).scalar_one_or_none()
+            if contact is not None:
+                contact.last_seen_at = now_ts
+
+            text: str | None = None
+            event_type: str = "system"
+            event_extra: dict[str, object] = {}
+
+            if req_type == self.REQ_TYPE_LOGIN:
+                login = parse_login_response(reply_data)
+                if login is None:
+                    _log.info(
+                        "login_response_unparsable",
+                        peer=sender_pubkey[:4].hex(),
+                        tag=tag,
+                        reply_len=len(reply_data),
+                    )
+                    return
+                rtt_part = f"{rtt_ms} ms" if rtt_ms is not None else "?"
+                role = "admin" if login.is_admin else "guest"
+                text = (
+                    f"🔑 Login OK · RTT {rtt_part} · "
+                    f"Rolle {role} · Permissions 0x{login.permissions:02x}"
+                )
+                event_type = "login_response"
+                event_extra = {
+                    "rtt_ms": rtt_ms,
+                    "is_admin": login.is_admin,
+                    "permissions": login.permissions,
+                }
+
+            elif req_type == self.REQ_TYPE_STATUS:
+                stats = parse_repeater_stats(reply_data)
+                if stats is None:
+                    _log.info(
+                        "status_response_unparsable",
+                        peer=sender_pubkey[:4].hex(),
+                        tag=tag,
+                        reply_len=len(reply_data),
+                    )
+                    return
+                rtt_part = f"{rtt_ms} ms" if rtt_ms is not None else "?"
+                up_h = stats.total_up_time_secs / 3600.0
+                text = (
+                    f"ℹ Status · RTT {rtt_part} · "
+                    f"Uptime {up_h:.1f} h · "
+                    f"Batt {stats.battery_volts:.2f} V · "
+                    f"SNR {stats.snr_db:.1f} dB · RSSI {stats.last_rssi} · "
+                    f"RX {stats.n_packets_recv}/TX {stats.n_packets_sent}"
+                )
+                event_type = "status_response"
+                event_extra = {
+                    "rtt_ms": rtt_ms,
+                    "stats": {
+                        "battery_volts": stats.battery_volts,
+                        "snr_db": stats.snr_db,
+                        "last_rssi": stats.last_rssi,
+                        "uptime_s": stats.total_up_time_secs,
+                        "n_packets_recv": stats.n_packets_recv,
+                        "n_packets_sent": stats.n_packets_sent,
+                        "tx_queue_len": stats.curr_tx_queue_len,
+                    },
+                }
+
+            elif req_type == self.REQ_TYPE_TELEMETRY:
+                gps = parse_lpp_gps(reply_data)
+                parts: list[str] = []
+                if rtt_ms is not None:
+                    parts.append(f"RTT {rtt_ms} ms")
+                if gps is not None and not (gps.lat == 0.0 and gps.lon == 0.0):
+                    if contact is not None:
+                        contact.last_lat = gps.lat
+                        contact.last_lon = gps.lon
+                    parts.append(f"GPS {gps.lat:.4f}, {gps.lon:.4f}")
+                else:
+                    parts.append("kein GPS")
+                text = "📡 Telemetrie · " + " · ".join(parts)
+                event_type = "telemetry_response"
+                event_extra = {
+                    "rtt_ms": rtt_ms,
+                    "lat": gps.lat if gps else None,
+                    "lon": gps.lon if gps else None,
+                }
+
+            if text is None:
+                await db.commit()
+                return
+
+            sys_msg = CompanionMessage(
+                identity_id=loaded.id,
+                direction="system",
+                payload_type=int(PayloadType.RESPONSE),
+                peer_pubkey=sender_pubkey,
+                peer_name=peer_name,
+                text=text,
+                raw=b"",
+                ts=now_ts,
+            )
+            db.add(sys_msg)
+            await db.commit()
+
+            emit_payload: dict[str, object] = {
+                "type": event_type,
+                "id": str(sys_msg.id),
+                "ts": now_ts.isoformat(),
+                "peer_pubkey_hex": sender_pubkey.hex(),
+                "peer_name": peer_name,
+                "text": text,
+                "direction": "system",
+            }
+            emit_payload.update(event_extra)
+            await self._emit(loaded.id, emit_payload)
+
+        _log.info(
+            "response_handled",
+            identity=loaded.name,
+            peer=sender_pubkey[:4].hex(),
+            tag=tag,
+            req_type=req_type,
+            rtt_ms=rtt_ms,
+        )
 
     async def _persist_outgoing(
         self,
