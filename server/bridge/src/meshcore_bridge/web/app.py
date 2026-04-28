@@ -30,6 +30,8 @@ from meshcore_bridge.bridge import (
     Router,
     TrafficLog,
 )
+from meshcore_bridge.bridge.packet_spool import PacketSpool
+from meshcore_bridge.bridge.packet_spool import attach as attach_spool
 from meshcore_bridge.companion_events import CompanionEventBus
 from meshcore_bridge.config import AppConfig
 from meshcore_bridge.db import close_engine, get_session, init_engine
@@ -101,11 +103,15 @@ def build_app(cfg: AppConfig) -> FastAPI:
         )
         policy = PolicyEngine(cfg.bridge.policy)
         traffic = TrafficLog(capacity=500)
+        packet_spool = PacketSpool(sessionmaker=get_session)
+        attach_spool(packet_spool, traffic)
+        await packet_spool.start()
         app.state.config = cfg
         app.state.bridge_registry = registry
         app.state.bridge_dedup = dedup
         app.state.bridge_policy = policy
         app.state.bridge_traffic = traffic
+        app.state.bridge_packet_spool = packet_spool
         app.state.bridge_router = Router(registry, dedup, policy, traffic)
         companion_events = CompanionEventBus()
         app.state.companion_events = companion_events
@@ -194,6 +200,8 @@ def build_app(cfg: AppConfig) -> FastAPI:
         log.info("stopping")
         if companion_service is not None:
             await companion_service.stop()
+        traffic.set_hook(None)
+        await packet_spool.stop()
         await close_engine()
 
     app = FastAPI(title="MeshCore Spiegel", lifespan=lifespan)

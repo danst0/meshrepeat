@@ -78,3 +78,36 @@ def test_traffic_log_event_serialises_to_dict() -> None:
     assert d["payload_type"] == "ADVERT"
     assert d["forwarded_to"] == [{"site_id": str(other), "name": "S2"}]
     assert d["dropped_reason"] is None
+    # raw_hex muss in der Default-Serialisierung mit drin sein (Inspector liest das)
+    assert d["raw_hex"] == "9000"
+    assert e.as_dict(include_raw=False).get("raw_hex") is None
+
+
+def test_traffic_log_hook_fires_on_record() -> None:
+    log = TrafficLog(capacity=10)
+    seen: list[str] = []
+    log.set_hook(lambda ev: seen.append(ev.raw_hex))
+    log.record(
+        make_event(
+            site_id=uuid4(),
+            site_name="X",
+            scope="public",
+            raw=bytes([0x44, 0x00]),
+            forwarded_to_pairs=[],
+            dropped_reason=None,
+        )
+    )
+    assert seen == ["4400"]
+    # Hook-Ausnahmen dürfen record() nicht killen
+    log.set_hook(lambda ev: (_ for _ in ()).throw(RuntimeError("boom")))
+    log.record(
+        make_event(
+            site_id=uuid4(),
+            site_name="Y",
+            scope="public",
+            raw=bytes([0x44, 0x00]),
+            forwarded_to_pairs=[],
+            dropped_reason=None,
+        )
+    )
+    assert len(log) == 2

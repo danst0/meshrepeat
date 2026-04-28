@@ -15,6 +15,8 @@ deshalb können wir nicht "von/an" als Klartext zeigen. Was wir sehen:
 from __future__ import annotations
 
 from collections import deque
+from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from threading import Lock
@@ -62,13 +64,14 @@ class TrafficEvent:
     route_type: str
     payload_type: str
     raw_size: int
+    raw_hex: str
     path_hashes: list[str]
     advert_pubkey: str | None
     forwarded_to: list[dict[str, str]]
     dropped_reason: str | None
 
-    def as_dict(self) -> dict[str, Any]:
-        return {
+    def as_dict(self, *, include_raw: bool = True) -> dict[str, Any]:
+        d: dict[str, Any] = {
             "ts": self.ts.isoformat(),
             "site_id": str(self.site_id),
             "site_name": self.site_name,
@@ -81,6 +84,9 @@ class TrafficEvent:
             "forwarded_to": self.forwarded_to,
             "dropped_reason": self.dropped_reason,
         }
+        if include_raw:
+            d["raw_hex"] = self.raw_hex
+        return d
 
 
 def parse_packet_meta(raw: bytes) -> tuple[str, str, list[str], str | None]:
@@ -128,14 +134,26 @@ class TrafficLog:
     capacity: int = 500
     _events: deque[TrafficEvent] = field(default_factory=lambda: deque(maxlen=500))
     _lock: Lock = field(default_factory=Lock)
+    _hook: Callable[[TrafficEvent], None] | None = None
 
     def __post_init__(self) -> None:
         # capacity wird via __init__ gesetzt; dequeu maxlen rebuilden
         self._events = deque(maxlen=self.capacity)
 
+    def set_hook(self, hook: Callable[[TrafficEvent], None] | None) -> None:
+        """Setzt eine Callback, die nach jedem ``record()`` synchron aufgerufen
+        wird. Genutzt vom Packet-Spool, um Events zusätzlich in die DB zu
+        spülen. Hook darf nicht blockieren — bei Bedarf in eine eigene Queue
+        pushen."""
+        self._hook = hook
+
     def record(self, event: TrafficEvent) -> None:
         with self._lock:
             self._events.append(event)
+        hook = self._hook
+        if hook is not None:
+            with suppress(Exception):
+                hook(event)
 
     def recent(self, *, limit: int = 100) -> list[TrafficEvent]:
         with self._lock:
@@ -165,6 +183,7 @@ def make_event(
         route_type=route_type,
         payload_type=payload_type,
         raw_size=len(raw),
+        raw_hex=raw.hex(),
         path_hashes=path_hashes,
         advert_pubkey=advert_pubkey,
         forwarded_to=[

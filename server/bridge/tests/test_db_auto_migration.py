@@ -29,7 +29,7 @@ async def test_fresh_db_creates_tables_and_stamps_head(tmp_path: Path) -> None:
         assert "companion_messages" in tables
         assert "alembic_version" in tables
         head = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
-        assert head == "e9f08c1ab3d2"
+        assert head == "f1a2b3c4d5e6"
         cols = {r[1] for r in conn.execute("PRAGMA table_info(companion_contacts)")}
         assert "node_type" in cols
         msg_cols = {r[1] for r in conn.execute("PRAGMA table_info(companion_messages)")}
@@ -68,7 +68,7 @@ async def test_legacy_db_gets_patched_and_stamped(tmp_path: Path) -> None:
         msg_cols = {r[1] for r in conn.execute("PRAGMA table_info(companion_messages)")}
         assert "room_sender_pubkey" in msg_cols
         head = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
-        assert head == "e9f08c1ab3d2"
+        assert head == "f1a2b3c4d5e6"
 
 
 @pytest.mark.asyncio
@@ -95,4 +95,4 @@ async def test_alembic_managed_db_runs_upgrade(tmp_path: Path) -> None:
         cols = {r[1] for r in conn.execute("PRAGMA table_info(companion_contacts)")}
         assert "node_type" in cols  # nach upgrade: da
         head = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
-        assert head == "e9f08c1ab3d2"
+        assert head == "f1a2b3c4d5e6"

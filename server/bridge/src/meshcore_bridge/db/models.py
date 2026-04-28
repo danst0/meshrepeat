@@ -221,6 +221,35 @@ class CompanionContact(Base):
     )
 
 
+class RawPacket(Base):
+    """Persistierter LoRa-Frame, der über einen Repeater an den Bridge-Server
+    angeliefert wurde. Befüllt vom Packet-Spool-Worker (siehe
+    ``bridge/packet_spool.py``); Retention 7 Tage. Quelle für die Wireshark-
+    Inspector-Seite (``/admin/inspector``)."""
+
+    __tablename__ = "raw_packets"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    ts: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    site_id: Mapped[UUID] = mapped_column(_UUIDBlob, nullable=False)
+    site_name: Mapped[str | None] = mapped_column(String(64))
+    scope: Mapped[str] = mapped_column(String(64), nullable=False)
+    route_type: Mapped[str] = mapped_column(String(24), nullable=False)
+    payload_type: Mapped[str] = mapped_column(String(24), nullable=False)
+    raw: Mapped[bytes] = mapped_column(BLOB, nullable=False)
+    path_hashes: Mapped[str] = mapped_column(String, nullable=False, default="")
+    advert_pubkey: Mapped[str | None] = mapped_column(String(64))
+    forwarded_to: Mapped[str] = mapped_column(String, nullable=False, default="[]")
+    dropped_reason: Mapped[str | None] = mapped_column(String(64))
+
+    __table_args__ = (
+        Index("ix_raw_packets_site_ts", "site_id", "ts"),
+        Index("ix_raw_packets_ts", "ts"),
+    )
+
+
 class CompanionChannel(Base):
     """MeshCore-Gruppenkanäle pro Identity. Secret aus name+password
     abgeleitet (``derive_channel_secret``); wird zum Verschlüsseln von

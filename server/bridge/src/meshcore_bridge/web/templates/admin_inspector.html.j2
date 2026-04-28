@@ -1,0 +1,314 @@
+{% extends "base.html.j2" %}
+{% block title %}Packet-Inspector — MeshCore Spiegel{% endblock %}
+{% block head_extra %}
+<style>
+  .insp-toolbar { display: flex; flex-wrap: wrap; gap: .8rem; align-items: end; }
+  .insp-toolbar > div { display: flex; flex-direction: column; gap: .2rem; }
+  .insp-toolbar label { margin: 0; font-size: .8rem; }
+  .insp-toolbar select, .insp-toolbar input { padding: .35rem .5rem; }
+  .insp-grid {
+    display: grid;
+    grid-template-columns: minmax(360px, 1fr) minmax(420px, 1.4fr);
+    gap: 1rem;
+    margin-top: 1rem;
+  }
+  @media (max-width: 1100px) { .insp-grid { grid-template-columns: 1fr; } }
+  .insp-list {
+    max-height: 70vh;
+    overflow-y: auto;
+    border: 1px solid var(--border, #1f2630);
+    border-radius: 6px;
+  }
+  .insp-list table { font-size: .85rem; }
+  .insp-list th { position: sticky; top: 0; background: var(--bg); z-index: 1; }
+  .insp-list tr { cursor: pointer; }
+  .insp-list tr.selected td { background: rgba(130,170,255,.18); }
+  .insp-list tr.dropped td { opacity: .55; }
+  .insp-detail {
+    border: 1px solid var(--border, #1f2630);
+    border-radius: 6px;
+    padding: 1rem;
+    overflow-x: auto;
+  }
+  .insp-detail h3 { margin: 0 0 .4rem 0; color: var(--accent); font-size: 1rem; }
+  .insp-detail dl { display: grid; grid-template-columns: 8rem 1fr; gap: .2rem .8rem; margin: 0 0 1rem 0; font-size: .9rem; }
+  .insp-detail dt { color: var(--muted); }
+  .insp-detail dd { margin: 0; word-break: break-all; }
+  .hexdump {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: .82rem;
+    line-height: 1.35;
+    background: rgba(130,170,255,.04);
+    padding: .6rem;
+    border-radius: 4px;
+    white-space: pre;
+    overflow-x: auto;
+  }
+  .hexdump .b-header { background: rgba(255,200,90,.30); border-radius: 2px; padding: 0 1px; }
+  .hexdump .b-pathlen { background: rgba(255,160,80,.25); border-radius: 2px; padding: 0 1px; }
+  .hexdump .b-path  { background: rgba(120,210,140,.22); border-radius: 2px; padding: 0 1px; }
+  .hexdump .b-body  { color: var(--fg); }
+  .insp-empty { color: var(--muted); padding: 2rem; text-align: center; }
+  .pill {
+    display: inline-block; padding: 1px 6px; border-radius: 8px;
+    font-size: .75rem; background: rgba(130,170,255,.12); color: var(--accent);
+    margin-right: .25rem;
+  }
+  .pill.drop { background: rgba(255,88,116,.15); color: var(--danger); }
+</style>
+{% endblock %}
+{% block content %}
+  <h1>Packet-Inspector</h1>
+  <p>Wireshark-artige Auswertung der Pakete, die Server über Repeater erreichen.
+     Pakete werden 7 Tage persistiert (DB-Spool); Inhalte sind on-air verschlüsselt,
+     aber Header, Path und (bei ADVERTs) Pubkey sind lesbar.</p>
+
+  <div class="card">
+    <form id="filters" class="insp-toolbar" onsubmit="return false">
+      <div>
+        <label for="f-rep">Repeater</label>
+        <select id="f-rep">
+          <option value="">— alle —</option>
+        </select>
+      </div>
+      <div>
+        <label for="f-payload">Payload-Typ</label>
+        <select id="f-payload">
+          <option value="">— alle —</option>
+          {% for pt in payload_types %}
+            <option value="{{ pt }}">{{ pt }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div>
+        <label for="f-since">Zeitraum</label>
+        <select id="f-since">
+          <option value="5m">letzte 5 min</option>
+          <option value="1h" selected>letzte 1 h</option>
+          <option value="24h">letzte 24 h</option>
+          <option value="7d">letzte 7 d</option>
+        </select>
+      </div>
+      <div>
+        <label for="f-limit">Limit</label>
+        <input type="number" id="f-limit" value="200" min="1" max="2000" style="width:5rem">
+      </div>
+      <div>
+        <label style="display:flex;align-items:center;gap:.4rem">
+          <input type="checkbox" id="f-auto" checked>
+          Auto-refresh 5 s
+        </label>
+      </div>
+      <div>
+        <label>&nbsp;</label>
+        <button type="button" id="btn-reload">Neu laden</button>
+      </div>
+      <div>
+        <label>&nbsp;</label>
+        <span id="stat" style="color:var(--muted)"></span>
+      </div>
+    </form>
+  </div>
+
+  <div class="insp-grid">
+    <div class="insp-list" id="list">
+      <table>
+        <thead>
+          <tr>
+            <th>Zeit</th>
+            <th>Repeater</th>
+            <th>Route</th>
+            <th>Typ</th>
+            <th>Bytes</th>
+            <th>Hops</th>
+          </tr>
+        </thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </div>
+    <div class="insp-detail" id="detail">
+      <div class="insp-empty">Klick einen Paket-Eintrag links für Details.</div>
+    </div>
+  </div>
+
+<script>
+const elRep = document.getElementById('f-rep');
+const elPayload = document.getElementById('f-payload');
+const elSince = document.getElementById('f-since');
+const elLimit = document.getElementById('f-limit');
+const elAuto = document.getElementById('f-auto');
+const elRows = document.getElementById('rows');
+const elStat = document.getElementById('stat');
+const elDetail = document.getElementById('detail');
+
+let selectedId = null;
+let timer = null;
+
+function fmtTime(iso) {
+  const d = new Date(iso);
+  return d.toLocaleTimeString() + '.' + String(d.getMilliseconds()).padStart(3, '0');
+}
+
+async function loadRepeaters() {
+  try {
+    const r = await fetch('/api/v1/admin/repeaters', {credentials:'same-origin'});
+    if (!r.ok) return;
+    const j = await r.json();
+    const cur = elRep.value;
+    elRep.innerHTML = '<option value="">— alle —</option>';
+    for (const rep of j.repeaters) {
+      const opt = document.createElement('option');
+      opt.value = rep.id;
+      const last = rep.last_seen_at ? '' : ' (offline)';
+      opt.textContent = rep.name + ' [' + rep.scope + ']' + last;
+      elRep.appendChild(opt);
+    }
+    if (cur) elRep.value = cur;
+  } catch (e) { /* ignore */ }
+}
+
+function buildQuery() {
+  const p = new URLSearchParams();
+  if (elRep.value) p.set('repeater_id', elRep.value);
+  if (elPayload.value) p.set('payload_type', elPayload.value);
+  if (elSince.value) p.set('since', elSince.value);
+  p.set('limit', elLimit.value || '200');
+  return p.toString();
+}
+
+function row(p) {
+  const tr = document.createElement('tr');
+  tr.dataset.id = p.id;
+  if (p.dropped_reason) tr.classList.add('dropped');
+  if (selectedId !== null && p.id === selectedId) tr.classList.add('selected');
+  const cells = [
+    fmtTime(p.ts),
+    p.site_name || (p.site_id ? p.site_id.slice(0,8) : '?'),
+    p.route_type,
+    p.payload_type,
+    p.raw_size,
+    String(p.path_hashes.length),
+  ];
+  for (const c of cells) {
+    const td = document.createElement('td');
+    td.textContent = c;
+    tr.appendChild(td);
+  }
+  tr.addEventListener('click', () => { selectPacket(p.id); });
+  return tr;
+}
+
+async function refresh() {
+  try {
+    const r = await fetch('/api/v1/admin/inspector/packets?' + buildQuery(), {credentials:'same-origin'});
+    if (!r.ok) { elStat.textContent = 'fetch ' + r.status; return; }
+    const j = await r.json();
+    elRows.replaceChildren(...j.packets.map(row));
+    elStat.textContent = j.packets.length + ' Pakete';
+  } catch (e) {
+    elStat.textContent = 'fetch-fail: ' + e;
+  }
+}
+
+function escape(s) {
+  return String(s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+}
+
+function classifyByte(off, regions) {
+  if (regions.header && off >= regions.header[0] && off < regions.header[1]) return 'b-header';
+  if (regions.path_len && off >= regions.path_len[0] && off < regions.path_len[1]) return 'b-pathlen';
+  if (regions.path && off >= regions.path[0] && off < regions.path[1]) return 'b-path';
+  return 'b-body';
+}
+
+function renderHex(hex, regions) {
+  if (!hex) return '<span class="insp-empty">leer</span>';
+  const bytes = [];
+  for (let i = 0; i < hex.length; i += 2) bytes.push(parseInt(hex.substr(i, 2), 16));
+  const out = [];
+  for (let i = 0; i < bytes.length; i += 16) {
+    const off = i.toString(16).padStart(4, '0');
+    const slice = bytes.slice(i, i + 16);
+    const hexParts = slice.map((b, k) => {
+      const cls = classifyByte(i + k, regions);
+      return '<span class="' + cls + '">' + b.toString(16).padStart(2, '0') + '</span>';
+    });
+    while (hexParts.length < 16) hexParts.push('  ');
+    const left = hexParts.slice(0, 8).join(' ');
+    const right = hexParts.slice(8).join(' ');
+    const ascii = slice.map(b => (b >= 0x20 && b < 0x7f) ? String.fromCharCode(b) : '.').join('');
+    out.push(off + '  ' + left + '  ' + right + '  |' + escape(ascii) + '|');
+  }
+  return out.join('\n');
+}
+
+async function selectPacket(id) {
+  selectedId = id;
+  for (const tr of elRows.querySelectorAll('tr')) {
+    tr.classList.toggle('selected', Number(tr.dataset.id) === id);
+  }
+  try {
+    const r = await fetch('/api/v1/admin/inspector/packets/' + id, {credentials:'same-origin'});
+    if (!r.ok) {
+      elDetail.innerHTML = '<div class="insp-empty">fetch ' + r.status + '</div>';
+      return;
+    }
+    const p = await r.json();
+    renderDetail(p);
+  } catch (e) {
+    elDetail.innerHTML = '<div class="insp-empty">fetch-fail: ' + escape(e) + '</div>';
+  }
+}
+
+function renderDetail(p) {
+  const d = p.decoded;
+  const r = d.regions || {};
+  const fwd = (p.forwarded_to || []).map(f => f.name || (f.site_id || '').slice(0,8)).join(', ') || '—';
+  const path = p.path_hashes.length ? p.path_hashes.join(' › ') : '—';
+  const drop = p.dropped_reason ? '<span class="pill drop">' + escape(p.dropped_reason) + '</span>' : '';
+  let advertHtml = '';
+  if (p.advert_pubkey) {
+    advertHtml = '<dt>ADVERT pubkey</dt><dd>' + escape(p.advert_pubkey) + '</dd>';
+  }
+  elDetail.innerHTML = `
+    <h3>Paket #${p.id} ${drop}</h3>
+    <dl>
+      <dt>Zeit</dt><dd>${escape(fmtTime(p.ts))} <span class="pill">${escape(p.scope)}</span></dd>
+      <dt>Repeater</dt><dd>${escape(p.site_name || '')} <span style="color:var(--muted)">${escape(p.site_id)}</span></dd>
+      <dt>Route</dt><dd>${escape(p.route_type)} <span style="color:var(--muted)">(bits ${d.route_type_bits ?? '–'})</span></dd>
+      <dt>Payload</dt><dd>${escape(p.payload_type)} <span style="color:var(--muted)">(bits ${d.payload_type_bits ?? '–'})</span></dd>
+      <dt>Header</dt><dd>${escape(d.header_byte || '–')} (${escape(d.header_bits || '–')}, version=${d.version ?? '–'})</dd>
+      <dt>Größe</dt><dd>${p.raw_size} Bytes</dd>
+      <dt>Path</dt><dd>${escape(path)}</dd>
+      <dt>Forwarded</dt><dd>${escape(fwd)}</dd>
+      ${advertHtml}
+    </dl>
+    <h3>Hex-Dump</h3>
+    <div class="hexdump">${renderHex(p.raw_hex, r)}</div>
+    <p style="color:var(--muted);font-size:.78rem;margin-top:.6rem">
+      Legende:
+      <span class="b-header" style="background:rgba(255,200,90,.30);padding:0 4px">Header</span>
+      <span class="b-pathlen" style="background:rgba(255,160,80,.25);padding:0 4px">Path-Len</span>
+      <span class="b-path" style="background:rgba(120,210,140,.22);padding:0 4px">Path-Hashes</span>
+      <span style="padding:0 4px">Body (verschlüsselt)</span>
+    </p>
+  `;
+}
+
+function arm() {
+  if (timer) clearInterval(timer);
+  if (elAuto.checked) timer = setInterval(refresh, 5000);
+}
+
+['change'].forEach(ev => {
+  elRep.addEventListener(ev, refresh);
+  elPayload.addEventListener(ev, refresh);
+  elSince.addEventListener(ev, refresh);
+  elLimit.addEventListener('change', refresh);
+  elAuto.addEventListener(ev, arm);
+});
+document.getElementById('btn-reload').addEventListener('click', refresh);
+
+loadRepeaters().then(refresh).then(arm);
+</script>
+{% endblock %}
