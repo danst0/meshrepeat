@@ -454,6 +454,23 @@ code, pre {
   .conv-action-btn { width: 44px; height: 44px; min-height: 44px; }
 }
 
+/* Login-Status-Pill neben dem 🔑-Button. Wird per JS gefüllt aus dem
+   /login-state-Endpoint und SSE-Events. */
+.login-pill {
+  font-size: .75rem;
+  padding: .15rem .5rem;
+  border-radius: 999px;
+  background: rgba(173,219,103,.18);
+  color: var(--ok);
+  border: 1px solid rgba(173,219,103,.4);
+  white-space: nowrap;
+}
+.login-pill.expired {
+  background: rgba(95,126,151,.15);
+  color: var(--muted);
+  border-color: var(--border);
+}
+
 /* Liveness-Dot pro DM-Sidebar-Zeile aus last_ts.
    .live-dot--fresh: <15min, --recent: <1h, --stale: <24h, --gone: >24h */
 .live-dot {

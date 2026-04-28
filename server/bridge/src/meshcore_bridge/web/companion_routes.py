@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any
@@ -17,6 +18,7 @@ from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import desc, select
+from sqlalchemy import func as sa_func
 from sqlalchemy import text as sql_text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -357,7 +359,9 @@ def _hop_count(raw: bytes | None) -> int | None:
         return None
 
 
-def _message_dict(m: CompanionMessage) -> dict[str, Any]:
+def _message_dict(
+    m: CompanionMessage, *, room_sender_name: str | None = None
+) -> dict[str, Any]:
     return {
         "id": str(m.id),
         "direction": m.direction,
@@ -368,7 +372,50 @@ def _message_dict(m: CompanionMessage) -> dict[str, Any]:
         "text": m.text,
         "ts": _ts_iso(m.ts),
         "hops": _hop_count(m.raw),
+        "room_sender_prefix_hex": (
+            m.room_sender_pubkey.hex() if m.room_sender_pubkey else None
+        ),
+        "room_sender_name": room_sender_name,
     }
+
+
+async def _resolve_room_sender_names(
+    db: AsyncSession,
+    identity_id: UUID,
+    messages: list[CompanionMessage],
+) -> dict[bytes, str]:
+    """Eine Subquery für alle in den Messages vorkommenden 4-Byte-Author-
+    Prefixes — vermeidet N+1. Bei Prefix-Kollisionen gewinnt der Contact
+    mit dem jüngsten last_seen_at."""
+    prefixes = {
+        bytes(m.room_sender_pubkey)
+        for m in messages
+        if m.room_sender_pubkey
+    }
+    if not prefixes:
+        return {}
+    rows = list(
+        (
+            await db.execute(
+                select(CompanionContact).where(
+                    CompanionContact.identity_id == identity_id,
+                    sa_func.substr(CompanionContact.peer_pubkey, 1, 4).in_(prefixes),
+                )
+            )
+        ).scalars()
+    )
+    out: dict[bytes, str] = {}
+    out_seen: dict[bytes, datetime] = {}
+    for c in rows:
+        if not c.peer_name:
+            continue
+        prefix = bytes(c.peer_pubkey[:4])
+        last = c.last_seen_at or datetime.min.replace(tzinfo=UTC)
+        prev = out_seen.get(prefix)
+        if prev is None or last > prev:
+            out[prefix] = c.peer_name
+            out_seen[prefix] = last
+    return out
 
 
 @router.get("/identities/{identity_id}/threads")
@@ -438,6 +485,7 @@ async def list_identity_threads(
                 "peer_pubkey_hex": c.peer_pubkey.hex(),
                 "peer_name": c.peer_name,
                 "favorite": bool(c.favorite),
+                "node_type": c.node_type,
                 "last_ts": last_ts,
                 "last_text": last.text if last else None,
                 "last_direction": last.direction if last else None,
@@ -506,8 +554,19 @@ async def list_dm_messages(
     rows = list((await db.execute(q)).scalars())
     next_cursor = _ts_iso(rows[-1].ts) if len(rows) == limit and rows else None
     rows.reverse()
+    name_by_prefix = await _resolve_room_sender_names(db, identity_id, rows)
     return {
-        "messages": [_message_dict(m) for m in rows],
+        "messages": [
+            _message_dict(
+                m,
+                room_sender_name=(
+                    name_by_prefix.get(bytes(m.room_sender_pubkey))
+                    if m.room_sender_pubkey
+                    else None
+                ),
+            )
+            for m in rows
+        ],
         "next_cursor": next_cursor,
     }
 
@@ -689,6 +748,38 @@ async def request_contact_login(
     if not ok:
         raise HTTPException(status_code=409, detail="identity not loaded in service")
     return {"ok": True, "ts": datetime.now(UTC).isoformat()}
+
+
+@router.get(
+    "/identities/{identity_id}/contacts/{peer_pubkey_hex}/login-state",
+    response_model=None,
+)
+async def get_contact_login_state(
+    request: Request,
+    identity_id: UUID,
+    peer_pubkey_hex: str,
+    user: User = Depends(current_user_required),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Aktueller in-memory Login-Status für (Identity, Peer). Wird vom
+    Companion-Frontend gepollt, um „eingeloggt"-Pill am Konvo-Header zu
+    rendern. Geht beim Container-Restart verloren — Werte sind eine
+    Heuristik, kein verlässlicher Server-Vertrag."""
+    peer = await _validate_peer_for_request(db, user.id, identity_id, peer_pubkey_hex)
+    svc = _service(request)
+    if svc is None:
+        raise HTTPException(status_code=503, detail="companion-service not running")
+    session = svc.get_login_session(identity_id, peer)
+    if session is None:
+        return {"logged_in": False}
+    expires_in_s = max(0, int(session.expires_at - time.monotonic()))
+    expires_at = (datetime.now(UTC) + timedelta(seconds=expires_in_s)).isoformat()
+    return {
+        "logged_in": True,
+        "expires_at": expires_at,
+        "is_admin": session.is_admin,
+        "permissions": session.permissions,
+    }
 
 
 @router.post("/identities/{identity_id}/contacts/{peer_pubkey_hex}/status", response_model=None)
@@ -1144,6 +1235,7 @@ async def companion_detail(
                 "pubkey_hex": c.peer_pubkey.hex(),
                 "contact_id": str(c.id),
                 "favorite": bool(c.favorite),
+                "node_type": c.node_type,
             }
         )
     for name in chan_sender_rows:

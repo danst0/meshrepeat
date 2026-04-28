@@ -137,6 +137,15 @@
   function shortHex(hex, n=8) { return hex ? hex.slice(0,n)+"…" : ""; }
   function escText(s) { const d = document.createElement("div"); d.textContent = s ?? ""; return d.innerHTML; }
 
+  // ADV_TYPE → Icon-Prefix für Sidebar-Einträge.
+  // 1=Chat (kein Icon), 2=Repeater, 3=Room, 4=Sensor.
+  function nodeTypeIcon(t) {
+    if (t === 3) return "🏠 ";
+    if (t === 2) return "📡 ";
+    if (t === 4) return "🌡 ";
+    return "";
+  }
+
   function liveTier(iso) {
     // Frische-Klassifikation aus last_ts. Tier-Namen werden 1:1 für
     // .live-dot--<tier> (Sidebar) und Pin-Farbe (Map) genutzt.
@@ -195,6 +204,7 @@
         peer_pubkey_hex: t.pubkey_hex,
         peer_name: t.name,
         favorite: !!t.favorite,
+        node_type: t.node_type ?? null,
         last_ts: null,
         last_text: null,
         last_direction: null,
@@ -327,13 +337,14 @@
       item.type = "button";
       item.className = "thread-item thread-item-bare";
       const peer = escText(t.peer_name || shortHex(t.peer_pubkey_hex, 12));
+      const icon = nodeTypeIcon(t.node_type);
       const last = t.last_text
         ? escText(t.last_text).slice(0, 40)
         : '<span style="color:var(--muted)">—</span>';
       const dot = `<span class="live-dot ${liveClass(t.last_ts)}" title="letzter Verkehr: ${t.last_ts || 'nie'}"></span>`;
-      item.innerHTML = `<div class="thread-top"><span class="thread-name">${dot}${peer}</span><span class="thread-time">${fmtTime(t.last_ts)}</span></div>
+      item.innerHTML = `<div class="thread-top"><span class="thread-name">${dot}${icon}${peer}</span><span class="thread-time">${fmtTime(t.last_ts)}</span></div>
                         <div class="thread-snip">${last}</div>`;
-      item.addEventListener("click", () => selectDm(t.peer_pubkey_hex, t.peer_name));
+      item.addEventListener("click", () => selectDm(t.peer_pubkey_hex, t.peer_name, {node_type: t.node_type}));
       wrap.appendChild(item);
 
       const badge = document.createElement("span");
@@ -356,7 +367,12 @@
   }
 
   async function selectDm(peerHex, peerName, opts={}) {
-    active = {kind:"dm", peer: peerHex, peer_name: peerName || null};
+    active = {
+      kind: "dm",
+      peer: peerHex,
+      peer_name: peerName || null,
+      node_type: opts.node_type ?? null,
+    };
     nextCursor = null;
     const spec = "dm:" + peerHex;
     patchHash({tab:"chats", conv: spec});
@@ -368,8 +384,44 @@
     await loadDmMessages(peerHex, {replace: true});
     clearUnread("dm:" + peerHex);
     markActiveThread();
+    refreshLoginPill();
     if (MQ_MOBILE.matches) setMobileView("conv");
     if (opts.scrollToId) scrollToMessageId(opts.scrollToId);
+  }
+
+  // ---------- Login-Pill ----------
+  function fmtLoginPill(payload) {
+    if (!payload || !payload.logged_in) return null;
+    const role = payload.is_admin ? "admin" : "guest";
+    let until = "";
+    if (payload.expires_at) {
+      try {
+        const d = new Date(payload.expires_at);
+        until = " · bis " + d.toLocaleTimeString([], {hour:"2-digit", minute:"2-digit"});
+      } catch(_) { /* ignore */ }
+    }
+    return `🔓 ${role}${until}`;
+  }
+  function setLoginPill(text, expired) {
+    const el = document.getElementById("login-pill");
+    if (!el) return;
+    if (!text) { el.hidden = true; el.textContent = ""; return; }
+    el.hidden = false;
+    el.textContent = text;
+    el.classList.toggle("expired", !!expired);
+  }
+  async function refreshLoginPill() {
+    if (!active || active.kind !== "dm") { setLoginPill(null); return; }
+    const peer = active.peer;
+    try {
+      const url = `${API}/identities/${IDENTITY_ID}/contacts/${peer}/login-state`;
+      const r = await fetch(url, {credentials: "same-origin"});
+      if (!r.ok) { setLoginPill(null); return; }
+      const j = await r.json();
+      // Active könnte sich währenddessen geändert haben.
+      if (!active || active.kind !== "dm" || active.peer !== peer) return;
+      setLoginPill(fmtLoginPill(j), false);
+    } catch(_) { setLoginPill(null); }
   }
 
   async function selectChannel(channelId, channelName, opts={}) {
@@ -385,6 +437,7 @@
     await loadChannelMessages(channelId, {replace: true});
     clearUnread("ch:" + channelId);
     markActiveThread();
+    setLoginPill(null);
     if (MQ_MOBILE.matches) setMobileView("conv");
     if (opts.scrollToId) scrollToMessageId(opts.scrollToId);
   }
@@ -449,9 +502,18 @@
     const cls = m.direction === "system"
       ? "system"
       : (m.direction === "out" ? "out" : "in");
-    const who = m.direction === "out"
-      ? "me"
-      : (m.peer_name || (m.peer_pubkey_hex ? shortHex(m.peer_pubkey_hex, 8) : "?"));
+    // Bei einem Room-Push (room_sender_prefix_hex gesetzt) ist peer_name
+    // der Room — der eigentliche Autor steckt nur als 4-Byte-Prefix drin,
+    // ggf. schon zu einem Namen aufgelöst.
+    const isRoomPost = !!m.room_sender_prefix_hex;
+    let who;
+    if (m.direction === "out") {
+      who = "me";
+    } else if (isRoomPost) {
+      who = m.room_sender_name || ("…" + (m.room_sender_prefix_hex || ""));
+    } else {
+      who = m.peer_name || (m.peer_pubkey_hex ? shortHex(m.peer_pubkey_hex, 8) : "?");
+    }
     const hopsTxt = m.direction === "in" ? fmtHops(m.hops) : "";
     const div = document.createElement("div");
     div.className = "message " + cls;
@@ -752,15 +814,20 @@
     if (!active || active.kind !== "dm") return;
     const btnId = {login: "btn-login", status: "btn-status", telemetry: "btn-telemetry"}[kind];
     const btn = btnId ? document.getElementById(btnId) : null;
+    let password = null;
+    if (kind === "login") {
+      // Rooms brauchen typischerweise ein Passwort (z.B. „hello"),
+      // Repeater oft nur Guest. Cancel = Login abbrechen.
+      password = window.prompt("Passwort für Login (leer = Guest):", "");
+      if (password === null) return;
+    }
     if (btn) btn.disabled = true;
     try {
       const url = `${API}/identities/${IDENTITY_ID}/contacts/${active.peer}/${kind}`;
-      // Login akzeptiert optional Password (form). Aktuell senden wir leer
-      // = Guest-Login. Spätere UI-Erweiterung: Password-Prompt.
       const init = {method: "POST", credentials: "same-origin"};
       if (kind === "login") {
         const fd = new FormData();
-        fd.append("password", "");
+        fd.append("password", password || "");
         init.body = fd;
       }
       const r = await fetch(url, init);
@@ -1047,6 +1114,28 @@
       const peerHex = evt.peer_pubkey_hex;
       if (active && active.kind === "dm" && active.peer === peerHex) {
         appendIncomingMessage(evt);
+      }
+      if (t === "login_response" && active && active.kind === "dm" && active.peer === peerHex) {
+        // Frische Login-Pill direkt aus dem Event ableiten — vermeidet
+        // ein zusätzliches /login-state-Roundtrip.
+        const text = fmtLoginPill({
+          logged_in: true,
+          is_admin: evt.is_admin,
+          expires_at: evt.logged_in_until,
+        });
+        setLoginPill(text, false);
+      }
+      loadThreads();
+    } else if (t === "room_post") {
+      // Push vom Room-Server: peer_pubkey_hex ist der Room, room_sender_*
+      // identifiziert den eigentlichen Autor. Sonst wie bei "dm".
+      const peerHex = evt.peer_pubkey_hex;
+      if (active && active.kind === "dm" && active.peer === peerHex) {
+        appendIncomingMessage(evt);
+        clearUnread("dm:" + peerHex);
+      } else {
+        bumpUnread("dm:" + peerHex);
+        maybeNotify(evt);
       }
       loadThreads();
     } else if (t === "contact_update") {

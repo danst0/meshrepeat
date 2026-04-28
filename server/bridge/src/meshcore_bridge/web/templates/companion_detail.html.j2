@@ -49,7 +49,8 @@
           <button type="button" class="conv-back" aria-label="Zurück zur Liste">←</button>
           <span id="conv-title">Wähle einen Chat oder starte einen DM.</span>
           <div id="conv-actions" class="conv-actions" hidden>
-            <button type="button" id="btn-login" class="conv-action-btn" title="ANON_REQ-Login (Guest, leeres Passwort) — Voraussetzung für Status/Telemetrie an Repeater">🔑</button>
+            <button type="button" id="btn-login" class="conv-action-btn" title="ANON_REQ-Login (Repeater-Status oder Room-Beitritt — Passwort wird beim Klick erfragt)">🔑</button>
+            <span id="login-pill" class="login-pill" hidden></span>
             <button type="button" id="btn-status" class="conv-action-btn" title="Status (Ping + Repeater-Stats) anfragen — vorher Login nötig">ℹ</button>
             <button type="button" id="btn-telemetry" class="conv-action-btn" title="Telemetrie (GPS + Sensoren) anfragen">📡</button>
           </div>

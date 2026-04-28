@@ -22,7 +22,7 @@ import hashlib
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 from uuid import UUID
 
@@ -38,11 +38,14 @@ from meshcore_companion.crypto import (
 )
 from meshcore_companion.node import (
     ADV_TYPE_CHAT,
+    ADV_TYPE_ROOM,
     CompanionNode,
     IncomingChannelMessage,
     IncomingResponse,
+    IncomingRoomPost,
     IncomingTextMessage,
     compute_dm_ack_hash,
+    compute_room_ack_hash,
     encode_advert_app_data,
     parse_advert_app_data,
     parse_login_response,
@@ -106,6 +109,23 @@ class LoadedIdentity:
 
 
 @dataclass
+class LoginSession:
+    """In-Memory-Session nach erfolgreichem ANON_REQ-Login an einem
+    Repeater oder Room. Der Server selbst hält keinen sichtbaren Session-
+    Timeout, daher ist die TTL hier eine Heuristik (Frontend-Hinweis).
+    Geht beim Container-Restart verloren — User muss sich neu einloggen.
+    """
+
+    expires_at: float  # monotonic seconds
+    is_admin: bool
+    permissions: int
+
+
+# Default-TTL für eingeloggte Sessions (1 Stunde).
+_LOGIN_SESSION_TTL_S = 3600
+
+
+@dataclass
 class CompanionService:
     master_key: bytes
     sessionmaker: Callable[[], AsyncSession]
@@ -124,6 +144,8 @@ class CompanionService:
     # Wird beim Empfang einer RESPONSE konsultiert, um die Antwort dem
     # passenden Request-Typ zuzuordnen (Status vs Telemetrie vs ...).
     _pending_reqs: dict[int, tuple[float, int, UUID, bytes]] = field(default_factory=dict)
+    # Aktive Login-Sessions (in-memory). Key = (identity_id, peer_pubkey).
+    _login_sessions: dict[tuple[UUID, bytes], LoginSession] = field(default_factory=dict)
 
     async def _emit(self, identity_id: UUID, event: dict) -> None:
         if self.notify is None:
@@ -320,6 +342,20 @@ class CompanionService:
             await self.inject(pkt, loaded.scope)
         return True
 
+    def get_login_session(
+        self, identity_id: UUID, peer_pubkey: bytes
+    ) -> LoginSession | None:
+        """Liefert eine aktive LoginSession oder ``None`` wenn ausgeloggt
+        bzw. abgelaufen. Räumt nebenbei abgelaufene Einträge auf."""
+        key = (identity_id, peer_pubkey)
+        session = self._login_sessions.get(key)
+        if session is None:
+            return None
+        if session.expires_at <= time.monotonic():
+            self._login_sessions.pop(key, None)
+            return None
+        return session
+
     async def request_login(
         self,
         *,
@@ -327,9 +363,9 @@ class CompanionService:
         peer_pubkey: bytes,
         password: str = "",
     ) -> bool:
-        """ANON_REQ-Login bei einem Repeater. Bei leerem Passwort versucht
-        der Repeater einen Guest-Match (oft erlaubt). Antwort kommt als
-        RESPONSE mit ``RESP_SERVER_LOGIN_OK``."""
+        """ANON_REQ-Login bei einem Repeater oder Room. Bei leerem Passwort
+        versucht der Server einen Guest-Match (oft erlaubt). Antwort kommt
+        als RESPONSE mit ``RESP_SERVER_LOGIN_OK``."""
         loaded = self._by_id.get(identity_id)
         if loaded is None:
             return False
@@ -626,6 +662,7 @@ class CompanionService:
                         last_seen_at=datetime.now(UTC),
                         last_lat=parsed.lat,
                         last_lon=parsed.lon,
+                        node_type=parsed.adv_type or None,
                     )
                     db.add(contact)
                 else:
@@ -638,6 +675,8 @@ class CompanionService:
                     if parsed.lat is not None and parsed.lon is not None:
                         contact.last_lat = parsed.lat
                         contact.last_lon = parsed.lon
+                    if parsed.adv_type:
+                        contact.node_type = parsed.adv_type
                 await db.commit()
             await self._emit(
                 loaded.id,
@@ -647,6 +686,7 @@ class CompanionService:
                     "peer_name": name,
                     "lat": parsed.lat,
                     "lon": parsed.lon,
+                    "node_type": parsed.adv_type or None,
                     "ts": datetime.now(UTC).isoformat(),
                 },
             )
@@ -667,6 +707,28 @@ class CompanionService:
                         )
                     ).scalars()
                 )
+            # Room-Pushes haben das gleiche äußere Wire-Layout wie eine DM,
+            # nutzen aber TXT_TYPE_SIGNED_PLAIN und tragen einen 4-Byte-
+            # author-prefix im Plaintext. try_decrypt_dm würde sie wegen
+            # txt_type-Mismatch verwerfen, daher zuerst den Room-Decode mit
+            # genau den Room-Contacts probieren (sonst kein No-Op).
+            rooms = [c for c in contacts if c.node_type == ADV_TYPE_ROOM]
+            room_post: IncomingRoomPost | None = None
+            if rooms:
+                room_post = loaded.node.try_decrypt_room_push(
+                    packet=pkt,
+                    room_candidates=[Identity(c.peer_pubkey) for c in rooms],
+                )
+            if room_post is not None:
+                await self._handle_room_push(
+                    loaded=loaded,
+                    pkt=pkt,
+                    raw=raw,
+                    room_post=room_post,
+                    contacts=contacts,
+                    scope=scope,
+                )
+                return
             cands = [Identity(c.peer_pubkey) for c in contacts]
             decoded: IncomingTextMessage | None = loaded.node.try_decrypt_dm(
                 packet=pkt, peer_candidates=cands
@@ -767,6 +829,129 @@ class CompanionService:
                 except Exception:
                     _log.exception("dm_ack_send_failed")
             return  # erste Identity, die's lesen kann, gewinnt
+
+    async def _handle_room_push(
+        self,
+        *,
+        loaded: LoadedIdentity,
+        pkt: Packet,
+        raw: bytes,
+        room_post: IncomingRoomPost,
+        contacts: list,  # list[CompanionContact], type-erased zur Vermeidung des Imports
+        scope: str,
+    ) -> None:
+        """Persistiere einen Room-Server-Push und ACKe ihn.
+
+        Der äußere Sender im Wire ist der Room-Server (``room_pubkey``);
+        der eigentliche Autor des Posts kommt nur als 4-Byte-Prefix im
+        Plaintext. Wir versuchen, den Autor anhand der existierenden
+        Contact-Liste der Identity aufzulösen — bei mehreren Match-
+        Kandidaten (Prefix-Kollision) den mit dem jüngsten ``last_seen_at``.
+        Kein Treffer → ``author_name=None`` (Frontend zeigt dann den
+        Hex-Prefix).
+        """
+        from meshcore_bridge.db import CompanionMessage
+
+        room_contact = next(
+            (c for c in contacts if c.peer_pubkey == room_post.room_pubkey), None
+        )
+        room_name = room_contact.peer_name if room_contact else None
+
+        author_candidates = [
+            c
+            for c in contacts
+            if c.peer_pubkey[:4] == room_post.author_prefix
+        ]
+        author_contact = None
+        if author_candidates:
+            author_contact = max(
+                author_candidates,
+                key=lambda c: c.last_seen_at or datetime.min.replace(tzinfo=UTC),
+            )
+        author_name = author_contact.peer_name if author_contact else None
+
+        msg_ts = datetime.fromtimestamp(room_post.timestamp, UTC)
+        async with self.sessionmaker() as db:
+            existing = (
+                await db.execute(
+                    select(CompanionMessage.id).where(
+                        CompanionMessage.identity_id == loaded.id,
+                        CompanionMessage.peer_pubkey == room_post.room_pubkey,
+                        CompanionMessage.payload_type == int(PayloadType.TXT_MSG),
+                        CompanionMessage.ts == msg_ts,
+                        CompanionMessage.room_sender_pubkey == room_post.author_prefix,
+                    )
+                )
+            ).scalar_one_or_none()
+            if existing is None:
+                new_msg = CompanionMessage(
+                    identity_id=loaded.id,
+                    direction="in",
+                    payload_type=int(PayloadType.TXT_MSG),
+                    peer_pubkey=room_post.room_pubkey,
+                    peer_name=room_name,
+                    text=room_post.text,
+                    raw=raw,
+                    ts=msg_ts,
+                    room_sender_pubkey=room_post.author_prefix,
+                )
+                db.add(new_msg)
+                await db.commit()
+                await self._emit(
+                    loaded.id,
+                    {
+                        "type": "room_post",
+                        "id": str(new_msg.id),
+                        "ts": msg_ts.isoformat(),
+                        "peer_pubkey_hex": room_post.room_pubkey.hex(),
+                        "peer_name": room_name,
+                        "room_sender_prefix_hex": room_post.author_prefix.hex(),
+                        "room_sender_name": author_name,
+                        "text": room_post.text,
+                        "direction": "in",
+                        "hops": pkt.hop_count,
+                    },
+                )
+            else:
+                _log.info(
+                    "room_post_retry_dedup",
+                    room=room_post.room_pubkey[:4].hex(),
+                    author=room_post.author_prefix.hex(),
+                    ts=room_post.timestamp,
+                )
+
+        # ACK über den vollen Plaintext + eigener (Empfänger-)Pubkey;
+        # PATH-Return bei FLOOD-RX analog zum DM-Branch.
+        if self.inject is not None:
+            ack_hash = compute_room_ack_hash(
+                full_plain=room_post.full_plain,
+                receiver_pubkey=loaded.pubkey,
+            )
+            try:
+                if pkt.route_type == RouteType.FLOOD:
+                    path_pkt = loaded.node.make_path_return(
+                        peer_pubkey=room_post.room_pubkey,
+                        rx_path_len_byte=pkt.path_len_byte,
+                        rx_path_bytes=pkt.path,
+                        extra_type=int(PayloadType.ACK),
+                        extra_data=ack_hash,
+                    )
+                    await self.inject(path_pkt, scope)
+                ack_pkt = loaded.node.make_ack(ack_hash)
+                await self.inject(ack_pkt, scope)
+                _log.info(
+                    "room_ack_sent",
+                    room=room_post.room_pubkey[:4].hex(),
+                    author=room_post.author_prefix.hex(),
+                    ts=room_post.timestamp,
+                    flags=room_post.flags,
+                    text_len=len(room_post.text.encode("utf-8")),
+                    ack=ack_hash.hex(),
+                    route=pkt.route_type.name,
+                    rx_hops=pkt.hop_count,
+                )
+            except Exception:
+                _log.exception("room_ack_send_failed")
 
     async def _handle_inbound_grp_txt(
         self, *, pkt: Packet, scope: str, raw: bytes
@@ -980,11 +1165,23 @@ class CompanionService:
                     f"🔑 Login OK · RTT {rtt_part} · "
                     f"Rolle {role} · Permissions 0x{login.permissions:02x}"
                 )
+                # Session merken — TTL ist eine Heuristik, Server-Server-
+                # seitige Ablaufzeit kennen wir nicht zuverlässig.
+                session = LoginSession(
+                    expires_at=time.monotonic() + _LOGIN_SESSION_TTL_S,
+                    is_admin=login.is_admin,
+                    permissions=login.permissions,
+                )
+                self._login_sessions[(loaded.id, sender_pubkey)] = session
+                expires_iso = (
+                    datetime.now(UTC) + timedelta(seconds=_LOGIN_SESSION_TTL_S)
+                ).isoformat()
                 event_type = "login_response"
                 event_extra = {
                     "rtt_ms": rtt_ms,
                     "is_admin": login.is_admin,
                     "permissions": login.permissions,
+                    "logged_in_until": expires_iso,
                 }
 
             elif req_type == self.REQ_TYPE_STATUS:

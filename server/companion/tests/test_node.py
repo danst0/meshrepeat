@@ -299,3 +299,100 @@ def test_path_return_wire_format() -> None:
     assert plain[1:3] == rx_path
     assert plain[3] == int(PayloadType.ACK)
     assert plain[4:8] == ack_hash
+
+
+def _build_room_push_packet(
+    *,
+    room: CompanionNode,
+    receiver_pubkey: bytes,
+    timestamp: int,
+    author_prefix: bytes,
+    text: str,
+    attempt: int = 0,
+) -> tuple[Packet, bytes]:
+    """Baut einen Room-Server-Push gemäß firmware
+    examples/simple_room_server/MyMesh.cpp:53-69. Liefert das Paket und
+    den vollen Plaintext (für ACK-Hash-Vergleich)."""
+    flags = (2 << 2) | (attempt & 3)  # TXT_TYPE_SIGNED_PLAIN=2
+    plain = (
+        struct.pack("<I", timestamp)
+        + bytes([flags])
+        + author_prefix
+        + text.encode("utf-8")
+    )
+    secret = room.local.calc_shared_secret(receiver_pubkey)
+    encrypted = encrypt_then_mac(secret, plain)
+    body = receiver_pubkey[:1] + room.pub_key[:1] + encrypted
+    pkt = Packet(
+        route_type=RouteType.FLOOD,
+        payload_type=PayloadType.TXT_MSG,
+        payload=body,
+    )
+    return pkt, plain
+
+
+def test_room_push_decode_roundtrip() -> None:
+    room = CompanionNode(LocalIdentity.generate())
+    antonia = CompanionNode(LocalIdentity.generate())
+    fake_author = LocalIdentity.generate()
+    pkt, _plain = _build_room_push_packet(
+        room=room,
+        receiver_pubkey=antonia.pub_key,
+        timestamp=98765,
+        author_prefix=fake_author.pub_key[:4],
+        text="hi from bob",
+    )
+    decoded = antonia.try_decrypt_room_push(
+        packet=pkt, room_candidates=[Identity(room.pub_key)]
+    )
+    assert decoded is not None
+    assert decoded.room_pubkey == room.pub_key
+    assert decoded.author_prefix == fake_author.pub_key[:4]
+    assert decoded.timestamp == 98765
+    assert decoded.text == "hi from bob"
+
+
+def test_room_push_decode_rejects_plain_dm() -> None:
+    """Eine reguläre DM (txt_type=0) darf nicht als Room-Push durchgehen —
+    sonst würden die ersten 4 Body-Bytes fälschlich als Author-Prefix
+    interpretiert."""
+    alice = CompanionNode(LocalIdentity.generate())
+    bob = CompanionNode(LocalIdentity.generate())
+    pkt = alice.make_dm(peer_pubkey=bob.pub_key, text="reguläre DM")
+    decoded = bob.try_decrypt_room_push(
+        packet=pkt, room_candidates=[Identity(alice.pub_key)]
+    )
+    assert decoded is None
+
+
+def test_room_push_decode_rejects_unknown_room() -> None:
+    room = CompanionNode(LocalIdentity.generate())
+    antonia = CompanionNode(LocalIdentity.generate())
+    pkt, _ = _build_room_push_packet(
+        room=room,
+        receiver_pubkey=antonia.pub_key,
+        timestamp=1,
+        author_prefix=b"\x00\x00\x00\x00",
+        text="leak",
+    )
+    # Antonia kennt den Room nicht
+    decoded = antonia.try_decrypt_room_push(packet=pkt, room_candidates=[])
+    assert decoded is None
+
+
+def test_room_ack_hash_matches_firmware_formula() -> None:
+    """ack_hash = sha256(reply_data || receiver_pubkey)[:4] mit
+    reply_data = ts(4) || flags(1) || author_prefix(4) || text."""
+    import hashlib
+
+    from meshcore_companion.node import compute_room_ack_hash
+
+    receiver_pk = bytes(range(32))
+    ts = 12345
+    flags = (2 << 2) | 1  # TXT_TYPE_SIGNED_PLAIN=2, attempt=1
+    author_prefix = b"\xde\xad\xbe\xef"
+    text = b"hi"
+    full = struct.pack("<I", ts) + bytes([flags]) + author_prefix + text
+    expected = hashlib.sha256(full + receiver_pk).digest()[:4]
+    actual = compute_room_ack_hash(full_plain=full, receiver_pubkey=receiver_pk)
+    assert actual == expected

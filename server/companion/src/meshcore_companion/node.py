@@ -46,6 +46,17 @@ _TIMESTAMP_LEN = 4
 # Minimal-Größe eines entschlüsselten PATH-Plaintexts: 1B path_byte + 1B extra_type
 _PATH_HEADER_MIN_LEN = 2  # le-uint32, prepended to encrypted DM body
 
+# txt_type-Werte aus firmware/lib/meshcore/src/helpers/TxtDataHelpers.h
+TXT_TYPE_PLAIN = 0
+TXT_TYPE_CLI_DATA = 1
+TXT_TYPE_SIGNED_PLAIN = 2  # Room-Server-Push: enthält 4B-author-prefix vor dem Text
+
+# Plaintext-Layout eines Room-Push (siehe firmware
+# examples/simple_room_server/MyMesh.cpp:53-69 ``pushPostToClient``):
+#   [ts:4 LE] [flags:1] [author_pubkey_prefix:4] [text...]
+_ROOM_AUTHOR_PREFIX_LEN = 4
+_ROOM_PUSH_HEADER_LEN = _TIMESTAMP_LEN + 1 + _ROOM_AUTHOR_PREFIX_LEN
+
 # AdvertDataHelpers (firmware/lib/meshcore/src/helpers/AdvertDataHelpers.h):
 # app_data := flags(1) [lat(4) lon(4)]? [feat1(2)]? [feat2(2)]? [name…]?
 ADV_TYPE_NONE = 0
@@ -125,6 +136,26 @@ class IncomingTextMessage:
     timestamp: int
     text: str
     flags: int = 0  # raw flags-Byte aus plaintext[4], wichtig für ack_hash
+
+
+@dataclass
+class IncomingRoomPost:
+    """Ein vom Room-Server gepushter Post (TXT_MSG mit txt_type=SIGNED_PLAIN).
+
+    ``room_pubkey`` ist der Pubkey des Room-Servers (als Sender im äußeren
+    Wire). ``author_prefix`` sind die ersten 4 Bytes des Pubkey desjenigen,
+    der den Post ursprünglich abgesetzt hat (mehr ist im Push nicht drin —
+    Empfänger muss anhand des Prefix in der eigenen Contact-Liste suchen).
+    ``full_plain`` ist der gesamte entschlüsselte Plaintext-Block; der ACK-
+    Hash schließt ihn unverändert ein.
+    """
+
+    room_pubkey: bytes
+    author_prefix: bytes
+    timestamp: int
+    flags: int
+    text: str
+    full_plain: bytes
 
 
 @dataclass
@@ -251,6 +282,65 @@ class CompanionNode:
                 timestamp=ts,
                 text=text,
                 flags=flags,
+            )
+        return None
+
+    def try_decrypt_room_push(
+        self,
+        *,
+        packet: Packet,
+        room_candidates: list[Identity],
+    ) -> IncomingRoomPost | None:
+        """Room-Server-Push (TXT_MSG mit ``txt_type=SIGNED_PLAIN``) entschlüsseln.
+
+        Plaintext-Layout siehe firmware
+        ``examples/simple_room_server/MyMesh.cpp:53-69``::
+
+            [ts:4 LE] [flags:1] [author_pubkey_prefix:4] [text...]
+
+        Anders als bei DMs ist der äußere Sender (``src_hash``) der
+        **Room-Server**, nicht der ursprüngliche Autor. Den Autor
+        identifizieren wir nur per 4-Byte-Prefix; Auflösung auf einen
+        vollen Pubkey/Namen passiert beim Caller.
+        """
+        if packet.payload_type != PayloadType.TXT_MSG:
+            return None
+        body = packet.payload
+        if len(body) < 2 + 2:
+            return None
+        dest_hash = body[:PATH_HASH_SIZE]
+        if dest_hash != self.pub_hash:
+            return None
+        src_hash = body[PATH_HASH_SIZE : 2 * PATH_HASH_SIZE]
+        encrypted = body[2 * PATH_HASH_SIZE :]
+        for room in room_candidates:
+            if room.hash_prefix() != src_hash:
+                continue
+            secret = self.local.calc_shared_secret(room.pub_key)
+            plain = mac_then_decrypt(secret, encrypted)
+            if plain is None:
+                continue
+            if len(plain) < _ROOM_PUSH_HEADER_LEN:
+                continue
+            ts = int.from_bytes(plain[:_TIMESTAMP_LEN], "little", signed=False)
+            flags = plain[_TIMESTAMP_LEN]
+            txt_type = flags >> 2
+            if txt_type != TXT_TYPE_SIGNED_PLAIN:
+                continue
+            author_prefix = plain[
+                _TIMESTAMP_LEN + 1 : _TIMESTAMP_LEN + 1 + _ROOM_AUTHOR_PREFIX_LEN
+            ]
+            try:
+                text = plain[_ROOM_PUSH_HEADER_LEN:].rstrip(b"\x00").decode("utf-8")
+            except UnicodeDecodeError:
+                continue
+            return IncomingRoomPost(
+                room_pubkey=room.pub_key,
+                author_prefix=bytes(author_prefix),
+                timestamp=ts,
+                flags=flags,
+                text=text,
+                full_plain=bytes(plain),
             )
         return None
 
@@ -596,6 +686,22 @@ def compute_dm_ack_hash(
         + text_bytes
     )
     return hashlib.sha256(plaintext + sender_pubkey).digest()[:4]
+
+
+def compute_room_ack_hash(*, full_plain: bytes, receiver_pubkey: bytes) -> bytes:
+    """4-Byte-ACK-Hash für einen Room-Server-Push (firmware
+    ``simple_room_server/MyMesh.cpp:71``)::
+
+        sha256(reply_data || client.id.pub_key)[:4]
+
+    Hierbei ist ``reply_data`` der **gesamte** TXT_MSG-Plaintext (inklusive
+    ts, flags, 4-Byte-author-prefix und text — ohne 0-Terminator), und
+    ``client.id.pub_key`` aus Server-Sicht der Empfänger-Client-Pubkey,
+    aus Empfänger-Sicht also der eigene Pubkey. Das ist genau der
+    Unterschied zu :func:`compute_dm_ack_hash`, wo der Sender-Pubkey im
+    Hash-Input steht.
+    """
+    return hashlib.sha256(full_plain + receiver_pubkey).digest()[:4]
 
 
 @dataclass

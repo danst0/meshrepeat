@@ -176,6 +176,10 @@ class CompanionMessage(Base):
     peer_name: Mapped[str | None] = mapped_column(String(64))
     channel_name: Mapped[str | None] = mapped_column(String(64))
     text: Mapped[str | None] = mapped_column(String)
+    # Bei Room-Push-Inbound: erste 4 Bytes des Original-Senders, der den
+    # Post abgesetzt hat. peer_pubkey ist dann der Room-Pubkey, der echte
+    # Autor lebt nur als Prefix (mehr ist auf der Wire nicht da).
+    room_sender_pubkey: Mapped[bytes | None] = mapped_column(BLOB)
     raw: Mapped[bytes] = mapped_column(BLOB, nullable=False)
     ts: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
@@ -201,6 +205,9 @@ class CompanionContact(Base):
     favorite: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default="0", default=False
     )
+    # ADV_TYPE aus letztem Advert (1=Chat, 2=Repeater, 3=Room, 4=Sensor).
+    # NULL = noch kein Advert beobachtet (Legacy oder Manuell angelegt).
+    node_type: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # Aus letzter ADVERT app_data extrahiert, falls Lat/Lon-Flag gesetzt war.
     last_lat: Mapped[float | None] = mapped_column(nullable=True)
     last_lon: Mapped[float | None] = mapped_column(nullable=True)
