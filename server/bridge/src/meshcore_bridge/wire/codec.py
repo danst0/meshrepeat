@@ -10,7 +10,6 @@ und akzeptieren bytes(len=16) im Decode (siehe ``UUIDBytes`` in frames).
 
 from __future__ import annotations
 
-from typing import cast
 from uuid import UUID
 
 import cbor2
@@ -46,7 +45,7 @@ def encode_frame(frame: Frame) -> bytes:
     encoded = cbor2.dumps(payload, canonical=True)
     if len(encoded) > MAX_FRAME_BYTES:
         raise FrameDecodeError(f"encoded frame {len(encoded)} > {MAX_FRAME_BYTES} bytes")
-    return cast(bytes, encoded)
+    return encoded
 
 
 def decode_frame(data: bytes) -> Frame:

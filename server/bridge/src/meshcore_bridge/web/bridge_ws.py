@@ -15,7 +15,6 @@ from __future__ import annotations
 import asyncio
 import time
 from datetime import UTC, datetime
-from typing import cast
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from sqlalchemy import select
@@ -252,5 +251,5 @@ async def _authenticate(hello: Hello) -> Repeater | None:
             if candidate.site_id != hello.site:
                 continue
             if verify_bearer_token(candidate.token_hash, hello.tok):
-                return cast(Repeater, candidate)
+                return candidate
     return None

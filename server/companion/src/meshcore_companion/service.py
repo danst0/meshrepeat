@@ -21,6 +21,7 @@ import base64
 import hashlib
 import time
 from collections.abc import Awaitable, Callable
+from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, ClassVar
@@ -57,7 +58,7 @@ from meshcore_companion.packet import Packet, PayloadType, RouteType
 from meshcore_companion.storage import decrypt_seed, encrypt_seed
 
 if TYPE_CHECKING:
-    from meshcore_bridge.db import CompanionChannel
+    from meshcore_bridge.db import CompanionChannel, CompanionContact
 
 _log = structlog.get_logger("companion")
 
@@ -67,7 +68,7 @@ _TAG_BYTES = 4
 PacketInjector = Callable[[Packet, str], Awaitable[None]]
 """Callable(packet, scope) — fügt ein Paket in den Mesh-Scope ein."""
 
-EventNotifier = Callable[[UUID, dict], Awaitable[None]]
+EventNotifier = Callable[[UUID, dict[str, object]], Awaitable[None]]
 """Callable(identity_id, event) — Push-Event in den UI-Bus (SSE).
 
 ``event`` ist ein JSON-serialisierbares dict mit ``type`` ∈
@@ -128,7 +129,7 @@ _LOGIN_SESSION_TTL_S = 3600
 @dataclass
 class CompanionService:
     master_key: bytes
-    sessionmaker: Callable[[], AsyncSession]
+    sessionmaker: Callable[[], AbstractAsyncContextManager[AsyncSession]]
     inject: PacketInjector | None = None
     notify: EventNotifier | None = None
     advert_interval_s: int = 3600
@@ -150,7 +151,7 @@ class CompanionService:
     # der GC sie nicht canceln kann, solange sie noch laufen.
     _request_timeout_tasks: set[asyncio.Task[None]] = field(default_factory=set)
 
-    async def _emit(self, identity_id: UUID, event: dict) -> None:
+    async def _emit(self, identity_id: UUID, event: dict[str, object]) -> None:
         if self.notify is None:
             return
         try:
@@ -1010,7 +1011,7 @@ class CompanionService:
         pkt: Packet,
         raw: bytes,
         room_post: IncomingRoomPost,
-        contacts: list,  # list[CompanionContact], type-erased zur Vermeidung des Imports
+        contacts: list[CompanionContact],
         scope: str,
     ) -> None:
         """Persistiere einen Room-Server-Push und ACKe ihn.
@@ -1283,7 +1284,7 @@ class CompanionService:
         sender_pubkey: bytes,
         tag: int,
         reply_data: bytes,
-        contacts: list,
+        contacts: list[CompanionContact],
     ) -> None:
         """Persistiert eine eingegangene Reply (egal ob RESPONSE oder PATH-
         embedded) als System-Message und pusht ein SSE-Event.

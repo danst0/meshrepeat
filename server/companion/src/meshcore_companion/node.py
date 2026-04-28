@@ -821,9 +821,16 @@ def parse_repeater_stats(buf: bytes) -> RepeaterStats | None:
     ``reply_data`` ist bereits ohne tag-Prefix (siehe ``IncomingResponse``)."""
     if len(buf) < _STATS_STRUCT_LEN:
         return None
-    u16 = lambda o: int.from_bytes(buf[o : o + 2], "little", signed=False)  # noqa: E731
-    i16 = lambda o: int.from_bytes(buf[o : o + 2], "little", signed=True)  # noqa: E731
-    u32 = lambda o: int.from_bytes(buf[o : o + 4], "little", signed=False)  # noqa: E731
+
+    def u16(o: int) -> int:
+        return int.from_bytes(buf[o : o + 2], "little", signed=False)
+
+    def i16(o: int) -> int:
+        return int.from_bytes(buf[o : o + 2], "little", signed=True)
+
+    def u32(o: int) -> int:
+        return int.from_bytes(buf[o : o + 4], "little", signed=False)
+
     return RepeaterStats(
         batt_milli_volts=u16(0),
         curr_tx_queue_len=u16(2),

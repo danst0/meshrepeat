@@ -60,9 +60,10 @@ def _localtime_filter(dt: datetime | str | None, fmt: str = "%Y-%m-%d %H:%M") ->
         return "—"
     if isinstance(dt, str):
         try:
-            dt = datetime.fromisoformat(dt)
+            parsed = datetime.fromisoformat(dt)
         except ValueError:
             return dt
+        dt = parsed
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=UTC)
     return dt.astimezone(_DISPLAY_TZ).strftime(fmt)

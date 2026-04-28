@@ -68,6 +68,15 @@ disallow_any_unimported = true
 plugins = ["pydantic.mypy"]
 mypy_path = ["server/bridge/src", "server/companion/src"]
 
+[[tool.mypy.overrides]]
+module = "serial"
+ignore_missing_imports = true
+
+# CLI-Tools dürfen Any aus untyped third-party imports konsumieren
+[[tool.mypy.overrides]]
+module = "spiegel-tbeam-setup"
+disallow_any_unimported = false
+
 [tool.pytest.ini_options]
 addopts = "-ra --strict-markers --strict-config --import-mode=importlib -m 'not ui'"
 asyncio_mode = "auto"

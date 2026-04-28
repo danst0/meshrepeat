@@ -88,7 +88,8 @@ async def cleanup_expired(db: AsyncSession, *, idle_timeout: timedelta) -> int:
         delete(SessionRow).where(SessionRow.last_seen_at < cutoff)
     )
     await db.commit()
-    return result.rowcount or 0
+    rowcount: int = getattr(result, "rowcount", 0) or 0
+    return rowcount
 
 
 async def list_user_sessions(db: AsyncSession, user_id: UUID) -> list[SessionRow]:

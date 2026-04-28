@@ -21,6 +21,7 @@ from __future__ import annotations
 import hashlib
 import time
 from collections import OrderedDict
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from uuid import UUID
 
@@ -78,7 +79,7 @@ class DedupCache:
         *,
         capacity: int,
         ttl_s: float,
-        time_source: callable | None = None,  # type: ignore[type-arg]
+        time_source: Callable[[], float] | None = None,
     ) -> None:
         self._capacity = capacity
         self._ttl = ttl_s

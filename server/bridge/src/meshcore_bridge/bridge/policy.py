@@ -16,6 +16,7 @@ atomar und resettet Rate-Limit-Buckets nicht (nur Parameter).
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from threading import RLock
 from uuid import UUID
@@ -48,7 +49,7 @@ class PolicyEngine:
         self,
         cfg: PolicyConfig,
         *,
-        time_source: callable | None = None,  # type: ignore[type-arg]
+        time_source: Callable[[], float] | None = None,
     ) -> None:
         self._cfg = cfg
         self._buckets: dict[UUID, _Bucket] = {}

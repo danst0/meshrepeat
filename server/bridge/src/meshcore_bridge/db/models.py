@@ -33,7 +33,7 @@ class _UUIDBlob(TypeDecorator[UUID]):
 
     _UUID_BYTES = 16
 
-    def process_bind_param(self, value: UUID | None, dialect: object) -> bytes | None:
+    def process_bind_param(self, value: UUID | bytes | None, dialect: object) -> bytes | None:
         if value is None:
             return None
         if isinstance(value, UUID):

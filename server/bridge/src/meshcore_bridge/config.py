@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 import yaml
 from pydantic import BaseModel, Field
@@ -119,7 +119,7 @@ class AppConfig(BaseSettings):
     def load(cls, yaml_path: Path | str | None = None) -> AppConfig:
         """Load YAML (if given), apply env overrides, resolve secret files."""
         path = Path(yaml_path) if yaml_path else _config_path_from_env()
-        data: dict[str, object] = {}
+        data: dict[str, Any] = {}
         if path is not None and path.exists():
             with path.open("r", encoding="utf-8") as f:
                 loaded = yaml.safe_load(f) or {}
