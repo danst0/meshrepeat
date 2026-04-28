@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 import structlog
+from alembic import command
+from alembic.config import Config
 from sqlalchemy import inspect, text
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -23,17 +26,32 @@ _sessionmaker: async_sessionmaker[AsyncSession] | None = None
 
 # Idempotente Spalten-Patches für Bestands-DBs, die mit ``create_all``
 # vor der jeweiligen Spalte erstellt wurden. Reihenfolge: (Tabelle,
-# Spalte, DDL-Snippet). Bis Alembic-Migrations beim Start laufen.
+# Spalte, DDL-Snippet). Greift nur, wenn ``alembic_version`` fehlt
+# (Legacy-DB) — sonst ist Alembic zuständig.
 _COLUMN_PATCHES: tuple[tuple[str, str, str], ...] = (
     ("companion_contacts", "favorite", "BOOLEAN NOT NULL DEFAULT 0"),
     ("companion_contacts", "last_lat", "FLOAT NULL"),
     ("companion_contacts", "last_lon", "FLOAT NULL"),
+    ("companion_contacts", "node_type", "INTEGER NULL"),
+    ("companion_messages", "room_sender_pubkey", "BLOB NULL"),
 )
 
 
 async def init_engine(sqlite_path: Path) -> AsyncEngine:
-    """Create the async engine, ensure parent dir exists, run create_all,
-    apply idempotente Spalten-Patches für Bestands-DBs.
+    """Create the async engine, ensure parent dir exists, then bring the
+    schema up to date.
+
+    Drei DB-Zustände werden unterschieden:
+    1. *frisch* (keine Tabellen)            → ``create_all`` + ``stamp head``
+    2. *Legacy* (Tabellen, aber kein
+       ``alembic_version``)                  → ``create_all`` + Spalten-Patches +
+                                              ``ensure_fts5`` + ``stamp head``
+    3. *Alembic-verwaltet* (``alembic_version``
+       existiert)                            → ``upgrade head``
+
+    Reihenfolge wichtig: bei Legacy-DBs müssen die Patches **vor** dem Stamp
+    laufen, weil das Stamp die DB als „auf head" markiert — eine fehlende
+    Spalte würde danach nicht mehr nachgepflegt.
     """
     global _engine, _sessionmaker
 
@@ -42,11 +60,95 @@ async def init_engine(sqlite_path: Path) -> AsyncEngine:
     _engine = create_async_engine(url, echo=False, future=True)
     _sessionmaker = async_sessionmaker(_engine, expire_on_commit=False)
 
+    # Phase 1: Schemastruktur in einer Transaktion bringen. Alembic
+    # **darf nicht** innerhalb dieser Transaktion laufen — es öffnet
+    # eine eigene Connection und SQLite würde dann „database is locked"
+    # werfen. Daher merken wir uns hier nur die nötige Folge-Aktion.
     async with _engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-        await conn.run_sync(_apply_column_patches)
-        await conn.run_sync(_ensure_fts5)
+        action = await conn.run_sync(_phase1_apply_ddl)
+    # Phase 2: Alembic in eigener (sync) Connection. Synchron ausführen
+    # ist ok, weil der Server in diesem Punkt noch nicht hochgefahren ist.
+    if action == "stamp":
+        _alembic_stamp_head(sqlite_path)
+    elif action == "upgrade":
+        _alembic_upgrade_head(sqlite_path)
     return _engine
+
+
+def _phase1_apply_ddl(sync_conn) -> str:  # type: ignore[no-untyped-def]
+    """Idempotente DDL-Anwendung. Liefert die nötige Alembic-Folgeaktion
+    zurück (``"stamp"`` für frisch/legacy, ``"upgrade"`` für bereits
+    verwaltete DBs)."""
+    insp = inspect(sync_conn)
+    table_names = set(insp.get_table_names())
+    has_alembic = "alembic_version" in table_names
+    if has_alembic:
+        # Alembic-verwaltete DB — kein create_all, keine DDL-Patches,
+        # sonst Konflikt mit ausstehenden Migrations.
+        return "upgrade"
+    is_fresh = not table_names
+    Base.metadata.create_all(sync_conn)
+    if not is_fresh:
+        _apply_column_patches(sync_conn)
+    # FTS5-Virtual-Table wird von ``Base.metadata.create_all`` nicht
+    # angelegt (FTS5 ist eine Migration in d7e2a9c1f4b8); idempotent.
+    _ensure_fts5(sync_conn)
+    return "stamp"
+
+
+def _alembic_config(sqlite_path: Path):  # type: ignore[no-untyped-def]
+    """Programmatic Alembic-Config — vermeidet die Suche nach alembic.ini.
+
+    ``script_location`` muss aufs ``alembic/``-Verzeichnis mit ``env.py +
+    versions/`` zeigen. Im Container liegt das unter
+    ``/app/server/bridge/alembic`` (per ``COPY`` aus dem Repo); lokal beim
+    Dev nutzen wir cwd-Heuristik. Override via ``MESHCORE_ALEMBIC_DIR``.
+    """
+    candidates: list[Path] = []
+    env_override = os.environ.get("MESHCORE_ALEMBIC_DIR")
+    if env_override:
+        candidates.append(Path(env_override))
+    candidates.extend(
+        [
+            Path("/app/server/bridge/alembic"),  # Image-Default
+            Path.cwd() / "alembic",
+            Path.cwd() / "server" / "bridge" / "alembic",
+        ]
+    )
+    script_location: Path | None = None
+    for c in candidates:
+        if (c / "env.py").is_file():
+            script_location = c
+            break
+    if script_location is None:
+        raise FileNotFoundError(
+            "alembic env.py not found in any candidate location: "
+            f"{[str(c) for c in candidates]} — set MESHCORE_ALEMBIC_DIR"
+        )
+    cfg = Config()
+    cfg.set_main_option("script_location", str(script_location))
+    cfg.set_main_option("sqlalchemy.url", f"sqlite:///{sqlite_path}")
+    return cfg
+
+
+def _alembic_stamp_head(sqlite_path: Path) -> None:
+    try:
+        cfg = _alembic_config(sqlite_path)
+    except FileNotFoundError as e:
+        _log.warning("alembic_stamp_skipped", reason=str(e))
+        return
+    _log.info("alembic_stamp_head")
+    command.stamp(cfg, "head")
+
+
+def _alembic_upgrade_head(sqlite_path: Path) -> None:
+    try:
+        cfg = _alembic_config(sqlite_path)
+    except FileNotFoundError as e:
+        _log.warning("alembic_upgrade_skipped", reason=str(e))
+        return
+    _log.info("alembic_upgrade_head")
+    command.upgrade(cfg, "head")
 
 
 def _apply_column_patches(sync_conn) -> None:  # type: ignore[no-untyped-def]
