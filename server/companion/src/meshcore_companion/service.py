@@ -23,7 +23,7 @@ import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 from uuid import UUID
 
 import structlog
@@ -146,6 +146,9 @@ class CompanionService:
     _pending_reqs: dict[int, tuple[float, int, UUID, bytes]] = field(default_factory=dict)
     # Aktive Login-Sessions (in-memory). Key = (identity_id, peer_pubkey).
     _login_sessions: dict[tuple[UUID, bytes], LoginSession] = field(default_factory=dict)
+    # Hintergrund-Tasks für Request-Timeouts. Wir halten Referenzen, damit
+    # der GC sie nicht canceln kann, solange sie noch laufen.
+    _request_timeout_tasks: set[asyncio.Task[None]] = field(default_factory=set)
 
     async def _emit(self, identity_id: UUID, event: dict) -> None:
         if self.notify is None:
@@ -309,6 +312,158 @@ class CompanionService:
         }
         self._pending_reqs[tag] = (now, req_type, identity_id, peer_pubkey)
 
+    # User-facing Timeout für REQ → RESPONSE. Nach Ablauf wird der Pending-
+    # Eintrag gelöscht und im Chat eine Timeout-System-Message angezeigt.
+    _REQ_TIMEOUT_S = 10
+    _REQ_KIND_META: ClassVar[dict[str, tuple[str, str]]] = {
+        # kind → (icon, label)
+        "login": ("🔑", "Login"),
+        "status": ("ℹ", "Status"),
+        "telemetry": ("📡", "Telemetrie"),
+    }
+
+    async def _persist_pending_request(
+        self,
+        *,
+        loaded: LoadedIdentity,
+        peer_pubkey: bytes,
+        kind: str,
+        tag: int,
+    ) -> None:
+        """Schreibt eine "warte auf Antwort"-Bubble als CompanionMessage in
+        die DB und feuert ein SSE-Event mit ``expires_at`` für den Frontend-
+        Countdown. Persistierung sorgt dafür, dass der Anfrage-Verlauf nach
+        Reload sichtbar bleibt."""
+        from meshcore_bridge.db import CompanionContact, CompanionMessage
+
+        icon, label = self._REQ_KIND_META.get(kind, ("?", kind))
+        now_ts = datetime.now(UTC)
+        expires_at = now_ts + timedelta(seconds=self._REQ_TIMEOUT_S)
+        text = (
+            f"{icon} {label} angefragt — warte auf Antwort… "
+            f"({self._REQ_TIMEOUT_S}s)"
+        )
+        async with self.sessionmaker() as db:
+            peer_name = (
+                await db.execute(
+                    select(CompanionContact.peer_name).where(
+                        CompanionContact.identity_id == loaded.id,
+                        CompanionContact.peer_pubkey == peer_pubkey,
+                    )
+                )
+            ).scalar_one_or_none()
+            msg = CompanionMessage(
+                identity_id=loaded.id,
+                direction="system",
+                payload_type=int(PayloadType.REQ),
+                peer_pubkey=peer_pubkey,
+                peer_name=peer_name,
+                text=text,
+                raw=b"",
+                ts=now_ts,
+            )
+            db.add(msg)
+            await db.commit()
+            msg_id = msg.id
+        await self._emit(
+            loaded.id,
+            {
+                "type": "pending_request",
+                "id": str(msg_id),
+                "tag": tag,
+                "kind": kind,
+                "ts": now_ts.isoformat(),
+                "expires_at": expires_at.isoformat(),
+                "timeout_s": self._REQ_TIMEOUT_S,
+                "peer_pubkey_hex": peer_pubkey.hex(),
+                "peer_name": peer_name,
+                "text": text,
+                "direction": "system",
+            },
+        )
+
+    async def _timeout_pending_req(
+        self,
+        *,
+        tag: int,
+        identity_id: UUID,
+        peer_pubkey: bytes,
+        kind: str,
+    ) -> None:
+        """Wird als Hintergrund-Task pro REQ gestartet. Schläft
+        ``_REQ_TIMEOUT_S`` und prüft, ob der Tag noch im pending-Pool ist —
+        wenn ja, wurde keine RESPONSE empfangen, wir markieren den Request
+        als abgelaufen."""
+        from meshcore_bridge.db import CompanionContact, CompanionMessage
+
+        await asyncio.sleep(self._REQ_TIMEOUT_S)
+        if self._pending_reqs.pop(tag, None) is None:
+            return  # RESPONSE kam rechtzeitig — Tag wurde schon entfernt
+        loaded = self._by_id.get(identity_id)
+        if loaded is None:
+            return
+        _icon, label = self._REQ_KIND_META.get(kind, ("?", kind))
+        text = f"⏱ {label}-Anfrage abgelaufen ({self._REQ_TIMEOUT_S}s ohne Antwort)"
+        now_ts = datetime.now(UTC)
+        async with self.sessionmaker() as db:
+            peer_name = (
+                await db.execute(
+                    select(CompanionContact.peer_name).where(
+                        CompanionContact.identity_id == loaded.id,
+                        CompanionContact.peer_pubkey == peer_pubkey,
+                    )
+                )
+            ).scalar_one_or_none()
+            msg = CompanionMessage(
+                identity_id=loaded.id,
+                direction="system",
+                payload_type=int(PayloadType.REQ),
+                peer_pubkey=peer_pubkey,
+                peer_name=peer_name,
+                text=text,
+                raw=b"",
+                ts=now_ts,
+            )
+            db.add(msg)
+            await db.commit()
+            msg_id = msg.id
+        await self._emit(
+            loaded.id,
+            {
+                "type": "request_timeout",
+                "id": str(msg_id),
+                "tag": tag,
+                "kind": kind,
+                "ts": now_ts.isoformat(),
+                "peer_pubkey_hex": peer_pubkey.hex(),
+                "peer_name": peer_name,
+                "text": text,
+                "direction": "system",
+            },
+        )
+        _log.info(
+            "request_timeout",
+            identity=loaded.name,
+            peer=peer_pubkey[:4].hex(),
+            tag=tag,
+            kind=kind,
+        )
+
+    def _spawn_request_timeout(
+        self, *, tag: int, identity_id: UUID, peer_pubkey: bytes, kind: str
+    ) -> None:
+        """Startet die Timeout-Coroutine als Hintergrund-Task."""
+        task = asyncio.create_task(
+            self._timeout_pending_req(
+                tag=tag,
+                identity_id=identity_id,
+                peer_pubkey=peer_pubkey,
+                kind=kind,
+            )
+        )
+        self._request_timeout_tasks.add(task)
+        task.add_done_callback(self._request_timeout_tasks.discard)
+
     async def request_telemetry(
         self,
         *,
@@ -331,6 +486,12 @@ class CompanionService:
             req_type=self.REQ_TYPE_TELEMETRY,
             identity_id=identity_id,
             peer_pubkey=peer_pubkey,
+        )
+        await self._persist_pending_request(
+            loaded=loaded, peer_pubkey=peer_pubkey, kind="telemetry", tag=tag
+        )
+        self._spawn_request_timeout(
+            tag=tag, identity_id=identity_id, peer_pubkey=peer_pubkey, kind="telemetry"
         )
         _log.info(
             "telemetry_req",
@@ -378,6 +539,12 @@ class CompanionService:
             identity_id=identity_id,
             peer_pubkey=peer_pubkey,
         )
+        await self._persist_pending_request(
+            loaded=loaded, peer_pubkey=peer_pubkey, kind="login", tag=tag
+        )
+        self._spawn_request_timeout(
+            tag=tag, identity_id=identity_id, peer_pubkey=peer_pubkey, kind="login"
+        )
         _log.info(
             "login_req",
             identity=loaded.name,
@@ -409,6 +576,12 @@ class CompanionService:
             req_type=self.REQ_TYPE_STATUS,
             identity_id=identity_id,
             peer_pubkey=peer_pubkey,
+        )
+        await self._persist_pending_request(
+            loaded=loaded, peer_pubkey=peer_pubkey, kind="status", tag=tag
+        )
+        self._spawn_request_timeout(
+            tag=tag, identity_id=identity_id, peer_pubkey=peer_pubkey, kind="status"
         )
         _log.info(
             "status_req",

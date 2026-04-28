@@ -552,6 +552,40 @@
     if (atBottom) box.scrollTop = box.scrollHeight;
   }
 
+  // ---------- Pending-Request-Countdown ----------
+  // msgId → { handle, expires, baseText } — der Server persistiert die
+  // "warte auf Antwort"-Bubble samt Initial-Text "(10s)", wir tauschen
+  // die Sekunden-Zahl alle 250 ms gegen den verbleibenden Rest aus.
+  const _pendingTimers = new Map();
+
+  function _setPendingText(msgId, text) {
+    const el = document.querySelector(`[data-msg-id="${msgId}"] .msg-text`);
+    if (!el) return false;
+    el.textContent = text;
+    return true;
+  }
+
+  function startPendingCountdown(msgId, expiresAtIso, baseText) {
+    const expires = new Date(expiresAtIso).getTime();
+    if (isNaN(expires)) return;
+    stopPendingCountdown(msgId);
+    const tick = () => {
+      const left = Math.max(0, Math.ceil((expires - Date.now()) / 1000));
+      const txt = baseText.replace(/\(\d+s\)/, `(${left}s)`);
+      const ok = _setPendingText(msgId, txt);
+      if (!ok || left <= 0) stopPendingCountdown(msgId);
+    };
+    tick();
+    const handle = setInterval(tick, 250);
+    _pendingTimers.set(msgId, handle);
+  }
+
+  function stopPendingCountdown(msgId) {
+    const handle = _pendingTimers.get(msgId);
+    if (handle != null) clearInterval(handle);
+    _pendingTimers.delete(msgId);
+  }
+
   function scrollToMessageId(id) {
     const el = document.querySelector(`[data-msg-id="${id}"]`);
     if (el) el.scrollIntoView({block: "center", behavior: "smooth"});
@@ -838,13 +872,10 @@
           ts: new Date().toISOString(),
           text: `⚠ ${label} fehlgeschlagen (${r.status})`,
         });
-      } else {
-        appendIncomingMessage({
-          direction: "system",
-          ts: new Date().toISOString(),
-          text: `${label} angefragt — warte auf Antwort…`,
-        });
       }
+      // Bei Erfolg: Server persistiert die "warte auf Antwort"-Bubble
+      // selbst und pusht sie als pending_request-SSE-Event — wir
+      // brauchen hier nichts lokal zu rendern, sonst Doppel-Bubble.
     } catch (e) {
       appendIncomingMessage({
         direction: "system",
@@ -1105,6 +1136,21 @@
       } else if (t === "channel") {
         bumpUnread("ch:" + chId);
         maybeNotify(evt);
+      }
+      loadThreads();
+    } else if (t === "pending_request") {
+      // Server hat "warte auf Antwort"-Bubble persistiert + pusht uns das
+      // Event — wir rendern sie und starten den Countdown.
+      const peerHex = evt.peer_pubkey_hex;
+      if (active && active.kind === "dm" && active.peer === peerHex) {
+        appendIncomingMessage({...evt, direction: "system"});
+        startPendingCountdown(evt.id, evt.expires_at, evt.text);
+      }
+      loadThreads();
+    } else if (t === "request_timeout") {
+      const peerHex = evt.peer_pubkey_hex;
+      if (active && active.kind === "dm" && active.peer === peerHex) {
+        appendIncomingMessage({...evt, direction: "system"});
       }
       loadThreads();
     } else if (t === "status_response" || t === "telemetry_response" || t === "login_response") {
