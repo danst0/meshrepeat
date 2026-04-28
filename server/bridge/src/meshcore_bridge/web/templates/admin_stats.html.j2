@@ -1,0 +1,213 @@
+{% extends "base.html.j2" %}
+{% block title %}Paket-Statistik — MeshCore Spiegel{% endblock %}
+{% block head_extra %}
+<style>
+  .stats-toolbar { display: flex; flex-wrap: wrap; gap: .8rem; align-items: end; }
+  .stats-toolbar > div { display: flex; flex-direction: column; gap: .2rem; }
+  .stats-toolbar label { margin: 0; font-size: .8rem; }
+  .stats-toolbar select { padding: .35rem .5rem; }
+  .stats-summary { font-size: 1.05rem; margin: .8rem 0; }
+  .stats-summary strong { color: var(--accent); }
+  .stats-summary .muted { color: var(--muted); margin-left: .6rem; font-size: .85rem; }
+  .stats-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+    gap: 1rem;
+    margin-top: 1rem;
+  }
+  .stats-table { width: 100%; font-size: .9rem; }
+  .stats-table th { text-align: left; color: var(--muted); font-weight: 500; }
+  .stats-table td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .stats-table td.bar { width: 130px; padding-left: .6rem; }
+  .stats-bar-svg rect.b-fill { fill: rgba(255,200,90,.55); }
+  .stats-bar-svg rect.b-track { fill: rgba(130,170,255,.06); }
+  .stats-bar-svg rect.b-route { fill: rgba(120,210,140,.55); }
+  .stats-bar-svg rect.b-site { fill: rgba(130,170,255,.45); }
+  .stats-bar-svg rect.b-drop { fill: rgba(255,88,116,.55); }
+  .stats-empty { color: var(--muted); padding: 1.5rem; text-align: center; }
+  .pill {
+    display: inline-block; padding: 1px 6px; border-radius: 8px;
+    font-size: .75rem; background: rgba(130,170,255,.12); color: var(--accent);
+  }
+</style>
+{% endblock %}
+{% block content %}
+  <h1>Paket-Statistik</h1>
+  <p>Aggregation über die persistierten LoRa-Pakete (Spool, 7 Tage Retention).
+     Quelle ist dieselbe Tabelle wie der <a href="/admin/inspector">Inspector</a>.</p>
+
+  <div class="card">
+    <form id="filters" class="stats-toolbar" onsubmit="return false">
+      <div>
+        <label for="f-since">Zeitraum</label>
+        <select id="f-since">
+          <option value="5m">letzte 5 min</option>
+          <option value="1h">letzte 1 h</option>
+          <option value="24h" selected>letzte 24 h</option>
+          <option value="7d">letzte 7 d</option>
+        </select>
+      </div>
+      <div>
+        <label>&nbsp;</label>
+        <button type="button" id="btn-reload">Neu laden</button>
+      </div>
+      <div>
+        <label>&nbsp;</label>
+        <span id="stat" style="color:var(--muted)"></span>
+      </div>
+    </form>
+    <div class="stats-summary" id="summary">—</div>
+  </div>
+
+  <div class="stats-grid">
+    <div class="card">
+      <h3 style="margin-top:0">Nach Payload-Typ</h3>
+      <table class="stats-table">
+        <thead><tr><th>Typ</th><th class="num">Pakete</th><th class="num">Bytes</th><th class="bar"></th></tr></thead>
+        <tbody id="rows-payload"><tr><td colspan="4" class="stats-empty">—</td></tr></tbody>
+      </table>
+    </div>
+    <div class="card">
+      <h3 style="margin-top:0">Nach Route-Typ</h3>
+      <table class="stats-table">
+        <thead><tr><th>Route</th><th class="num">Pakete</th><th class="bar"></th></tr></thead>
+        <tbody id="rows-route"><tr><td colspan="3" class="stats-empty">—</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="card" style="margin-top:1rem">
+    <h3 style="margin-top:0">Per Repeater / Site</h3>
+    <table class="stats-table">
+      <thead>
+        <tr>
+          <th>Site</th>
+          <th>Scope</th>
+          <th class="num">Pakete</th>
+          <th class="num">Bytes</th>
+          <th class="num">Dropped</th>
+          <th class="bar"></th>
+        </tr>
+      </thead>
+      <tbody id="rows-site"><tr><td colspan="6" class="stats-empty">—</td></tr></tbody>
+    </table>
+  </div>
+
+  <div class="card" id="card-drop" style="margin-top:1rem; display:none">
+    <h3 style="margin-top:0">Dropped (Reason)</h3>
+    <table class="stats-table">
+      <thead><tr><th>Grund</th><th class="num">Pakete</th><th class="bar"></th></tr></thead>
+      <tbody id="rows-drop"></tbody>
+    </table>
+  </div>
+
+<script>
+const elSince = document.getElementById('f-since');
+const elStat = document.getElementById('stat');
+const elSummary = document.getElementById('summary');
+const elPayload = document.getElementById('rows-payload');
+const elRoute = document.getElementById('rows-route');
+const elSite = document.getElementById('rows-site');
+const elDrop = document.getElementById('rows-drop');
+const elDropCard = document.getElementById('card-drop');
+
+function fmtNum(n) { return Number(n).toLocaleString('de-DE'); }
+
+function fmtBytes(n) {
+  if (n < 1024) return n + ' B';
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KiB';
+  if (n < 1024 * 1024 * 1024) return (n / (1024 * 1024)).toFixed(2) + ' MiB';
+  return (n / (1024 * 1024 * 1024)).toFixed(2) + ' GiB';
+}
+
+function escape(s) {
+  return String(s == null ? '' : s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+}
+
+function bar(value, max, cls) {
+  if (!max || !value) return '<svg class="stats-bar-svg" width="120" height="12"></svg>';
+  const w = Math.max(2, Math.round(value / max * 110));
+  return '<svg class="stats-bar-svg" width="120" height="12">'
+    + '<rect class="b-track" x="0" y="2" width="120" height="8" rx="2"></rect>'
+    + '<rect class="' + cls + '" x="0" y="2" width="' + w + '" height="8" rx="2"></rect>'
+    + '</svg>';
+}
+
+function emptyRow(cols, msg) {
+  return '<tr><td colspan="' + cols + '" class="stats-empty">' + msg + '</td></tr>';
+}
+
+function renderPayload(rows) {
+  if (!rows.length) { elPayload.innerHTML = emptyRow(4, 'keine Pakete'); return; }
+  const max = rows[0].count;
+  elPayload.innerHTML = rows.map(r =>
+    '<tr><td>' + escape(r.key) + '</td>'
+    + '<td class="num">' + fmtNum(r.count) + '</td>'
+    + '<td class="num">' + fmtBytes(r.bytes) + '</td>'
+    + '<td class="bar">' + bar(r.count, max, 'b-fill') + '</td></tr>'
+  ).join('');
+}
+
+function renderRoute(rows) {
+  if (!rows.length) { elRoute.innerHTML = emptyRow(3, 'keine Pakete'); return; }
+  const max = rows[0].count;
+  elRoute.innerHTML = rows.map(r =>
+    '<tr><td>' + escape(r.key) + '</td>'
+    + '<td class="num">' + fmtNum(r.count) + '</td>'
+    + '<td class="bar">' + bar(r.count, max, 'b-route') + '</td></tr>'
+  ).join('');
+}
+
+function renderSite(rows) {
+  if (!rows.length) { elSite.innerHTML = emptyRow(6, 'keine Sites'); return; }
+  const max = rows[0].count;
+  elSite.innerHTML = rows.map(r => {
+    const label = r.site_name || (r.site_id || '').slice(0, 8);
+    const dropped = r.dropped
+      ? '<span class="pill" style="background:rgba(255,88,116,.15);color:var(--danger)">' + fmtNum(r.dropped) + '</span>'
+      : '0';
+    return '<tr><td>' + escape(label) + '</td>'
+      + '<td><span class="pill">' + escape(r.scope) + '</span></td>'
+      + '<td class="num">' + fmtNum(r.count) + '</td>'
+      + '<td class="num">' + fmtBytes(r.bytes) + '</td>'
+      + '<td class="num">' + dropped + '</td>'
+      + '<td class="bar">' + bar(r.count, max, 'b-site') + '</td></tr>';
+  }).join('');
+}
+
+function renderDrop(rows) {
+  if (!rows.length) { elDropCard.style.display = 'none'; return; }
+  elDropCard.style.display = '';
+  const max = rows[0].count;
+  elDrop.innerHTML = rows.map(r =>
+    '<tr><td>' + escape(r.reason) + '</td>'
+    + '<td class="num">' + fmtNum(r.count) + '</td>'
+    + '<td class="bar">' + bar(r.count, max, 'b-drop') + '</td></tr>'
+  ).join('');
+}
+
+async function refresh() {
+  elStat.textContent = 'lade …';
+  try {
+    const r = await fetch('/api/v1/admin/inspector/stats?since=' + elSince.value, {credentials:'same-origin'});
+    if (!r.ok) { elStat.textContent = 'fetch ' + r.status; return; }
+    const j = await r.json();
+    elSummary.innerHTML =
+      '<strong>' + fmtNum(j.total.count) + '</strong> Pakete · '
+      + '<strong>' + fmtBytes(j.total.bytes) + '</strong>'
+      + '<span class="muted">Fenster: ' + escape(j.since) + ' — seit ' + escape(j.cutoff) + '</span>';
+    renderPayload(j.by_payload_type);
+    renderRoute(j.by_route_type);
+    renderSite(j.by_site);
+    renderDrop(j.by_dropped_reason);
+    elStat.textContent = '';
+  } catch (e) {
+    elStat.textContent = 'fetch-fail: ' + e;
+  }
+}
+
+elSince.addEventListener('change', refresh);
+document.getElementById('btn-reload').addEventListener('click', refresh);
+refresh();
+</script>
+{% endblock %}

@@ -11,7 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi import status as http_status
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import desc, select
+from sqlalchemy import desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meshcore_bridge.bridge import PolicyState
@@ -313,6 +313,109 @@ async def inspector_spool_stats(
     return {"enabled": True, **spool.stats()}
 
 
+@router.get("/inspector/stats")
+async def inspector_stats(
+    since: str = Query(default="24h"),
+    _user: User = Depends(admin_required),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Aggregierte Pakete im Zeitfenster — global + per Repeater/Site.
+
+    Quelle: ``raw_packets``-Tabelle (7-Tage-Spool). Nutzt die vorhandenen
+    Indizes ``ix_raw_packets_ts`` und ``ix_raw_packets_site_ts``.
+    """
+    delta = _SINCE_PRESETS.get(since)
+    if delta is None:
+        raise HTTPException(
+            status_code=http_status.HTTP_400_BAD_REQUEST,
+            detail=f"invalid since (use one of {list(_SINCE_PRESETS)})",
+        )
+    cutoff = datetime.now(UTC) - delta
+    raw_size = func.length(RawPacket.raw)
+
+    total_row = (
+        await db.execute(
+            select(func.count(), func.coalesce(func.sum(raw_size), 0)).where(
+                RawPacket.ts >= cutoff
+            )
+        )
+    ).one()
+
+    pt_rows = (
+        await db.execute(
+            select(
+                RawPacket.payload_type,
+                func.count(),
+                func.coalesce(func.sum(raw_size), 0),
+            )
+            .where(RawPacket.ts >= cutoff)
+            .group_by(RawPacket.payload_type)
+            .order_by(desc(func.count()))
+        )
+    ).all()
+
+    rt_rows = (
+        await db.execute(
+            select(RawPacket.route_type, func.count())
+            .where(RawPacket.ts >= cutoff)
+            .group_by(RawPacket.route_type)
+            .order_by(desc(func.count()))
+        )
+    ).all()
+
+    site_rows = (
+        await db.execute(
+            select(
+                RawPacket.site_id,
+                RawPacket.site_name,
+                RawPacket.scope,
+                func.count(),
+                func.coalesce(func.sum(raw_size), 0),
+                func.count(RawPacket.dropped_reason),
+            )
+            .where(RawPacket.ts >= cutoff)
+            .group_by(RawPacket.site_id, RawPacket.site_name, RawPacket.scope)
+            .order_by(desc(func.count()))
+        )
+    ).all()
+
+    drop_rows = (
+        await db.execute(
+            select(RawPacket.dropped_reason, func.count())
+            .where(RawPacket.ts >= cutoff, RawPacket.dropped_reason.is_not(None))
+            .group_by(RawPacket.dropped_reason)
+            .order_by(desc(func.count()))
+        )
+    ).all()
+
+    return {
+        "since": since,
+        "cutoff": cutoff.isoformat(),
+        "total": {"count": int(total_row[0]), "bytes": int(total_row[1])},
+        "by_payload_type": [
+            {"key": key, "count": int(count), "bytes": int(b)}
+            for key, count, b in pt_rows
+        ],
+        "by_route_type": [
+            {"key": key, "count": int(count)} for key, count in rt_rows
+        ],
+        "by_site": [
+            {
+                "site_id": str(site_id),
+                "site_name": site_name,
+                "scope": scope,
+                "count": int(count),
+                "bytes": int(b),
+                "dropped": int(dropped),
+            }
+            for site_id, site_name, scope, count, b, dropped in site_rows
+        ],
+        "by_dropped_reason": [
+            {"reason": reason, "count": int(count)} for reason, count in drop_rows
+        ],
+    }
+
+
 @ui_router.get("/inspector", response_class=HTMLResponse)
 async def inspector_page(
     request: Request,
@@ -327,6 +430,18 @@ async def inspector_page(
             "payload_types": list(PAYLOAD_TYPE_NAMES.values()),
             "route_types": list(ROUTE_TYPE_NAMES.values()),
         },
+    )
+
+
+@ui_router.get("/stats", response_class=HTMLResponse)
+async def stats_page(
+    request: Request,
+    user: User = Depends(admin_required),
+) -> HTMLResponse:
+    return _templates(request).TemplateResponse(
+        request,
+        "admin_stats.html.j2",
+        {"user": user, "flash": None},
     )
 
 
