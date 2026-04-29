@@ -287,10 +287,25 @@ function renderPathMap(geo) {
     attribution: '© <a href="https://openstreetmap.org/copyright">OpenStreetMap</a>',
   }).addTo(mapInstance);
 
-  // Viterbi: wähle je Hop genau einen Kandidaten so, dass die Gesamt-
-  // Pfaddistanz minimal wird. Für Hops mit 0 Kandidaten überspringen
-  // wir die Lücke (Linie verbindet ringsum).
+  // Viterbi mit Haversine + quadrierter Cost: bestraft lange Sprünge
+  // überproportional, daher werden Cluster-Wechsel (NL↔NRW) automatisch
+  // teuer und der Algorithmus bevorzugt räumlich zusammenhängende Pfade.
+  // Hops mit 0 Kandidaten werden übersprungen (Linie verbindet ringsum).
   const hopsFilled = geo.filter(h => h.candidates && h.candidates.length > 0);
+  const haversineKm = (a, b) => {
+    const R = 6371;
+    const toRad = x => x * Math.PI / 180;
+    const dLat = toRad(b.lat - a.lat);
+    const dLon = toRad(b.lon - a.lon);
+    const s = Math.sin(dLat/2)**2 +
+              Math.cos(toRad(a.lat)) * Math.cos(toRad(b.lat)) * Math.sin(dLon/2)**2;
+    return 2 * R * Math.asin(Math.sqrt(s));
+  };
+  const stepCost = (a, b) => {
+    const d = haversineKm(a, b);
+    // Quadratisch bis 100 km, darüber stark linear penalisiert (LoRa-Reichweite-Hinweis)
+    return d <= 100 ? d * d : 10000 + (d - 100) * 10000;
+  };
   const dp = [];
   if (hopsFilled.length > 0) {
     dp.push(hopsFilled[0].candidates.map(() => ({d: 0, p: -1})));
@@ -302,9 +317,7 @@ function renderPathMap(geo) {
         const cur = curList[j];
         let bestD = Infinity, bestP = -1;
         for (let k = 0; k < prevList.length; k++) {
-          const prev = prevList[k];
-          const step = Math.hypot(cur.lat - prev.lat, cur.lon - prev.lon);
-          const total = dp[i-1][k].d + step;
+          const total = dp[i-1][k].d + stepCost(prevList[k], cur);
           if (total < bestD) { bestD = total; bestP = k; }
         }
         row.push({d: bestD, p: bestP});
