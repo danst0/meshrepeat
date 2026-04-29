@@ -144,6 +144,27 @@ async def test_echo_bot_does_not_loop_on_known_companion(service_env) -> None:
 
 
 @pytest.mark.asyncio
+async def test_echo_bot_replies_to_non_echo_companion(service_env) -> None:
+    """Andere eigene Identity ohne is_echo darf den Bot ganz normal pingen —
+    es entsteht kein Loop, weil der Sender nicht selbst echoed."""
+    svc, sessionmaker, user_id, sent = service_env
+
+    bot = await svc.add_identity(user_id=user_id, name="Echo", scope="public", is_echo=True)
+    other = await svc.add_identity(user_id=user_id, name="Antonia", scope="public", is_echo=False)
+    await _add_peer_contact(sessionmaker, bot.id, other.pubkey, "Antonia")
+
+    ts = int(time.time())
+    pkt = _make_dm_with_hops(other.node, peer_pubkey=bot.pubkey, text="hi", timestamp=ts, hops=1)
+
+    sent.clear()
+    await svc.on_inbound_packet(raw=pkt.encode(), scope="public")
+
+    reply = _decode_outgoing_dm(sent, other.node, bot.pubkey)
+    assert reply is not None, "echo bot should reply to a non-echo companion identity"
+    assert reply.startswith('echo: "hi"')
+
+
+@pytest.mark.asyncio
 async def test_echo_bot_does_not_reply_on_dedup_replay(service_env) -> None:
     svc, sessionmaker, user_id, sent = service_env
 

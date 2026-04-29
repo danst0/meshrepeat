@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "meshcore-bridge"
-version = "0.2.6"
+version = "0.2.7"
 description = "MeshCore Internet-Spiegel Bridge-Daemon (asyncio + WebSocket)"
 requires-python = ">=3.12"
 authors = [{ name = "Daniel Dumke", email = "claude.ai.daniel@dumke.me" }]

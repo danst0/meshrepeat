@@ -212,6 +212,7 @@ class CompanionNode:
         text: str,
         timestamp: int | None = None,
         flood: bool = True,
+        path: bytes = b"",
     ) -> Packet:
         """Verschlüsselte Direktnachricht an ``peer_pubkey``.
 
@@ -219,6 +220,12 @@ class CompanionNode:
         ``[ts:4 LE] [flags:1] [text...]`` — flags bits sind
         ``(attempt & 3) | (txt_type << 2)``. Wir senden flags=0 =
         TXT_TYPE_PLAIN, attempt=0.
+
+        ``path`` (default leer) erzwingt DIRECT-Routing mit den
+        angegebenen Pfad-Hashes (1 Byte pro Hop, firmware-konvention),
+        wie sie aus einem zuvor empfangenen PATH-Return gelernt wurden.
+        Sonst wird FLOOD verwendet (``flood`` steuert, ob bei leerem
+        path FLOOD oder DIRECT ohne Pfad geschickt wird).
         """
         ts = timestamp if timestamp is not None else int(time.time())
         secret = self.local.calc_shared_secret(peer_pubkey)
@@ -230,6 +237,13 @@ class CompanionNode:
         encrypted = encrypt_then_mac(secret, plaintext)
         peer = Identity(peer_pubkey)
         body = peer.hash_prefix() + self.pub_hash + encrypted
+        if path:
+            return Packet(
+                route_type=RouteType.DIRECT,
+                payload_type=PayloadType.TXT_MSG,
+                payload=body,
+                path=path,
+            )
         return Packet(
             route_type=RouteType.FLOOD if flood else RouteType.DIRECT,
             payload_type=PayloadType.TXT_MSG,

@@ -33,6 +33,8 @@ _COLUMN_PATCHES: tuple[tuple[str, str, str], ...] = (
     ("companion_contacts", "last_lat", "FLOAT NULL"),
     ("companion_contacts", "last_lon", "FLOAT NULL"),
     ("companion_contacts", "node_type", "INTEGER NULL"),
+    ("companion_contacts", "out_path", "BLOB NULL"),
+    ("companion_contacts", "out_path_updated_at", "DATETIME NULL"),
     ("companion_messages", "room_sender_pubkey", "BLOB NULL"),
     ("companion_identities", "is_echo", "BOOLEAN NOT NULL DEFAULT 0"),
 )

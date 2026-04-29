@@ -212,6 +212,12 @@ class CompanionContact(Base):
     # Aus letzter ADVERT app_data extrahiert, falls Lat/Lon-Flag gesetzt war.
     last_lat: Mapped[float | None] = mapped_column(nullable=True)
     last_lon: Mapped[float | None] = mapped_column(nullable=True)
+    # Gelernter Out-Path zum Peer (Bytes vom PATH-Return des Peers, 1:1
+    # in DIRECT-DMs einsetzbar). NULL = noch nicht gelernt → FLOOD-Fallback.
+    out_path: Mapped[bytes | None] = mapped_column(BLOB, nullable=True)
+    out_path_updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

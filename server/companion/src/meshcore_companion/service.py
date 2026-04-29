@@ -65,6 +65,8 @@ _log = structlog.get_logger("companion")
 
 # Tag-Prefix einer Reply (4 Byte LE timestamp/tag, vor reply_data)
 _TAG_BYTES = 4
+# DM-ACK-Hash-Länge (firmware: sha256(...)[:4]).
+_ACK_HASH_LEN = 4
 
 PacketInjector = Callable[[Packet, str], Awaitable[None]]
 """Callable(packet, scope) — fügt ein Paket in den Mesh-Scope ein."""
@@ -193,6 +195,13 @@ class CompanionService:
     # Echo-Bot-Rate-Limit pro Sender-Pubkey. Schlüssel = sender_pubkey
     # (32 Byte); Wert = Backoff-Zustand. Siehe ``_echo_rate_allow``.
     _echo_rl: dict[bytes, _EchoRateState] = field(default_factory=dict)
+    # Pending DIRECT-DMs: ack_hash(4) → (sent_monotonic, identity_id, peer_pubkey).
+    # Wenn der ACK in ``_DM_DIRECT_TIMEOUT_S`` ausbleibt, gilt der gelernte
+    # out_path als stale → wir invalidieren ihn (NULL setzen) und der nächste
+    # send_dm geht per FLOOD. Nur DIRECT-Sends werden getrackt; FLOOD braucht
+    # keine Invalidation (kein Pfad zum Verwerfen).
+    _pending_dms: dict[bytes, tuple[float, UUID, bytes]] = field(default_factory=dict)
+    _dm_timeout_tasks: set[asyncio.Task[None]] = field(default_factory=set)
 
     # Echo-Rate-Limit-Parameter. Reply 1 → Cooldown 5 s,
     # 2 → 10, 3 → 20 … gedeckelt bei 300 s. Nach 600 s ohne Reply
@@ -201,6 +210,11 @@ class CompanionService:
     _ECHO_RL_MAX_S: ClassVar[float] = 300.0
     _ECHO_RL_STREAK_RESET_S: ClassVar[float] = 600.0
     _ECHO_RL_DICT_MAX: ClassVar[int] = 256
+
+    # ACK-Wartefrist für DIRECT-DMs. Wenn keine ACK in dieser Zeit ankommt,
+    # gilt der gelernte out_path als stale (Topologie-Änderung, Repeater
+    # offline, …) → wir invalidieren ihn.
+    _DM_DIRECT_TIMEOUT_S: ClassVar[float] = 30.0
 
     async def _emit(self, identity_id: UUID, event: dict[str, object]) -> None:
         if self.notify is None:
@@ -551,6 +565,54 @@ class CompanionService:
         self._request_timeout_tasks.add(task)
         task.add_done_callback(self._request_timeout_tasks.discard)
 
+    def _track_pending_dm(
+        self, *, ack_hash: bytes, identity_id: UUID, peer_pubkey: bytes
+    ) -> None:
+        """Trackt eine ausgehende DIRECT-DM gegen ihren erwarteten ACK-Hash
+        und spawnt den Invalidations-Timeout-Task."""
+        self._pending_dms[ack_hash] = (time.monotonic(), identity_id, peer_pubkey)
+        task = asyncio.create_task(
+            self._timeout_pending_dm(
+                ack_hash=ack_hash,
+                identity_id=identity_id,
+                peer_pubkey=peer_pubkey,
+            )
+        )
+        self._dm_timeout_tasks.add(task)
+        task.add_done_callback(self._dm_timeout_tasks.discard)
+
+    async def _timeout_pending_dm(
+        self, *, ack_hash: bytes, identity_id: UUID, peer_pubkey: bytes
+    ) -> None:
+        """Wartet ``_DM_DIRECT_TIMEOUT_S`` und invalidiert den out_path
+        des Peers, falls bis dahin kein ACK eingetroffen ist (ACK-Empfang
+        löscht den Pending-Eintrag)."""
+        from meshcore_bridge.db import CompanionContact
+
+        await asyncio.sleep(self._DM_DIRECT_TIMEOUT_S)
+        if self._pending_dms.pop(ack_hash, None) is None:
+            return  # ACK kam rechtzeitig
+        async with self.sessionmaker() as db:
+            contact = (
+                await db.execute(
+                    select(CompanionContact).where(
+                        CompanionContact.identity_id == identity_id,
+                        CompanionContact.peer_pubkey == peer_pubkey,
+                    )
+                )
+            ).scalar_one_or_none()
+            if contact is None or contact.out_path is None:
+                return
+            contact.out_path = None
+            contact.out_path_updated_at = datetime.now(UTC)
+            await db.commit()
+        _log.info(
+            "dm_out_path_invalidated",
+            peer=peer_pubkey[:4].hex(),
+            reason="ack_timeout",
+            timeout_s=self._DM_DIRECT_TIMEOUT_S,
+        )
+
     def _retries_quota(self, *, flood: bool) -> int:
         """Anzahl Retries je nach Route-Type. FLOOD ist „teuer" (jeder Retry
         re-floodet die Topologie), DIRECT ist „billig" (1 Paket pro Versuch),
@@ -805,11 +867,56 @@ class CompanionService:
         peer_pubkey: bytes,
         text: str,
     ) -> bool:
+        """Sendet eine DM. Wenn für den Peer ein out_path bekannt ist
+        (gelernt aus früherem PATH-Return), wird DIRECT mit diesem Pfad
+        geschickt — und bei ausbleibendem ACK in ``_DM_DIRECT_TIMEOUT_S``
+        invalidiert. Sonst: FLOOD."""
+        from meshcore_bridge.db import CompanionContact
+
         loaded = self._by_id.get(identity_id)
         if loaded is None:
             return False
-        pkt = loaded.node.make_dm(peer_pubkey=peer_pubkey, text=text)
+
+        out_path = b""
+        async with self.sessionmaker() as db:
+            contact = (
+                await db.execute(
+                    select(CompanionContact).where(
+                        CompanionContact.identity_id == identity_id,
+                        CompanionContact.peer_pubkey == peer_pubkey,
+                    )
+                )
+            ).scalar_one_or_none()
+            if contact is not None and contact.out_path:
+                out_path = contact.out_path
+
+        ts = int(time.time())
+        text_bytes = text.encode("utf-8")
+        pkt = loaded.node.make_dm(
+            peer_pubkey=peer_pubkey, text=text, timestamp=ts, path=out_path
+        )
         await self._persist_outgoing(loaded, peer_pubkey=peer_pubkey, text=text, raw=pkt.encode())
+
+        if out_path:
+            ack_hash = compute_dm_ack_hash(
+                timestamp=ts,
+                flags=0,
+                text_bytes=text_bytes,
+                sender_pubkey=loaded.pubkey,
+            )
+            self._track_pending_dm(
+                ack_hash=ack_hash,
+                identity_id=identity_id,
+                peer_pubkey=peer_pubkey,
+            )
+            _log.info(
+                "dm_send_direct",
+                identity=loaded.name,
+                peer=peer_pubkey[:4].hex(),
+                hops=len(out_path),
+                ack=ack_hash.hex(),
+            )
+
         if self.inject is not None:
             await self.inject(pkt, loaded.scope)
         return True
@@ -1029,6 +1136,8 @@ class CompanionService:
             await self._handle_inbound_response(pkt=pkt, scope=scope)
         elif pkt.payload_type == PayloadType.PATH:
             await self._handle_inbound_path(pkt=pkt, scope=scope)
+        elif pkt.payload_type == PayloadType.ACK:
+            self._handle_inbound_ack(pkt=pkt)
 
     # ---------- internal ----------
 
@@ -1238,10 +1347,12 @@ class CompanionService:
                     )
                 except Exception:
                     _log.exception("dm_ack_send_failed")
+            sender_loaded = self._by_pubkey.get(decoded.sender_pubkey)
+            sender_is_echo = sender_loaded is not None and sender_loaded.is_echo
             if (
                 loaded.is_echo
                 and existing is None
-                and decoded.sender_pubkey not in self._by_pubkey
+                and not sender_is_echo
                 and self._echo_rate_allow(decoded.sender_pubkey, time.monotonic())
             ):
                 try:
@@ -1490,6 +1601,25 @@ class CompanionService:
             )
             return
 
+    def _handle_inbound_ack(self, *, pkt: Packet) -> None:
+        """ACK-Frame (4 Byte unverschlüsselter ack_hash). Wenn er zu einer
+        unserer pending DIRECT-DMs passt → Pending-Eintrag entfernen, was
+        den Timeout-Task no-op werden lässt (out_path bleibt erhalten)."""
+        if len(pkt.payload) != _ACK_HASH_LEN:
+            return
+        ack_hash = bytes(pkt.payload)
+        entry = self._pending_dms.pop(ack_hash, None)
+        if entry is None:
+            return
+        sent_mono, _, peer_pubkey = entry
+        rtt_ms = int((time.monotonic() - sent_mono) * 1000)
+        _log.info(
+            "dm_ack_recv",
+            peer=peer_pubkey[:4].hex(),
+            ack=ack_hash.hex(),
+            rtt_ms=rtt_ms,
+        )
+
     async def _handle_inbound_path(self, *, pkt: Packet, scope: str) -> None:
         """PATH-Wrapper auf einen FLOOD-REQ (insb. ANON_REQ-Login).
         Repeater verpackt die RESPONSE in PATH, damit der Sender
@@ -1524,6 +1654,25 @@ class CompanionService:
                 extra_type=extra_type,
                 extra_len=len(extra),
             )
+            # Out-Path lernen — der vom Peer in den PATH-Return gepackte
+            # path_bytes ist firmware-konvention 1:1 unser Out-Path zum
+            # Peer (Mesh.cpp:434, BaseChatMesh.cpp:217-231). Persistieren
+            # wir, damit zukünftige DMs an den Peer als DIRECT laufen.
+            if path_bytes:
+                await self._persist_out_path(
+                    identity_id=loaded.id,
+                    peer_pubkey=peer.pub_key,
+                    path_bytes=path_bytes,
+                )
+            # Embedded ACK (DM-Delivery-Confirmation) → wie ACK-Frame
+            # behandeln, damit der Pending-DM-Timeout aufhört zu laufen
+            # (verhindert unnötige out_path-Invalidation, falls der
+            # separate ACK-Frame nicht ankommt, der PATH-Return aber schon).
+            if extra_type == int(PayloadType.ACK) and len(extra) == _ACK_HASH_LEN:
+                self._handle_inbound_ack(
+                    pkt=Packet(payload_type=PayloadType.ACK, payload=bytes(extra))
+                )
+                return
             # Nur eingebettete RESPONSE interessiert uns (REQ/Login-Reply).
             # extra = [tag:4 LE] [reply_data...]
             if extra_type != int(PayloadType.RESPONSE) or len(extra) < _TAG_BYTES:
@@ -1538,6 +1687,41 @@ class CompanionService:
                 contacts=contacts,
             )
             return
+
+    async def _persist_out_path(
+        self,
+        *,
+        identity_id: UUID,
+        peer_pubkey: bytes,
+        path_bytes: bytes,
+    ) -> None:
+        """Speichert den gelernten Out-Path im Contact. No-op, wenn der
+        Peer (noch) nicht in den Contacts ist oder der Path identisch zum
+        bereits gespeicherten ist (vermeidet leeren UPDATE)."""
+        from meshcore_bridge.db import CompanionContact
+
+        async with self.sessionmaker() as db:
+            contact = (
+                await db.execute(
+                    select(CompanionContact).where(
+                        CompanionContact.identity_id == identity_id,
+                        CompanionContact.peer_pubkey == peer_pubkey,
+                    )
+                )
+            ).scalar_one_or_none()
+            if contact is None:
+                return
+            if contact.out_path == path_bytes:
+                return
+            contact.out_path = path_bytes
+            contact.out_path_updated_at = datetime.now(UTC)
+            await db.commit()
+        _log.info(
+            "out_path_learned",
+            identity_id=str(identity_id),
+            peer=peer_pubkey[:4].hex(),
+            hops=len(path_bytes),
+        )
 
     async def _process_response_payload(
         self,
