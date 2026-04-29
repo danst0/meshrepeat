@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import secrets
 import struct
 import time
 from dataclasses import dataclass
@@ -367,9 +368,14 @@ class CompanionNode:
         gegen ``_prefs.guest_password`` — bei vielen Repeatern leer →
         Guest-ACL-Eintrag. Returns ``(packet, tag)`` für RTT-Tracking.
         """
-        ts = timestamp if timestamp is not None else int(time.time())
+        # `timestamp` bleibt als Test-Override-Parameter, fließt aber nicht
+        # mehr in den Tag.
+        _ = timestamp
+        # `tag` ist die Korrelations-ID für die RESPONSE — Random statt
+        # `ts & 0xFFFFFFFF`, damit Retries innerhalb derselben Sekunde nicht
+        # vom Anti-Replay-Cache des Repeaters verworfen werden.
         if tag is None:
-            tag = ts & 0xFFFFFFFF
+            tag = secrets.randbits(32)
         pw_bytes = password.encode("utf-8")
         plaintext = int.to_bytes(tag, 4, "little", signed=False) + pw_bytes + b"\x00"
         secret = self.local.calc_shared_secret(peer_pubkey)
@@ -429,8 +435,13 @@ class CompanionNode:
         Returns ``(packet, tag)`` — ``tag`` wird als Korrelations-ID in
         der RESPONSE zurück-echot.
         """
+        # Random tag (siehe make_anon_login_req): vermeidet Tag-Kollisionen
+        # zwischen schnell aufeinanderfolgenden Requests + Anti-Replay-Drops.
+        # ``timestamp`` bleibt als Test-Override-Parameter, fließt aber nicht
+        # mehr in den Tag.
+        _ = timestamp
         if tag is None:
-            tag = (timestamp if timestamp is not None else int(time.time())) & 0xFFFFFFFF
+            tag = secrets.randbits(32)
         plaintext = (
             int.to_bytes(tag, 4, "little", signed=False)
             + bytes([req_type, perm_mask_inverse, 0x00, 0x00, 0x00])

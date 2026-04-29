@@ -367,6 +367,31 @@ def test_room_push_decode_rejects_unknown_room() -> None:
     assert decoded is None
 
 
+def test_anon_login_req_uses_random_tag_per_call() -> None:
+    """Zwei aufeinanderfolgende ANON_REQ-Builds in derselben Sekunde müssen
+    verschiedene Tags liefern. Andernfalls verwerfen Repeater den zweiten
+    Versuch als Replay (Anti-Replay-Cache)."""
+    alice = CompanionNode(LocalIdentity.generate())
+    bob_pub = LocalIdentity.generate().pub_key
+    _, tag1 = alice.make_anon_login_req(peer_pubkey=bob_pub, password="hi")
+    _, tag2 = alice.make_anon_login_req(peer_pubkey=bob_pub, password="hi")
+    _, tag3 = alice.make_anon_login_req(peer_pubkey=bob_pub, password="hi")
+    assert len({tag1, tag2, tag3}) == 3
+    # 32 Bit Random — auch unter Last weit weg von Sekunden-Abhängigkeit
+    for t in (tag1, tag2, tag3):
+        assert 0 <= t < (1 << 32)
+
+
+def test_telemetry_req_uses_random_tag_per_call() -> None:
+    """Gleiche Eigenschaft für REQ_TYPE_GET_TELEMETRY (deckt indirekt auch
+    make_status_req ab, das auf make_telemetry_req zurückfällt)."""
+    alice = CompanionNode(LocalIdentity.generate())
+    bob_pub = LocalIdentity.generate().pub_key
+    _, t1 = alice.make_telemetry_req(peer_pubkey=bob_pub)
+    _, t2 = alice.make_telemetry_req(peer_pubkey=bob_pub)
+    assert t1 != t2
+
+
 def test_room_ack_hash_matches_firmware_formula() -> None:
     """ack_hash = sha256(reply_data || receiver_pubkey)[:4] mit
     reply_data = ts(4) || flags(1) || author_prefix(4) || text."""

@@ -75,7 +75,10 @@ class WebConfig(BaseModel):
 
 class CompanionConfig(BaseModel):
     enabled: bool = True
-    advert_interval_s: int = 3600
+    # 600s (10 Min) hält die Path-Caches der Repeater im Mesh frisch — bei
+    # 3600s (1 h) wird Antonias Reverse-Path zwischendurch verdrängt und
+    # Replies bleiben aus.
+    advert_interval_s: int = 600
 
 
 class StorageConfig(BaseModel):

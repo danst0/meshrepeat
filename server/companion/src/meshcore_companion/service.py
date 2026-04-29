@@ -128,12 +128,31 @@ _LOGIN_SESSION_TTL_S = 3600
 
 
 @dataclass
+class _RetryMeta:
+    """Metadaten für automatische Retries bei ausbleibender RESPONSE.
+
+    Wir speichern alles, was wir brauchen, um den Request bei Timeout
+    mit neuem Tag neu zu bauen — ohne den Original-Caller (FastAPI-Route)
+    erneut zu involvieren.
+    """
+
+    kind: str  # "login" | "status" | "telemetry"
+    identity_id: UUID
+    peer_pubkey: bytes
+    retries_left: int
+    flood: bool  # True → FLOOD-Routing, False → DIRECT
+    # Builder-spezifische Parameter:
+    password: str | None = None  # nur für login relevant
+    msg_id: UUID | None = None  # ID der „warte auf Antwort"-Bubble
+
+
+@dataclass
 class CompanionService:
     master_key: bytes
     sessionmaker: Callable[[], AbstractAsyncContextManager[AsyncSession]]
     inject: PacketInjector | None = None
     notify: EventNotifier | None = None
-    advert_interval_s: int = 3600
+    advert_interval_s: int = 600
 
     _by_id: dict[UUID, LoadedIdentity] = field(default_factory=dict)
     _by_pubkey: dict[bytes, LoadedIdentity] = field(default_factory=dict)
@@ -146,6 +165,10 @@ class CompanionService:
     # Wird beim Empfang einer RESPONSE konsultiert, um die Antwort dem
     # passenden Request-Typ zuzuordnen (Status vs Telemetrie vs ...).
     _pending_reqs: dict[int, tuple[float, int, UUID, bytes]] = field(default_factory=dict)
+    # Retry-Metadaten parallel zu _pending_reqs (gleicher Tag-Schlüssel).
+    # Trägt alles, was wir brauchen, um den Request bei Timeout neu
+    # aufzubauen — Builder-Parameter, restliche Versuche, Route-Type.
+    _retry_meta: dict[int, _RetryMeta] = field(default_factory=dict)
     # Aktive Login-Sessions (in-memory). Key = (identity_id, peer_pubkey).
     _login_sessions: dict[tuple[UUID, bytes], LoginSession] = field(default_factory=dict)
     # Hintergrund-Tasks für Request-Timeouts. Wir halten Referenzen, damit
@@ -288,7 +311,7 @@ class CompanionService:
             await db.commit()
         return True
 
-    _PENDING_REQ_TTL_S = 120.0
+    _PENDING_REQ_TTL_S = 300.0
     # Echte MeshCore-REQ-Typen
     REQ_TYPE_STATUS = 0x01
     REQ_TYPE_TELEMETRY = 0x03
@@ -312,9 +335,13 @@ class CompanionService:
         self._pending_reqs = {t: v for t, v in self._pending_reqs.items() if v[0] >= cutoff}
         self._pending_reqs[tag] = (now, req_type, identity_id, peer_pubkey)
 
-    # User-facing Timeout für REQ → RESPONSE. Nach Ablauf wird der Pending-
-    # Eintrag gelöscht und im Chat eine Timeout-System-Message angezeigt.
-    _REQ_TIMEOUT_S = 10
+    # User-facing Timeout pro Versuch (REQ → RESPONSE). Wird beim Retry
+    # mehrfach hintereinander durchlaufen — je nach Route-Type bis zu
+    # ``_RETRIES_FLOOD`` bzw. ``_RETRIES_DIRECT`` mal.
+    _REQ_TIMEOUT_S = 20
+    # Anzahl Wiederholungen NACH dem ersten Versuch. Total = 1 + retries.
+    _RETRIES_FLOOD = 3   # ~ 4 Versuche * 20s = 80s max
+    _RETRIES_DIRECT = 5  # ~ 6 Versuche * 20s = 120s max
     _REQ_KIND_META: ClassVar[dict[str, tuple[str, str]]] = {
         # kind → (icon, label)
         "login": ("🔑", "Login"),
@@ -329,11 +356,12 @@ class CompanionService:
         peer_pubkey: bytes,
         kind: str,
         tag: int,
-    ) -> None:
+    ) -> UUID | None:
         """Schreibt eine "warte auf Antwort"-Bubble als CompanionMessage in
         die DB und feuert ein SSE-Event mit ``expires_at`` für den Frontend-
         Countdown. Persistierung sorgt dafür, dass der Anfrage-Verlauf nach
-        Reload sichtbar bleibt."""
+        Reload sichtbar bleibt. Liefert die DB-msg_id zurück, damit Retries
+        die bestehende Bubble per SSE-Update referenzieren können."""
         from meshcore_bridge.db import CompanionContact, CompanionMessage
 
         icon, label = self._REQ_KIND_META.get(kind, ("?", kind))
@@ -378,6 +406,7 @@ class CompanionService:
                 "direction": "system",
             },
         )
+        return msg_id
 
     async def _timeout_pending_req(
         self,
@@ -389,8 +418,9 @@ class CompanionService:
     ) -> None:
         """Wird als Hintergrund-Task pro REQ gestartet. Schläft
         ``_REQ_TIMEOUT_S`` und prüft, ob der Tag noch im pending-Pool ist —
-        wenn ja, wurde keine RESPONSE empfangen, wir markieren den Request
-        als abgelaufen."""
+        wenn ja, wurde keine RESPONSE empfangen. Falls Retries übrig:
+        Request mit neuem Tag erneut senden (transparent für UI). Sonst
+        finales „abgelaufen"-Event."""
         from meshcore_bridge.db import CompanionContact, CompanionMessage
 
         await asyncio.sleep(self._REQ_TIMEOUT_S)
@@ -398,7 +428,16 @@ class CompanionService:
             return  # RESPONSE kam rechtzeitig — Tag wurde schon entfernt
         loaded = self._by_id.get(identity_id)
         if loaded is None:
+            self._retry_meta.pop(tag, None)
             return
+
+        # Retry-Versuch: nur wenn Retry-Meta existiert und retries_left > 0.
+        meta = self._retry_meta.pop(tag, None)
+        if meta is not None and meta.retries_left > 0:
+            retried = await self._retry_request(meta=meta)
+            if retried:
+                return  # neuer Timeout-Task wurde gespawned
+
         _icon, label = self._REQ_KIND_META.get(kind, ("?", kind))
         text = f"⏱ {label}-Anfrage abgelaufen ({self._REQ_TIMEOUT_S}s ohne Antwort)"
         now_ts = datetime.now(UTC)
@@ -461,6 +500,95 @@ class CompanionService:
         self._request_timeout_tasks.add(task)
         task.add_done_callback(self._request_timeout_tasks.discard)
 
+    def _retries_quota(self, *, flood: bool) -> int:
+        """Anzahl Retries je nach Route-Type. FLOOD ist „teuer" (jeder Retry
+        re-floodet die Topologie), DIRECT ist „billig" (1 Paket pro Versuch),
+        deshalb mehr DIRECT-Retries."""
+        return self._RETRIES_FLOOD if flood else self._RETRIES_DIRECT
+
+    async def _retry_request(self, *, meta: _RetryMeta) -> bool:
+        """Baut den Request basierend auf ``meta`` neu (mit frischem Random-
+        Tag), trackt ihn, sendet ihn raus und spawnt einen neuen Timeout-
+        Task. Liefert True bei Erfolg, False wenn etwas am Re-Build schief
+        ging (in dem Fall wird der Aufrufer den finalen Timeout-Pfad gehen).
+        """
+        loaded = self._by_id.get(meta.identity_id)
+        if loaded is None:
+            return False
+
+        if meta.kind == "login":
+            pkt, new_tag = loaded.node.make_anon_login_req(
+                peer_pubkey=meta.peer_pubkey,
+                password=meta.password or "",
+                flood=meta.flood,
+            )
+            req_type = self.REQ_TYPE_LOGIN
+        elif meta.kind == "status":
+            pkt, new_tag = loaded.node.make_status_req(
+                peer_pubkey=meta.peer_pubkey, flood=meta.flood
+            )
+            req_type = self.REQ_TYPE_STATUS
+        elif meta.kind == "telemetry":
+            pkt, new_tag = loaded.node.make_telemetry_req(
+                peer_pubkey=meta.peer_pubkey, flood=meta.flood
+            )
+            req_type = self.REQ_TYPE_TELEMETRY
+        else:
+            return False
+
+        new_meta = _RetryMeta(
+            kind=meta.kind,
+            identity_id=meta.identity_id,
+            peer_pubkey=meta.peer_pubkey,
+            retries_left=meta.retries_left - 1,
+            flood=meta.flood,
+            password=meta.password,
+            msg_id=meta.msg_id,
+        )
+        self._retry_meta[new_tag] = new_meta
+        self._track_pending_req(
+            tag=new_tag,
+            req_type=req_type,
+            identity_id=meta.identity_id,
+            peer_pubkey=meta.peer_pubkey,
+        )
+        self._spawn_request_timeout(
+            tag=new_tag,
+            identity_id=meta.identity_id,
+            peer_pubkey=meta.peer_pubkey,
+            kind=meta.kind,
+        )
+
+        total_retries = self._retries_quota(flood=meta.flood)
+        attempt = total_retries - new_meta.retries_left + 1  # 1-basiert
+        total = total_retries + 1
+        _log.info(
+            "request_retry",
+            identity=loaded.name,
+            peer=meta.peer_pubkey[:4].hex(),
+            kind=meta.kind,
+            new_tag=new_tag,
+            attempt=attempt,
+            total=total,
+            flood=meta.flood,
+        )
+        await self._emit(
+            meta.identity_id,
+            {
+                "type": "request_retry",
+                "id": str(meta.msg_id) if meta.msg_id is not None else None,
+                "tag": new_tag,
+                "kind": meta.kind,
+                "attempt": attempt,
+                "total": total,
+                "peer_pubkey_hex": meta.peer_pubkey.hex(),
+                "timeout_s": self._REQ_TIMEOUT_S,
+            },
+        )
+        if self.inject is not None:
+            await self.inject(pkt, loaded.scope)
+        return True
+
     async def request_telemetry(
         self,
         *,
@@ -472,20 +600,30 @@ class CompanionService:
         Fire-and-forget: die RESPONSE wird asynchron via
         ``_handle_inbound_response`` verarbeitet (LPP-Buffer parsen, falls
         ``LPP_GPS`` enthalten ist → ``CompanionContact.last_lat/last_lon``
-        aktualisieren).
+        aktualisieren). Bei Timeout retry'd der Service automatisch
+        gemäß ``_RETRIES_FLOOD``/``_RETRIES_DIRECT``.
         """
         loaded = self._by_id.get(identity_id)
         if loaded is None:
             return False
-        pkt, tag = loaded.node.make_telemetry_req(peer_pubkey=peer_pubkey)
+        flood = True
+        pkt, tag = loaded.node.make_telemetry_req(peer_pubkey=peer_pubkey, flood=flood)
         self._track_pending_req(
             tag=tag,
             req_type=self.REQ_TYPE_TELEMETRY,
             identity_id=identity_id,
             peer_pubkey=peer_pubkey,
         )
-        await self._persist_pending_request(
+        msg_id = await self._persist_pending_request(
             loaded=loaded, peer_pubkey=peer_pubkey, kind="telemetry", tag=tag
+        )
+        self._retry_meta[tag] = _RetryMeta(
+            kind="telemetry",
+            identity_id=identity_id,
+            peer_pubkey=peer_pubkey,
+            retries_left=self._retries_quota(flood=flood),
+            flood=flood,
+            msg_id=msg_id,
         )
         self._spawn_request_timeout(
             tag=tag, identity_id=identity_id, peer_pubkey=peer_pubkey, kind="telemetry"
@@ -521,19 +659,32 @@ class CompanionService:
     ) -> bool:
         """ANON_REQ-Login bei einem Repeater oder Room. Bei leerem Passwort
         versucht der Server einen Guest-Match (oft erlaubt). Antwort kommt
-        als RESPONSE mit ``RESP_SERVER_LOGIN_OK``."""
+        als RESPONSE mit ``RESP_SERVER_LOGIN_OK``. Bei Timeout retry'd der
+        Service automatisch (FLOOD-Quota)."""
         loaded = self._by_id.get(identity_id)
         if loaded is None:
             return False
-        pkt, tag = loaded.node.make_anon_login_req(peer_pubkey=peer_pubkey, password=password)
+        flood = True
+        pkt, tag = loaded.node.make_anon_login_req(
+            peer_pubkey=peer_pubkey, password=password, flood=flood
+        )
         self._track_pending_req(
             tag=tag,
             req_type=self.REQ_TYPE_LOGIN,
             identity_id=identity_id,
             peer_pubkey=peer_pubkey,
         )
-        await self._persist_pending_request(
+        msg_id = await self._persist_pending_request(
             loaded=loaded, peer_pubkey=peer_pubkey, kind="login", tag=tag
+        )
+        self._retry_meta[tag] = _RetryMeta(
+            kind="login",
+            identity_id=identity_id,
+            peer_pubkey=peer_pubkey,
+            retries_left=self._retries_quota(flood=flood),
+            flood=flood,
+            password=password,
+            msg_id=msg_id,
         )
         self._spawn_request_timeout(
             tag=tag, identity_id=identity_id, peer_pubkey=peer_pubkey, kind="login"
@@ -558,20 +709,30 @@ class CompanionService:
         """Schickt einen REQ_TYPE_GET_STATUS — quasi „Ping mit Status-Daten".
 
         Antwort kommt als RESPONSE mit einer ``RepeaterStats``-Struktur,
-        Round-Trip-Zeit messen wir via ``_pending_reqs``.
+        Round-Trip-Zeit messen wir via ``_pending_reqs``. Bei Timeout
+        retry'd der Service automatisch (FLOOD-Quota).
         """
         loaded = self._by_id.get(identity_id)
         if loaded is None:
             return False
-        pkt, tag = loaded.node.make_status_req(peer_pubkey=peer_pubkey)
+        flood = True
+        pkt, tag = loaded.node.make_status_req(peer_pubkey=peer_pubkey, flood=flood)
         self._track_pending_req(
             tag=tag,
             req_type=self.REQ_TYPE_STATUS,
             identity_id=identity_id,
             peer_pubkey=peer_pubkey,
         )
-        await self._persist_pending_request(
+        msg_id = await self._persist_pending_request(
             loaded=loaded, peer_pubkey=peer_pubkey, kind="status", tag=tag
+        )
+        self._retry_meta[tag] = _RetryMeta(
+            kind="status",
+            identity_id=identity_id,
+            peer_pubkey=peer_pubkey,
+            retries_left=self._retries_quota(flood=flood),
+            flood=flood,
+            msg_id=msg_id,
         )
         self._spawn_request_timeout(
             tag=tag, identity_id=identity_id, peer_pubkey=peer_pubkey, kind="status"
@@ -1281,6 +1442,9 @@ class CompanionService:
         from meshcore_bridge.db import CompanionContact, CompanionMessage
 
         pending = self._pending_reqs.pop(tag, None)
+        # Erfolgreicher Receive → Retry-Meta verwerfen, sonst feuert ein
+        # nachlaufender Timeout-Task einen unnötigen Resend.
+        self._retry_meta.pop(tag, None)
         now_mono = time.monotonic()
         rtt_ms = int((now_mono - pending[0]) * 1000) if pending else None
         req_type = pending[1] if pending else self.REQ_TYPE_TELEMETRY
