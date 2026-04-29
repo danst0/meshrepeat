@@ -220,11 +220,16 @@ code, pre {
   cursor: pointer;
   font-size: 1.4rem;
   line-height: 1;
-  align-self: center;
+  /* stretch statt center: Hitbox füllt die ganze Grid-Cell, sonst landen
+     Klicks am oberen/unteren Rand auf dem Wrapper-Div und versanden. */
+  align-self: stretch;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   min-width: 44px;
   min-height: 44px;
 }
-.thread-star:hover { opacity: .8; transform: scale(1.15); }
+.thread-star:hover { opacity: .8; background: rgba(130,170,255,.06); }
 .thread-item-bare { background: transparent; border-left-color: transparent; }
 .thread-row.active .thread-item-bare { border-left-color: var(--accent); }
 .thread-top {

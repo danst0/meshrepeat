@@ -308,6 +308,7 @@
         star.title = "Als Favorit markieren (legt Kontakt an)";
         star.addEventListener("click", async (e) => {
           e.stopPropagation();
+          e.preventDefault();
           const fd = new FormData();
           fd.append("peer_pubkey_hex", t.peer_pubkey_hex);
           if (t.peer_name) fd.append("peer_name", t.peer_name);
@@ -316,19 +317,59 @@
             const r = await fetch(`${API}/identities/${IDENTITY_ID}/contacts`, {
               method: "POST", body: fd, credentials: "same-origin",
             });
-            if (r.ok) await loadThreads();
-          } catch (err) { console.warn("upsert contact failed", err); }
+            if (!r.ok) {
+              console.warn("upsert contact failed:", r.status);
+              alert("Kontakt anlegen fehlgeschlagen (HTTP " + r.status + ")");
+              return;
+            }
+            const data = await r.json().catch(() => null);
+            // AT_TARGETS lokal updaten: contact_id und favorite ziehen,
+            // sonst rendert der nächste Filter-Pass den stale Bootstrap-
+            // Stand und zeigt den Stern wieder hohl, obwohl der Backend-
+            // Toggle erfolgreich war.
+            if (data) {
+              for (const at of AT_TARGETS) {
+                if (at.pubkey_hex === t.peer_pubkey_hex) {
+                  if (data.id) at.contact_id = data.id;
+                  at.favorite = !!data.favorite;
+                }
+              }
+            }
+            await loadThreads();
+          } catch (err) {
+            console.warn("upsert contact failed", err);
+            alert("Kontakt anlegen fehlgeschlagen: " + (err && err.message || err));
+          }
         });
       } else {
         star.title = t.favorite ? "Favorit entfernen" : "Als Favorit markieren";
         star.addEventListener("click", async (e) => {
           e.stopPropagation();
+          e.preventDefault();
           try {
             const r = await fetch(`${API}/contacts/${t.id}/favorite`, {
               method: "POST", credentials: "same-origin",
             });
-            if (r.ok) await loadThreads();
-          } catch (err) { console.warn("favorite toggle failed", err); }
+            if (!r.ok) {
+              console.warn("favorite toggle failed:", r.status);
+              alert("Favorit-Toggle fehlgeschlagen (HTTP " + r.status + ")");
+              return;
+            }
+            const data = await r.json().catch(() => null);
+            // AT_TARGETS-Mirror updaten — wenn der Kontakt nur noch über
+            // den AT_TARGETS-Pfad in der gefilterten Liste auftaucht
+            // (z.B. raus aus /threads-Top-100), sonst zeigt das
+            // Re-Render nach loadThreads den stale favorite-Wert.
+            if (data) {
+              for (const at of AT_TARGETS) {
+                if (at.contact_id === t.id) at.favorite = !!data.favorite;
+              }
+            }
+            await loadThreads();
+          } catch (err) {
+            console.warn("favorite toggle failed", err);
+            alert("Favorit-Toggle fehlgeschlagen: " + (err && err.message || err));
+          }
         });
       }
       wrap.appendChild(star);
@@ -965,12 +1006,27 @@
         star.title = c.favorite ? "Favorit entfernen" : "Als Favorit markieren";
         star.addEventListener("click", async (e) => {
           e.stopPropagation();
+          e.preventDefault();
           try {
             const r = await fetch(`${API}/contacts/${c.id}/favorite`, {
               method: "POST", credentials: "same-origin",
             });
-            if (r.ok) await refreshTelemetryList();
-          } catch (e) { console.warn("favorite toggle failed", e); }
+            if (!r.ok) {
+              console.warn("favorite toggle failed:", r.status);
+              alert("Favorit-Toggle fehlgeschlagen (HTTP " + r.status + ")");
+              return;
+            }
+            const data = await r.json().catch(() => null);
+            if (data) {
+              for (const at of AT_TARGETS) {
+                if (at.contact_id === c.id) at.favorite = !!data.favorite;
+              }
+            }
+            await refreshTelemetryList();
+          } catch (err) {
+            console.warn("favorite toggle failed", err);
+            alert("Favorit-Toggle fehlgeschlagen: " + (err && err.message || err));
+          }
         });
         row.appendChild(star);
         const nameDiv = document.createElement("div");
