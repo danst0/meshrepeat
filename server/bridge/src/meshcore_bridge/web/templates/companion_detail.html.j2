@@ -124,9 +124,19 @@
         Scope: <code>{{ identity.scope }}</code><br>
         Created: {{ identity.created_at | localtime }}
       </p>
+      <p style="margin-top:1rem">
+        Echo-Bot: <strong>{{ 'an' if identity.is_echo else 'aus' }}</strong>
+        — beantwortet eingehende DMs automatisch mit Text + Metadaten (hops, route, age, len).
+      </p>
       <div style="display:flex;gap:.5rem;flex-wrap:wrap;margin-top:1rem">
         <form method="post" action="/companion/{{ identity.id }}/advert" style="margin:0">
           <button type="submit" style="margin:0">Advert jetzt senden</button>
+        </form>
+        <form method="post" action="/companion/{{ identity.id }}/echo" style="margin:0">
+          <input type="hidden" name="enabled" value="{{ 'false' if identity.is_echo else 'true' }}">
+          <button type="submit" style="margin:0">
+            {{ 'Echo-Bot deaktivieren' if identity.is_echo else 'Echo-Bot aktivieren' }}
+          </button>
         </form>
         <form method="post" action="/companion/{{ identity.id }}/archive" style="margin:0"
               onsubmit="return confirm('Identität archivieren? Sie verschwindet aus der Liste und sendet keine Adverts mehr.');">

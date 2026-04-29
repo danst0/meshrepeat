@@ -75,6 +75,7 @@ def _identity_dict(row: CompanionIdentity) -> dict[str, Any]:
         "pubkey_hex": row.pubkey.hex(),
         "created_at": _ts_iso(row.created_at),
         "archived_at": _ts_iso(row.archived_at),
+        "is_echo": row.is_echo,
     }
 
 
@@ -104,6 +105,7 @@ async def create_identity(
     request: Request,
     name: Annotated[str, Form()],
     scope: Annotated[str, Form()],
+    is_echo: Annotated[bool, Form()] = False,
     user: User = Depends(current_user_required),
 ) -> dict[str, Any]:
     svc = _service(request)
@@ -111,12 +113,15 @@ async def create_identity(
         raise HTTPException(status_code=503, detail="companion-service not running")
     if scope == "pool:new":
         scope = f"pool:{uuid4()}"
-    loaded = await svc.add_identity(user_id=user.id, name=name.strip(), scope=scope)
+    loaded = await svc.add_identity(
+        user_id=user.id, name=name.strip(), scope=scope, is_echo=is_echo
+    )
     return {
         "id": str(loaded.id),
         "name": loaded.name,
         "scope": loaded.scope,
         "pubkey_hex": loaded.pubkey.hex(),
+        "is_echo": loaded.is_echo,
     }
 
 
@@ -156,6 +161,24 @@ async def archive_identity(
         raise HTTPException(status_code=503)
     ok = await svc.archive_identity(identity_id)
     return {"ok": ok}
+
+
+@router.post("/identities/{identity_id}/echo", response_model=None)
+async def set_identity_echo(
+    request: Request,
+    identity_id: UUID,
+    enabled: Annotated[bool, Form()],
+    user: User = Depends(current_user_required),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, bool]:
+    row = await db.get(CompanionIdentity, identity_id)
+    if row is None or row.user_id != user.id:
+        raise HTTPException(status_code=404)
+    svc = _service(request)
+    if svc is None:
+        raise HTTPException(status_code=503)
+    ok = await svc.set_echo(identity_id, enabled)
+    return {"ok": ok, "is_echo": enabled if ok else row.is_echo}
 
 
 @router.get("/messages")
@@ -1364,6 +1387,23 @@ async def companion_identity_archive(
         raise HTTPException(status_code=503)
     await svc.archive_identity(identity_id)
     return RedirectResponse(url="/companion/", status_code=303)
+
+
+@ui_router.post("/{identity_id}/echo", response_model=None)
+async def companion_identity_echo(
+    request: Request,
+    identity_id: UUID,
+    enabled: Annotated[bool, Form()],
+    user: User = Depends(current_user_required),
+    db: AsyncSession = Depends(get_db),
+) -> RedirectResponse:
+    if not await _user_owns_identity(db, user.id, identity_id):
+        raise HTTPException(status_code=404)
+    svc = _service(request)
+    if svc is None:
+        raise HTTPException(status_code=503)
+    await svc.set_echo(identity_id, enabled)
+    return RedirectResponse(url=f"/companion/{identity_id}/#tab=settings", status_code=303)
 
 
 @ui_router.post("/{identity_id}/channels", response_model=None)

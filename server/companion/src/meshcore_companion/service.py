@@ -104,6 +104,7 @@ class LoadedIdentity:
     name: str
     scope: str
     node: CompanionNode
+    is_echo: bool = False
 
     @property
     def pubkey(self) -> bytes:
@@ -125,6 +126,21 @@ class LoginSession:
 
 # Default-TTL für eingeloggte Sessions (1 Stunde).
 _LOGIN_SESSION_TTL_S = 3600
+
+
+@dataclass
+class _EchoRateState:
+    """Pro-Sender-Zustand für die progressiv steigende Echo-Rate-Begrenzung.
+
+    ``streak`` wächst um 1 mit jeder Reply, die innerhalb des
+    Reset-Fensters (``_ECHO_RL_STREAK_RESET_S``) der vorherigen Reply
+    landet; sonst startet er wieder bei 1. Cooldown verdoppelt sich pro
+    Streak-Stufe (``_ECHO_RL_BASE_S * 2**(streak-1)``), gedeckelt bei
+    ``_ECHO_RL_MAX_S``."""
+
+    next_allowed_at: float  # monotonic
+    last_reply_at: float  # monotonic
+    streak: int
 
 
 @dataclass
@@ -174,6 +190,17 @@ class CompanionService:
     # Hintergrund-Tasks für Request-Timeouts. Wir halten Referenzen, damit
     # der GC sie nicht canceln kann, solange sie noch laufen.
     _request_timeout_tasks: set[asyncio.Task[None]] = field(default_factory=set)
+    # Echo-Bot-Rate-Limit pro Sender-Pubkey. Schlüssel = sender_pubkey
+    # (32 Byte); Wert = Backoff-Zustand. Siehe ``_echo_rate_allow``.
+    _echo_rl: dict[bytes, _EchoRateState] = field(default_factory=dict)
+
+    # Echo-Rate-Limit-Parameter. Reply 1 → Cooldown 5 s,
+    # 2 → 10, 3 → 20 … gedeckelt bei 300 s. Nach 600 s ohne Reply
+    # an denselben Sender startet die Streak wieder bei 1.
+    _ECHO_RL_BASE_S: ClassVar[float] = 5.0
+    _ECHO_RL_MAX_S: ClassVar[float] = 300.0
+    _ECHO_RL_STREAK_RESET_S: ClassVar[float] = 600.0
+    _ECHO_RL_DICT_MAX: ClassVar[int] = 256
 
     async def _emit(self, identity_id: UUID, event: dict[str, object]) -> None:
         if self.notify is None:
@@ -204,6 +231,7 @@ class CompanionService:
                     name=row.name,
                     scope=row.scope,
                     node=CompanionNode(local),
+                    is_echo=row.is_echo,
                 )
                 self._by_id[row.id] = loaded
                 self._by_pubkey[loaded.pubkey] = loaded
@@ -239,6 +267,7 @@ class CompanionService:
         user_id: UUID,
         name: str,
         scope: str,
+        is_echo: bool = False,
     ) -> LoadedIdentity:
         """Erzeugt eine neue Identity, persistiert sie verschlüsselt."""
         from meshcore_bridge.db import CompanionIdentity
@@ -251,6 +280,7 @@ class CompanionService:
                 pubkey=local.pub_key,
                 privkey_enc=b"",  # placeholder, replaced below
                 scope=scope,
+                is_echo=is_echo,
             )
             db.add(row)
             await db.flush()
@@ -259,7 +289,12 @@ class CompanionService:
             row_id = row.id
 
         loaded = LoadedIdentity(
-            id=row_id, user_id=user_id, name=name, scope=scope, node=CompanionNode(local)
+            id=row_id,
+            user_id=user_id,
+            name=name,
+            scope=scope,
+            node=CompanionNode(local),
+            is_echo=is_echo,
         )
         self._by_id[row_id] = loaded
         self._by_pubkey[loaded.pubkey] = loaded
@@ -298,6 +333,22 @@ class CompanionService:
         loaded = self._by_id.get(identity_id)
         if loaded is not None:
             loaded.name = clean
+        return True
+
+    async def set_echo(self, identity_id: UUID, enabled: bool) -> bool:
+        """Schaltet das Echo-Bot-Flag um (DB + In-Memory)."""
+        from meshcore_bridge.db import CompanionIdentity
+
+        async with self.sessionmaker() as db:
+            row = await db.get(CompanionIdentity, identity_id)
+            if row is None or row.archived_at is not None:
+                return False
+            row.is_echo = enabled
+            await db.commit()
+        loaded = self._by_id.get(identity_id)
+        if loaded is not None:
+            loaded.is_echo = enabled
+        _log.info("is_echo_toggled", identity_id=str(identity_id), enabled=enabled)
         return True
 
     async def delete_channel(self, channel_id: UUID) -> bool:
@@ -340,7 +391,7 @@ class CompanionService:
     # ``_RETRIES_FLOOD`` bzw. ``_RETRIES_DIRECT`` mal.
     _REQ_TIMEOUT_S = 20
     # Anzahl Wiederholungen NACH dem ersten Versuch. Total = 1 + retries.
-    _RETRIES_FLOOD = 3   # ~ 4 Versuche * 20s = 80s max
+    _RETRIES_FLOOD = 3  # ~ 4 Versuche * 20s = 80s max
     _RETRIES_DIRECT = 5  # ~ 6 Versuche * 20s = 120s max
     _REQ_KIND_META: ClassVar[dict[str, tuple[str, str]]] = {
         # kind → (icon, label)
@@ -930,6 +981,33 @@ class CompanionService:
         self._seen_raw[key] = now
         return False
 
+    def _echo_rate_allow(self, sender_pubkey: bytes, now: float) -> bool:
+        """Progressives Per-Sender-Rate-Limit für Echo-Replies.
+
+        Liefert ``True``, wenn der Sender aktuell antworten darf, und
+        aktualisiert dabei den Backoff-Zustand. Cooldown verdoppelt sich
+        pro aufeinanderfolgender Reply (innerhalb von
+        ``_ECHO_RL_STREAK_RESET_S`` seit der letzten), gedeckelt bei
+        ``_ECHO_RL_MAX_S``. Nach längerer Pause beginnt die Streak neu.
+        """
+        state = self._echo_rl.get(sender_pubkey)
+        if state is not None and now < state.next_allowed_at:
+            return False
+        if state is None or (now - state.last_reply_at) >= self._ECHO_RL_STREAK_RESET_S:
+            streak = 1
+        else:
+            streak = state.streak + 1
+        cooldown = min(self._ECHO_RL_MAX_S, self._ECHO_RL_BASE_S * (2 ** (streak - 1)))
+        self._echo_rl[sender_pubkey] = _EchoRateState(
+            next_allowed_at=now + cooldown,
+            last_reply_at=now,
+            streak=streak,
+        )
+        if len(self._echo_rl) > self._ECHO_RL_DICT_MAX:
+            cutoff = now - self._ECHO_RL_STREAK_RESET_S
+            self._echo_rl = {k: v for k, v in self._echo_rl.items() if v.last_reply_at >= cutoff}
+        return True
+
     async def on_inbound_packet(self, *, raw: bytes, scope: str) -> None:
         """Hook, vom Router pro empfangenem Paket gerufen."""
         try:
@@ -1160,6 +1238,46 @@ class CompanionService:
                     )
                 except Exception:
                     _log.exception("dm_ack_send_failed")
+            if (
+                loaded.is_echo
+                and existing is None
+                and decoded.sender_pubkey not in self._by_pubkey
+                and self._echo_rate_allow(decoded.sender_pubkey, time.monotonic())
+            ):
+                try:
+                    age = int(time.time()) - decoded.timestamp
+                    age_str = f"{age}s" if age >= 0 else "?"
+                    route = pkt.route_type.name
+                    hops = pkt.hop_count
+                    text_len = len(text_bytes)
+                    suffix = f" — hops={hops} route={route} age={age_str} len={text_len}b"
+                    prefix = 'echo: "'
+                    # 140-Byte-Reserve unter dem TXT_MSG-Plaintext-Limit (~229 Byte).
+                    budget = 140 - len(prefix.encode()) - len(b'"') - len(suffix.encode())
+                    encoded = decoded.text.encode("utf-8")
+                    if len(encoded) <= max(0, budget):
+                        body = decoded.text
+                    else:
+                        # 3 Byte für '…' reservieren, damit Total ≤ 140 bleibt.
+                        body = encoded[: max(0, budget - 3)].decode("utf-8", errors="ignore") + "…"
+                    reply = f'{prefix}{body}"{suffix}'
+                    await self.send_dm(
+                        identity_id=loaded.id,
+                        peer_pubkey=decoded.sender_pubkey,
+                        text=reply,
+                    )
+                    _log.info(
+                        "echo_bot_reply_sent",
+                        identity=loaded.name,
+                        peer=decoded.sender_pubkey[:4].hex(),
+                        hops=hops,
+                        route=route,
+                        age_s=age,
+                        orig_len=text_len,
+                        reply_len=len(reply.encode("utf-8")),
+                    )
+                except Exception:
+                    _log.exception("echo_bot_reply_failed", identity=loaded.name)
             return  # erste Identity, die's lesen kann, gewinnt
 
     async def _handle_room_push(

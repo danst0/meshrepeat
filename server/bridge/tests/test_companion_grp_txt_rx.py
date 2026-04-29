@@ -3,24 +3,18 @@ empfangene Channel-Posts und unterdrückt eigene Echo-Posts."""
 
 from __future__ import annotations
 
-import os
 from datetime import UTC, datetime
-from pathlib import Path
 from uuid import uuid4
 
 import pytest
-import pytest_asyncio
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from meshcore_bridge.db import (
     CompanionChannel,
     CompanionContact,
     CompanionIdentity,
     CompanionMessage,
-    User,
 )
-from meshcore_bridge.db.models import Base
 from meshcore_companion.crypto import (
     LocalIdentity,
     derive_channel_secret,
@@ -28,47 +22,6 @@ from meshcore_companion.crypto import (
 )
 from meshcore_companion.node import CompanionNode, encode_advert_app_data
 from meshcore_companion.packet import Packet, PayloadType, RouteType
-from meshcore_companion.service import CompanionService
-
-
-@pytest_asyncio.fixture
-async def service_env(tmp_path: Path):
-    url = f"sqlite+aiosqlite:///{tmp_path / 'svc.sqlite'}"
-    engine = create_async_engine(url, future=True)
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    sessionmaker = async_sessionmaker(engine, expire_on_commit=False)
-
-    async with sessionmaker() as db:
-        u = User(
-            id=uuid4(),
-            email="t@t",
-            password_hash="x",
-            role="owner",
-        )
-        db.add(u)
-        await db.commit()
-        user_id = u.id
-
-    master_key = os.urandom(32)
-    sent: list[tuple[bytes, str]] = []
-
-    async def inject(pkt, scope):
-        sent.append((pkt.encode(), scope))
-
-    svc = CompanionService(
-        master_key=master_key,
-        sessionmaker=sessionmaker,
-        inject=inject,
-        advert_interval_s=3600,
-    )
-    await svc.start()
-
-    try:
-        yield svc, sessionmaker, user_id, sent
-    finally:
-        await svc.stop()
-        await engine.dispose()
 
 
 @pytest.mark.asyncio

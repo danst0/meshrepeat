@@ -119,6 +119,9 @@ class CompanionIdentity(Base):
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
     archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    is_echo: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="0", default=False
+    )
 
     owner: Mapped[User] = relationship(back_populates="identities")
 
