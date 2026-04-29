@@ -1,0 +1,848 @@
+#!/usr/bin/env python3
+"""spiegel-companion — CLI gegen die Companion-API des MeshCore-Spiegels.
+
+Login per E-Mail+Passwort eines Users; Cookie wird in einer ephemeren
+Session gehalten. Identitäten und Peers dürfen per UUID/Hex oder per
+Name angegeben werden — die Auflösung passiert client-seitig über
+``/identities`` und ``/identities/<id>/contacts``.
+
+Subcommands:
+  identities                          eigene Identitäten
+  contacts <ident> [-n N]             Kontakte einer Identity
+  threads  <ident>                    DM- und Channel-Threads
+  dms      <ident> <peer> [-n N]      DM-History
+  ch-msgs  <ident> <channel> [-n N]   Channel-Verlauf
+  send-dm  <ident> <peer> <text>      DM senden
+  send-ch  <ident> <channel> <text>   Channel-Nachricht senden
+  login    <ident> <peer> [-p PW]     ANON_REQ-Login
+  login-state <ident> <peer>          aktuelle Login-Session
+  status   <ident> <peer>             REQ_TYPE_GET_STATUS
+  telemetry <ident> <peer>            REQ_TYPE_GET_TELEMETRY
+  advert   <ident>                    sofort einen Advert pushen
+  search   <ident> <query>            FTS5-Volltextsuche
+  tail     <ident>                    SSE-Stream live mitschneiden
+
+Auth via ENV (kompatibel zu spiegel-ctl):
+  MESHCORE_CTL_URL          Default: https://meshcore.dumke.me
+  MESHCORE_CTL_EMAIL        User-E-Mail
+  MESHCORE_CTL_PASSWORD     Passwort
+  MESHCORE_SESSION_FILE     Cookie-Jar (Default: ~/.config/spiegel-companion/session)
+  MESHCORE_SESSION          Cookie-Wert direkt (überschreibt Datei + Login)
+
+Sessions werden nach erfolgreichem Login persistent abgelegt (chmod 600).
+Folgeaufrufe verwenden die Datei statt erneut Email/Passwort zu fordern.
+
+  spiegel-companion auth login           explizit Login + Cookie speichern
+  spiegel-companion auth logout          Cookie-Datei löschen
+  spiegel-companion auth whoami          aktuelle Session prüfen
+
+``--json`` schaltet auf maschinenlesbare Ausgabe um.
+
+Beispiele:
+  spiegel-companion auth login
+  spiegel-companion identities
+  spiegel-companion contacts Antonia -n 20
+  spiegel-companion login Antonia "Room Kaarst" -p hello
+  spiegel-companion send-dm Antonia a283f7f7 "Servus"
+  spiegel-companion tail Antonia
+"""
+
+from __future__ import annotations
+
+import argparse
+import getpass
+import http.cookiejar
+import json
+import os
+import sys
+import time
+from pathlib import Path
+from typing import Any
+from urllib.error import HTTPError, URLError
+from urllib.parse import quote, urlencode, urlsplit
+from urllib.request import HTTPCookieProcessor, Request, build_opener
+
+DEFAULT_URL = "https://meshcore.dumke.me"
+SESSION_COOKIE = "meshcore_sid"
+_UUID_LEN = 36
+_PUBKEY_HEX_LEN = 64
+
+
+def _default_session_path() -> Path:
+    base = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
+    return Path(base) / "spiegel-companion" / "session"
+
+
+class Client:
+    def __init__(self, base_url: str, session_file: Path | None = None) -> None:
+        self.base = base_url.rstrip("/")
+        self._session_file = session_file
+        self._jar = http.cookiejar.MozillaCookieJar()
+        if session_file and session_file.exists():
+            try:
+                self._jar.load(str(session_file), ignore_discard=True, ignore_expires=True)
+            except (OSError, http.cookiejar.LoadError) as e:
+                sys.stderr.write(f"Warnung: Session-Datei nicht lesbar ({e})\n")
+        self._opener = build_opener(HTTPCookieProcessor(self._jar))
+
+    def inject_session_cookie(self, value: str) -> None:
+        """Setzt den Session-Cookie aus MESHCORE_SESSION direkt in den Jar."""
+        host = urlsplit(self.base).hostname or ""
+        cookie = http.cookiejar.Cookie(
+            version=0, name=SESSION_COOKIE, value=value, port=None,
+            port_specified=False, domain=host, domain_specified=True,
+            domain_initial_dot=False, path="/", path_specified=True,
+            secure=self.base.startswith("https"), expires=None,
+            discard=False, comment=None, comment_url=None, rest={},
+        )
+        self._jar.set_cookie(cookie)
+
+    def has_session(self) -> bool:
+        for ck in self._jar:
+            if ck.name == SESSION_COOKIE and ck.value:
+                return True
+        return False
+
+    def save_session(self) -> None:
+        if self._session_file is None:
+            return
+        self._session_file.parent.mkdir(parents=True, exist_ok=True)
+        self._jar.save(str(self._session_file), ignore_discard=True, ignore_expires=True)
+        try:
+            os.chmod(self._session_file, 0o600)
+        except OSError:
+            pass
+
+    def clear_session(self) -> None:
+        self._jar.clear()
+        if self._session_file and self._session_file.exists():
+            try:
+                self._session_file.unlink()
+            except OSError as e:
+                sys.stderr.write(f"Konnte {self._session_file} nicht löschen: {e}\n")
+
+    def request(
+        self,
+        path: str,
+        *,
+        method: str = "GET",
+        data: dict[str, str] | None = None,
+        timeout: float = 20.0,
+        quiet: bool = False,
+    ) -> Any:
+        body: bytes | None = None
+        headers: dict[str, str] = {}
+        if data is not None:
+            body = urlencode(data).encode("utf-8")
+            headers["Content-Type"] = "application/x-www-form-urlencoded"
+            method = "POST"
+        url = f"{self.base}{path}"
+        req = Request(url, data=body, method=method, headers=headers)
+        try:
+            with self._opener.open(req, timeout=timeout) as resp:
+                ct = resp.headers.get("content-type", "")
+                payload = resp.read()
+                if "application/json" in ct:
+                    return json.loads(payload)
+                return payload.decode("utf-8", errors="replace")
+        except HTTPError as e:
+            if not quiet:
+                sys.stderr.write(
+                    f"HTTP {e.code} on {url}\n"
+                    f"{e.read().decode('utf-8', errors='replace')}\n"
+                )
+            raise
+        except URLError as e:
+            if not quiet:
+                sys.stderr.write(f"URL-Fehler: {e}\n")
+            raise
+
+    def open_stream(self, path: str, *, timeout: float = 0.0):  # type: ignore[no-untyped-def]
+        url = f"{self.base}{path}"
+        req = Request(url, headers={"Accept": "text/event-stream"})
+        # timeout=None → kein Read-Timeout (SSE bleibt offen).
+        return self._opener.open(req, timeout=timeout or None)
+
+    def login(self, email: str, password: str) -> None:
+        try:
+            self.request("/login", data={"email": email, "password": password})
+        except HTTPError as e:
+            if e.code in (302, 303):
+                return  # Cookie wurde gesetzt, Redirect ignorieren
+            raise
+
+    def whoami(self) -> dict[str, Any] | None:
+        """Validiert die Session via /api/v1/companion/identities (rein
+        Cookie-getrieben). 401 → Session ungültig."""
+        try:
+            j = self.request("/api/v1/companion/identities")
+        except HTTPError as e:
+            if e.code == 401:
+                return None
+            raise
+        return {"identities": len(j) if isinstance(j, list) else 0}
+
+
+# ---------- Auflösung von Identity / Peer / Channel ----------
+
+
+def _is_uuid(s: str) -> bool:
+    return len(s) == _UUID_LEN and s.count("-") == 4
+
+
+def _resolve_identity(c: Client, hint: str) -> dict[str, Any]:
+    idents = c.request("/api/v1/companion/identities")
+    if not isinstance(idents, list):
+        raise SystemExit("identities-Antwort hat unerwartetes Format")
+    if _is_uuid(hint):
+        for i in idents:
+            if i["id"] == hint:
+                return i
+        raise SystemExit(f"Identity {hint} nicht gefunden")
+    matches = [i for i in idents if i["name"].lower() == hint.lower()]
+    if len(matches) == 1:
+        return matches[0]
+    if not matches:
+        # Fallback: case-insensitive Substring-Match
+        matches = [i for i in idents if hint.lower() in i["name"].lower()]
+        if len(matches) == 1:
+            return matches[0]
+    if not matches:
+        names = ", ".join(i["name"] for i in idents) or "(keine)"
+        raise SystemExit(f"Identity '{hint}' nicht gefunden. Vorhanden: {names}")
+    names = ", ".join(i["name"] for i in matches)
+    raise SystemExit(f"Identity '{hint}' mehrdeutig: {names}")
+
+
+def _resolve_peer(c: Client, identity_id: str, hint: str) -> tuple[str, str | None]:
+    """Liefert (peer_pubkey_hex, peer_name|None). Akzeptiert volles Hex,
+    Hex-Prefix oder Namens-Substring (wird gegen Kontakte gematcht)."""
+    h = hint.strip().replace(" ", "")
+    if len(h) == _PUBKEY_HEX_LEN:
+        try:
+            bytes.fromhex(h)
+        except ValueError as e:
+            raise SystemExit(f"ungültiges Pubkey-Hex: {hint}") from e
+        return h.lower(), None
+    contacts = c.request(
+        f"/api/v1/companion/identities/{identity_id}/contacts?limit=500"
+    )
+    if not isinstance(contacts, list):
+        raise SystemExit("contacts-Antwort hat unerwartetes Format")
+    # 1) exakter Hex-Prefix
+    if all(ch in "0123456789abcdefABCDEF" for ch in h) and h:
+        prefix_matches = [
+            ct for ct in contacts if ct["peer_pubkey_hex"].lower().startswith(h.lower())
+        ]
+        if len(prefix_matches) == 1:
+            ct = prefix_matches[0]
+            return ct["peer_pubkey_hex"], ct.get("peer_name")
+        if len(prefix_matches) > 1:
+            raise SystemExit(
+                "Hex-Prefix mehrdeutig — bitte länger angeben oder vollen Pubkey:\n  "
+                + "\n  ".join(
+                    f"{m['peer_pubkey_hex'][:16]}…  {m.get('peer_name') or ''}"
+                    for m in prefix_matches[:10]
+                )
+            )
+    # 2) Name (exakt, dann Substring)
+    name_exact = [
+        ct
+        for ct in contacts
+        if (ct.get("peer_name") or "").lower() == hint.lower()
+    ]
+    if len(name_exact) == 1:
+        ct = name_exact[0]
+        return ct["peer_pubkey_hex"], ct.get("peer_name")
+    name_sub = [
+        ct
+        for ct in contacts
+        if hint.lower() in (ct.get("peer_name") or "").lower()
+    ]
+    if len(name_sub) == 1:
+        ct = name_sub[0]
+        return ct["peer_pubkey_hex"], ct.get("peer_name")
+    if not name_sub:
+        raise SystemExit(f"kein Kontakt passend zu '{hint}' gefunden")
+    raise SystemExit(
+        f"'{hint}' mehrdeutig — bitte präziser:\n  "
+        + "\n  ".join(
+            f"{m['peer_pubkey_hex'][:16]}…  {m.get('peer_name') or ''}"
+            for m in name_sub[:10]
+        )
+    )
+
+
+def _resolve_channel(c: Client, identity_id: str, hint: str) -> dict[str, Any]:
+    chans = c.request("/api/v1/companion/channels")
+    if not isinstance(chans, list):
+        raise SystemExit("channels-Antwort hat unerwartetes Format")
+    own = [ch for ch in chans if ch["identity_id"] == identity_id]
+    if _is_uuid(hint):
+        for ch in own:
+            if ch["id"] == hint:
+                return ch
+        raise SystemExit(f"Channel {hint} nicht gefunden")
+    matches = [ch for ch in own if ch["name"].lower() == hint.lower()]
+    if len(matches) == 1:
+        return matches[0]
+    matches = [ch for ch in own if hint.lower() in ch["name"].lower()]
+    if len(matches) == 1:
+        return matches[0]
+    names = ", ".join(ch["name"] for ch in own) or "(keine)"
+    raise SystemExit(f"Channel '{hint}' nicht eindeutig. Vorhanden: {names}")
+
+
+# ---------- Output-Helfer ----------
+
+
+def _print(obj: Any, args: argparse.Namespace) -> None:
+    if args.json:
+        json.dump(obj, sys.stdout, indent=2, ensure_ascii=False, default=str)
+        sys.stdout.write("\n")
+
+
+def _fmt_ts(ts: str | None) -> str:
+    return (ts or "").replace("T", " ").split("+")[0][:19] or "-"
+
+
+def _short_hex(h: str | None, n: int = 8) -> str:
+    return (h[:n] + "…") if h and len(h) > n else (h or "-")
+
+
+# ---------- Subcommands ----------
+
+
+def cmd_identities(c: Client, args: argparse.Namespace) -> int:
+    j = c.request("/api/v1/companion/identities")
+    if args.json:
+        _print(j, args)
+        return 0
+    if not j:
+        print("(keine Identitäten)")
+        return 0
+    for i in j:
+        print(
+            f"{i['name']:<20} {i['scope']:<14} {i['id']}  pub={_short_hex(i['pubkey_hex'], 12)}"
+        )
+    return 0
+
+
+def cmd_contacts(c: Client, args: argparse.Namespace) -> int:
+    ident = _resolve_identity(c, args.identity)
+    j = c.request(
+        f"/api/v1/companion/identities/{ident['id']}/contacts?limit={args.n}"
+    )
+    if args.json:
+        _print(j, args)
+        return 0
+    for ct in j:
+        fav = "★" if ct.get("favorite") else " "
+        coords = (
+            f"{ct['lat']:.4f},{ct['lon']:.4f}"
+            if ct.get("lat") is not None and ct.get("lon") is not None
+            else "-"
+        )
+        print(
+            f"{fav} {_fmt_ts(ct['last_seen_at']):<19} "
+            f"{_short_hex(ct['peer_pubkey_hex'], 12):<14} "
+            f"{(ct.get('peer_name') or '-'):<28} {coords}"
+        )
+    return 0
+
+
+def cmd_threads(c: Client, args: argparse.Namespace) -> int:
+    ident = _resolve_identity(c, args.identity)
+    j = c.request(f"/api/v1/companion/identities/{ident['id']}/threads")
+    if args.json:
+        _print(j, args)
+        return 0
+    print(f"== Channels ({len(j['channels'])}) ==")
+    for ch in j["channels"]:
+        last = (ch.get("last_text") or "").replace("\n", " ")[:60]
+        print(
+            f"  {_fmt_ts(ch.get('last_ts')):<19} #{ch['name']:<24} {last}"
+        )
+    print(f"== DMs ({len(j['dms'])}) ==")
+    for dm in j["dms"]:
+        fav = "★" if dm.get("favorite") else " "
+        last = (dm.get("last_text") or "").replace("\n", " ")[:60]
+        print(
+            f"  {fav} {_fmt_ts(dm.get('last_ts')):<19} "
+            f"{_short_hex(dm['peer_pubkey_hex'], 12):<14} "
+            f"{(dm.get('peer_name') or '-'):<24} {last}"
+        )
+    return 0
+
+
+def cmd_dms(c: Client, args: argparse.Namespace) -> int:
+    ident = _resolve_identity(c, args.identity)
+    peer_hex, _name = _resolve_peer(c, ident["id"], args.peer)
+    j = c.request(
+        f"/api/v1/companion/identities/{ident['id']}/dms/{peer_hex}?limit={args.n}"
+    )
+    if args.json:
+        _print(j, args)
+        return 0
+    for m in j["messages"]:
+        arrow = {"in": "←", "out": "→", "system": "·"}.get(m["direction"], "?")
+        text = (m.get("text") or "").replace("\n", " ")
+        print(f"{_fmt_ts(m['ts'])} {arrow} {text}")
+    if j.get("next_cursor"):
+        print(f"# next_cursor: {j['next_cursor']}")
+    return 0
+
+
+def cmd_channel_msgs(c: Client, args: argparse.Namespace) -> int:
+    ident = _resolve_identity(c, args.identity)
+    ch = _resolve_channel(c, ident["id"], args.channel)
+    j = c.request(
+        f"/api/v1/companion/identities/{ident['id']}/channels/{ch['id']}/messages?limit={args.n}"
+    )
+    if args.json:
+        _print(j, args)
+        return 0
+    for m in j["messages"]:
+        sender = m.get("room_sender_name") or _short_hex(
+            m.get("room_sender_prefix_hex"), 8
+        )
+        text = (m.get("text") or "").replace("\n", " ")
+        print(f"{_fmt_ts(m['ts'])} #{ch['name']} <{sender}> {text}")
+    if j.get("next_cursor"):
+        print(f"# next_cursor: {j['next_cursor']}")
+    return 0
+
+
+def cmd_send_dm(c: Client, args: argparse.Namespace) -> int:
+    ident = _resolve_identity(c, args.identity)
+    peer_hex, name = _resolve_peer(c, ident["id"], args.peer)
+    j = c.request(
+        "/api/v1/companion/messages/dm",
+        method="POST",
+        data={
+            "identity_id": ident["id"],
+            "peer_pubkey_hex": peer_hex,
+            "text": args.text,
+        },
+    )
+    if args.json:
+        _print(j, args)
+        return 0
+    target = name or _short_hex(peer_hex, 12)
+    print(f"DM → {target}: {'OK' if j.get('ok') else 'FEHLGESCHLAGEN'}  ({j.get('ts')})")
+    return 0 if j.get("ok") else 1
+
+
+def cmd_send_channel(c: Client, args: argparse.Namespace) -> int:
+    ident = _resolve_identity(c, args.identity)
+    ch = _resolve_channel(c, ident["id"], args.channel)
+    j = c.request(
+        "/api/v1/companion/messages/channel",
+        method="POST",
+        data={
+            "identity_id": ident["id"],
+            "channel_id": ch["id"],
+            "text": args.text,
+        },
+    )
+    if args.json:
+        _print(j, args)
+        return 0
+    print(
+        f"Channel #{ch['name']}: {'OK' if j.get('ok') else 'FEHLGESCHLAGEN'}  ({j.get('ts')})"
+    )
+    return 0 if j.get("ok") else 1
+
+
+def cmd_login(c: Client, args: argparse.Namespace) -> int:
+    ident = _resolve_identity(c, args.identity)
+    peer_hex, name = _resolve_peer(c, ident["id"], args.peer)
+    target = name or _short_hex(peer_hex, 12)
+    if not args.json:
+        print(
+            f"🔑 Login angefragt an {target} (Antwort kommt asynchron — ggf. tail nutzen)",
+            flush=True,
+        )
+    j = c.request(
+        f"/api/v1/companion/identities/{ident['id']}/contacts/{peer_hex}/login",
+        method="POST",
+        data={"password": args.password or ""},
+    )
+    if args.json:
+        _print(j, args)
+        return 0
+    if not j.get("ok"):
+        return 1
+    if args.wait <= 0:
+        return 0
+    return _poll_login_state(c, ident["id"], peer_hex, target, args.wait, args)
+
+
+def _poll_login_state(
+    c: Client,
+    identity_id: str,
+    peer_hex: str,
+    target: str,
+    timeout_s: float,
+    args: argparse.Namespace,
+) -> int:
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        time.sleep(1.0)
+        try:
+            j = c.request(
+                f"/api/v1/companion/identities/{identity_id}/contacts/{peer_hex}/login-state",
+                quiet=True,
+            )
+        except (HTTPError, URLError):
+            # 502/404/Timeout während Polling sind erwartbar (Container-
+            # Restart, Traefik-Hänger). Wir bleiben dran.
+            continue
+        if j.get("logged_in"):
+            role = "admin" if j.get("is_admin") else "guest"
+            print(
+                f"✓ Login OK · {target} · Rolle {role} · "
+                f"Permissions 0x{int(j.get('permissions', 0)):02x} · "
+                f"gültig bis {_fmt_ts(j.get('expires_at'))}"
+            )
+            return 0
+    print(f"⏱ kein Login-OK innerhalb {int(timeout_s)}s — vermutlich verloren auf LoRa")
+    return 2
+
+
+def cmd_login_state(c: Client, args: argparse.Namespace) -> int:
+    ident = _resolve_identity(c, args.identity)
+    peer_hex, name = _resolve_peer(c, ident["id"], args.peer)
+    j = c.request(
+        f"/api/v1/companion/identities/{ident['id']}/contacts/{peer_hex}/login-state"
+    )
+    target = name or _short_hex(peer_hex, 12)
+    logged_in = bool(j.get("logged_in"))
+    if args.json:
+        _print(j, args)
+    elif not logged_in:
+        print(f"{target}: nicht eingeloggt")
+    else:
+        role = "admin" if j.get("is_admin") else "guest"
+        print(
+            f"{target}: eingeloggt ({role}, perms 0x{int(j.get('permissions', 0)):02x}) "
+            f"bis {_fmt_ts(j.get('expires_at'))}"
+        )
+    return 0 if logged_in else 1
+
+
+def cmd_status(c: Client, args: argparse.Namespace) -> int:
+    ident = _resolve_identity(c, args.identity)
+    peer_hex, name = _resolve_peer(c, ident["id"], args.peer)
+    j = c.request(
+        f"/api/v1/companion/identities/{ident['id']}/contacts/{peer_hex}/status",
+        method="POST",
+        data={},
+    )
+    target = name or _short_hex(peer_hex, 12)
+    _print(j, args) if args.json else print(
+        f"ℹ Status angefragt an {target} (Antwort kommt asynchron via SSE/Konvo)"
+    )
+    return 0 if j.get("ok") else 1
+
+
+def cmd_telemetry(c: Client, args: argparse.Namespace) -> int:
+    ident = _resolve_identity(c, args.identity)
+    peer_hex, name = _resolve_peer(c, ident["id"], args.peer)
+    j = c.request(
+        f"/api/v1/companion/identities/{ident['id']}/contacts/{peer_hex}/telemetry",
+        method="POST",
+        data={},
+    )
+    target = name or _short_hex(peer_hex, 12)
+    _print(j, args) if args.json else print(
+        f"📡 Telemetrie angefragt an {target} (Antwort kommt asynchron)"
+    )
+    return 0 if j.get("ok") else 1
+
+
+def cmd_advert(c: Client, args: argparse.Namespace) -> int:
+    ident = _resolve_identity(c, args.identity)
+    j = c.request(
+        f"/api/v1/companion/identities/{ident['id']}/advert",
+        method="POST",
+        data={},
+    )
+    if args.json:
+        _print(j, args)
+        return 0
+    print(f"Advert für {ident['name']} im Scope {j.get('scope')} gesendet.")
+    return 0 if j.get("ok") else 1
+
+
+def cmd_search(c: Client, args: argparse.Namespace) -> int:
+    ident = _resolve_identity(c, args.identity)
+    qs = urlencode({"q": args.query, "limit": args.n})
+    j = c.request(f"/api/v1/companion/identities/{ident['id']}/search?{qs}")
+    if args.json:
+        _print(j, args)
+        return 0
+    hits = j.get("hits") or j.get("results") or []
+    if not hits:
+        # Schema kann je nach Server-Version variieren — Fallback: rohes JSON.
+        _print(j, args)
+        return 0
+    for h in hits:
+        snippet = (h.get("snippet") or "").replace("\n", " ")
+        ctx = (
+            f"#{h.get('channel_name')}"
+            if h.get("channel_name")
+            else (h.get("peer_name") or _short_hex(h.get("peer_pubkey")))
+        )
+        print(f"{_fmt_ts(h.get('ts'))} [{ctx}] {snippet}")
+    return 0
+
+
+def cmd_auth_login(c: Client, args: argparse.Namespace) -> int:
+    """Erzwingt einen Email/Passwort-Login und persistiert den Cookie."""
+    email = args.email or input("email: ").strip()
+    password = args.password or getpass.getpass("password: ")
+    try:
+        c.login(email, password)
+    except HTTPError as e:
+        sys.stderr.write(f"Login fehlgeschlagen: HTTP {e.code}\n")
+        return 2
+    if not c.has_session():
+        sys.stderr.write("Login lieferte keine Session — falsche Credentials?\n")
+        return 2
+    c.save_session()
+    info = c.whoami()
+    n = info["identities"] if info else 0
+    print(
+        f"Login OK · Session gespeichert in {c._session_file} · "  # noqa: SLF001
+        f"{n} Identitäten sichtbar"
+    )
+    return 0
+
+
+def cmd_auth_logout(c: Client, args: argparse.Namespace) -> int:
+    """Löscht die lokale Cookie-Datei. Eine serverseitige Revocation findet
+    nicht statt (Endpoint /logout würde die Session in der DB löschen, ist
+    hier aber nicht zwingend — die Cookie-Datei reicht für lokale Hygiene)."""
+    path = c._session_file  # noqa: SLF001
+    c.clear_session()
+    if args.json:
+        _print({"cleared": True, "path": str(path) if path else None}, args)
+    else:
+        print(f"Session-Datei gelöscht: {path}")
+    return 0
+
+
+def cmd_auth_whoami(c: Client, args: argparse.Namespace) -> int:
+    info = c.whoami()
+    if info is None:
+        if args.json:
+            _print({"authenticated": False}, args)
+        else:
+            print("nicht eingeloggt (Session fehlt oder abgelaufen)")
+        return 1
+    if args.json:
+        _print({"authenticated": True, **info}, args)
+    else:
+        print(f"eingeloggt · {info['identities']} Identitäten sichtbar")
+    return 0
+
+
+def cmd_tail(c: Client, args: argparse.Namespace) -> int:
+    ident = _resolve_identity(c, args.identity)
+    path = f"/api/v1/companion/identities/{quote(ident['id'])}/stream"
+    # Line-buffered stdout, damit Pipes/timeout sofort sehen, was eintrudelt.
+    try:
+        sys.stdout.reconfigure(line_buffering=True)  # type: ignore[attr-defined]
+    except (AttributeError, OSError):
+        pass
+    print(f"# Stream {ident['name']} ({ident['id']}) — Ctrl-C zum Beenden", flush=True)
+    try:
+        resp = c.open_stream(path)
+    except HTTPError as e:
+        sys.stderr.write(f"Stream-Fehler: HTTP {e.code}\n")
+        return 2
+    try:
+        for raw in resp:
+            line = raw.decode("utf-8", errors="replace").rstrip("\n")
+            if not line or line.startswith(":"):
+                continue
+            if line.startswith("data: "):
+                payload = line[6:]
+                try:
+                    evt = json.loads(payload)
+                except json.JSONDecodeError:
+                    print(line, flush=True)
+                    continue
+                if args.json:
+                    print(json.dumps(evt, ensure_ascii=False), flush=True)
+                    continue
+                t = evt.get("type", "?")
+                ts = _fmt_ts(evt.get("ts"))
+                txt = (evt.get("text") or "").replace("\n", " ")
+                peer = evt.get("peer_name") or _short_hex(
+                    evt.get("peer_pubkey_hex"), 8
+                )
+                ch = evt.get("channel_name")
+                ctx = f"#{ch}" if ch else peer
+                print(f"{ts} [{t}] {ctx}: {txt}", flush=True)
+    except KeyboardInterrupt:
+        print()
+        return 0
+    finally:
+        resp.close()
+    return 0
+
+
+# ---------- main ----------
+
+
+def main() -> int:
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--url", default=os.environ.get("MESHCORE_CTL_URL", DEFAULT_URL))
+    p.add_argument("--email", default=os.environ.get("MESHCORE_CTL_EMAIL"))
+    p.add_argument(
+        "--password",
+        default=os.environ.get("MESHCORE_CTL_PASSWORD"),
+        help="Default: prompt oder MESHCORE_CTL_PASSWORD",
+    )
+    p.add_argument(
+        "--session-file",
+        default=os.environ.get("MESHCORE_SESSION_FILE"),
+        help="Cookie-Jar-Pfad (Default: ~/.config/spiegel-companion/session)",
+    )
+    # `--json` an jedem Subcommand via parents=[common]; zusätzlich auch vor
+    # dem Subcommand erlaubt. `default=SUPPRESS` verhindert, dass der
+    # Subparser den vorab gesetzten Wert wieder auf False überschreibt.
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument(
+        "--json", action="store_true", default=argparse.SUPPRESS, help="JSON-Ausgabe"
+    )
+    p.add_argument(
+        "--json", action="store_true", default=False, help=argparse.SUPPRESS
+    )
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    ap = sub.add_parser("auth", help="Session-Verwaltung")
+    ap_sub = ap.add_subparsers(dest="auth_cmd", required=True)
+    ap_sub.add_parser("login", parents=[common]).set_defaults(func=cmd_auth_login)
+    ap_sub.add_parser("logout", parents=[common]).set_defaults(func=cmd_auth_logout)
+    ap_sub.add_parser("whoami", parents=[common]).set_defaults(func=cmd_auth_whoami)
+
+    sub.add_parser("identities", parents=[common]).set_defaults(func=cmd_identities)
+
+    sp = sub.add_parser("contacts", parents=[common])
+    sp.add_argument("identity")
+    sp.add_argument("-n", type=int, default=50)
+    sp.set_defaults(func=cmd_contacts)
+
+    sp = sub.add_parser("threads", parents=[common])
+    sp.add_argument("identity")
+    sp.set_defaults(func=cmd_threads)
+
+    sp = sub.add_parser("dms", parents=[common])
+    sp.add_argument("identity")
+    sp.add_argument("peer")
+    sp.add_argument("-n", type=int, default=30)
+    sp.set_defaults(func=cmd_dms)
+
+    sp = sub.add_parser("ch-msgs", parents=[common], help="Channel-Verlauf")
+    sp.add_argument("identity")
+    sp.add_argument("channel")
+    sp.add_argument("-n", type=int, default=30)
+    sp.set_defaults(func=cmd_channel_msgs)
+
+    sp = sub.add_parser("send-dm", parents=[common])
+    sp.add_argument("identity")
+    sp.add_argument("peer")
+    sp.add_argument("text")
+    sp.set_defaults(func=cmd_send_dm)
+
+    sp = sub.add_parser("send-ch", parents=[common], help="Nachricht in Channel senden")
+    sp.add_argument("identity")
+    sp.add_argument("channel")
+    sp.add_argument("text")
+    sp.set_defaults(func=cmd_send_channel)
+
+    sp = sub.add_parser("login", parents=[common])
+    sp.add_argument("identity")
+    sp.add_argument("peer")
+    sp.add_argument("-p", "--password", default="", help="leer = Guest-Login")
+    sp.add_argument(
+        "--wait",
+        type=float,
+        default=12.0,
+        help="Sekunden auf Login-OK pollen (0 = nicht warten)",
+    )
+    sp.set_defaults(func=cmd_login)
+
+    sp = sub.add_parser("login-state", parents=[common])
+    sp.add_argument("identity")
+    sp.add_argument("peer")
+    sp.set_defaults(func=cmd_login_state)
+
+    sp = sub.add_parser("status", parents=[common])
+    sp.add_argument("identity")
+    sp.add_argument("peer")
+    sp.set_defaults(func=cmd_status)
+
+    sp = sub.add_parser("telemetry", parents=[common])
+    sp.add_argument("identity")
+    sp.add_argument("peer")
+    sp.set_defaults(func=cmd_telemetry)
+
+    sp = sub.add_parser("advert", parents=[common])
+    sp.add_argument("identity")
+    sp.set_defaults(func=cmd_advert)
+
+    sp = sub.add_parser("search", parents=[common])
+    sp.add_argument("identity")
+    sp.add_argument("query")
+    sp.add_argument("-n", type=int, default=30)
+    sp.set_defaults(func=cmd_search)
+
+    sp = sub.add_parser("tail", parents=[common], help="SSE-Stream (Live-Events)")
+    sp.add_argument("identity")
+    sp.set_defaults(func=cmd_tail)
+
+    args = p.parse_args()
+
+    session_path = Path(args.session_file) if args.session_file else _default_session_path()
+    c = Client(args.url, session_file=session_path)
+
+    # Direkt-Cookie via ENV überstimmt alles andere — z.B. für CI.
+    env_session = os.environ.get("MESHCORE_SESSION")
+    if env_session:
+        c.inject_session_cookie(env_session.strip())
+
+    is_auth_cmd = args.cmd == "auth"
+
+    # auth login wickelt sein Auth-Handling selbst ab; logout/whoami brauchen
+    # nur den Cookie-Jar. Alle anderen Commands wollen eine valide Session.
+    if not is_auth_cmd:
+        if not c.has_session():
+            email = args.email or input("email: ").strip()
+            password = args.password or getpass.getpass("password: ")
+            try:
+                c.login(email, password)
+            except HTTPError as e:
+                sys.stderr.write(f"Login fehlgeschlagen: HTTP {e.code}\n")
+                return 2
+            if not c.has_session():
+                sys.stderr.write("Login lieferte keine Session.\n")
+                return 2
+            c.save_session()
+    try:
+        return args.func(c, args)
+    except HTTPError as e:
+        if e.code == 401 and not is_auth_cmd:
+            sys.stderr.write(
+                "Session abgelaufen oder ungültig. Bitte 'auth login' erneut ausführen.\n"
+            )
+            c.clear_session()
+            return 2
+        return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())
