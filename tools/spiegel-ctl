@@ -5,11 +5,12 @@ Login per E-Mail+Passwort eines admin-Users; Cookie wird in einer
 ephemeren Session gehalten.
 
 Subcommands:
-  status              Server-Status (Verbindungen, Policy, Dedup, Traffic)
-  policy reload       SIGHUP-äquivalent: Config + Policy reladen
-  dedup clear         Kompletten Dedup-Cache leeren
-  traffic [-n N]      Letzte N Traffic-Events
-  watch               Endlos-Loop: alle 2s Status anzeigen
+  status                          Server-Status (Verbindungen, Policy, Dedup, Traffic)
+  policy reload                   SIGHUP-äquivalent: Config + Policy reladen
+  dedup clear                     Kompletten Dedup-Cache leeren
+  traffic [-n N]                  Letzte N Traffic-Events
+  watch                           Endlos-Loop: alle 2s Status anzeigen
+  cleanup-coords --identity UUID  Unplausible Companion-Koordinaten finden/löschen
 
 Auth via ENV:
   MESHCORE_CTL_URL    z.B. https://meshcore.dumke.me  (Default)
@@ -107,6 +108,17 @@ def cmd_dedup_clear(c: Client, _args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_cleanup_coords(c: Client, args: argparse.Namespace) -> int:
+    qs = "?dry_run=0" if args.apply else "?dry_run=1"
+    j = c._request(  # noqa: SLF001
+        f"/api/v1/companion/admin/identities/{args.identity}/cleanup-coords{qs}",
+        method="POST",
+        data={},
+    )
+    print(json.dumps(j, indent=2, ensure_ascii=False))
+    return 0
+
+
 def cmd_watch(c: Client, args: argparse.Namespace) -> int:
     while True:
         j = c._request("/api/v1/admin/status")  # noqa: SLF001
@@ -161,6 +173,18 @@ def main() -> int:
     wp = sub.add_parser("watch")
     wp.add_argument("--interval", type=float, default=2.0)
     wp.set_defaults(func=cmd_watch)
+
+    cc = sub.add_parser(
+        "cleanup-coords",
+        help="Unplausible Companion-Koordinaten ermitteln (Dry-Run) oder NULL setzen",
+    )
+    cc.add_argument("--identity", required=True, help="Companion-Identity-UUID")
+    cc.add_argument(
+        "--apply",
+        action="store_true",
+        help="ohne Flag: Dry-Run; mit Flag: tatsächlich auf NULL setzen",
+    )
+    cc.set_defaults(func=cmd_cleanup_coords)
 
     args = p.parse_args()
 

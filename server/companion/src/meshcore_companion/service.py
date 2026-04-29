@@ -31,6 +31,7 @@ import structlog
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meshcore_companion.coords import is_valid_coord
 from meshcore_companion.crypto import (
     PATH_HASH_SIZE,
     Identity,
@@ -819,6 +820,14 @@ class CompanionService:
                 continue
             parsed = parse_advert_app_data(advert.app_data)
             name = parsed.name
+            coord_ok = is_valid_coord(parsed.lat, parsed.lon)
+            if (parsed.lat is not None or parsed.lon is not None) and not coord_ok:
+                _log.debug(
+                    "advert_coord_rejected",
+                    peer_pubkey=advert.pubkey.hex(),
+                    lat=parsed.lat,
+                    lon=parsed.lon,
+                )
             async with self.sessionmaker() as db:
                 contact = (
                     await db.execute(
@@ -834,8 +843,8 @@ class CompanionService:
                         peer_pubkey=advert.pubkey,
                         peer_name=name or None,
                         last_seen_at=datetime.now(UTC),
-                        last_lat=parsed.lat,
-                        last_lon=parsed.lon,
+                        last_lat=parsed.lat if coord_ok else None,
+                        last_lon=parsed.lon if coord_ok else None,
                         node_type=parsed.adv_type or None,
                     )
                     db.add(contact)
@@ -843,10 +852,11 @@ class CompanionService:
                     contact.last_seen_at = datetime.now(UTC)
                     if name and contact.peer_name != name:
                         contact.peer_name = name
-                    # Koordinaten nur überschreiben, wenn der Advert welche
-                    # mitbringt (Knoten könnten ohne Lat/Lon adverten —
-                    # dann letzten bekannten Wert behalten).
-                    if parsed.lat is not None and parsed.lon is not None:
+                    # Koordinaten nur überschreiben, wenn der Advert
+                    # plausible Werte mitbringt — sonst letzten
+                    # bekannten Wert behalten (Knoten ohne Lat/Lon oder
+                    # mit Schrott-Koordinaten).
+                    if coord_ok:
                         contact.last_lat = parsed.lat
                         contact.last_lon = parsed.lon
                     if parsed.adv_type:
@@ -858,8 +868,8 @@ class CompanionService:
                     "type": "contact_update",
                     "peer_pubkey_hex": advert.pubkey.hex(),
                     "peer_name": name,
-                    "lat": parsed.lat,
-                    "lon": parsed.lon,
+                    "lat": parsed.lat if coord_ok else None,
+                    "lon": parsed.lon if coord_ok else None,
                     "node_type": parsed.adv_type or None,
                     "ts": datetime.now(UTC).isoformat(),
                 },
@@ -1396,7 +1406,7 @@ class CompanionService:
                 parts: list[str] = []
                 if rtt_ms is not None:
                     parts.append(f"RTT {rtt_ms} ms")
-                if gps is not None and not (gps.lat == 0.0 and gps.lon == 0.0):
+                if gps is not None and is_valid_coord(gps.lat, gps.lon):
                     if contact is not None:
                         contact.last_lat = gps.lat
                         contact.last_lon = gps.lon
@@ -1405,10 +1415,11 @@ class CompanionService:
                     parts.append("kein GPS")
                 text = "📡 Telemetrie · " + " · ".join(parts)
                 event_type = "telemetry_response"
+                _gps_ok = gps is not None and is_valid_coord(gps.lat, gps.lon)
                 event_extra = {
                     "rtt_ms": rtt_ms,
-                    "lat": gps.lat if gps else None,
-                    "lon": gps.lon if gps else None,
+                    "lat": gps.lat if _gps_ok and gps is not None else None,
+                    "lon": gps.lon if _gps_ok and gps is not None else None,
                 }
 
             if text is None:

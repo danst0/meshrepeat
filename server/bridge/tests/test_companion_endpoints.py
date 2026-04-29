@@ -16,7 +16,7 @@ from httpx import ASGITransport, AsyncClient
 
 from meshcore_bridge.auth import passwords
 from meshcore_bridge.config import AppConfig
-from meshcore_bridge.db import CompanionMessage, get_session
+from meshcore_bridge.db import CompanionContact, CompanionMessage, get_session
 from meshcore_bridge.web import build_app
 from meshcore_bridge.web.auth_routes import set_email_sender
 
@@ -280,6 +280,163 @@ async def test_status_request_endpoint(app_and_outbox) -> None:
             f"/api/v1/companion/identities/{ident_id}/contacts/notvalidhex/status"
         )
         assert r.status_code == 400
+
+
+async def _seed_contacts(
+    identity_id: str, points: list[tuple[bytes, float | None, float | None, str]]
+) -> None:
+    now = datetime.now(UTC)
+    async with get_session() as db:
+        for peer, lat, lon, name in points:
+            db.add(
+                CompanionContact(
+                    identity_id=UUID(identity_id),
+                    peer_pubkey=peer,
+                    peer_name=name,
+                    last_seen_at=now,
+                    last_lat=lat,
+                    last_lon=lon,
+                )
+            )
+        await db.commit()
+
+
+@pytest.mark.asyncio
+async def test_map_endpoint_filters_outliers(app_and_outbox) -> None:
+    """Cluster aus Berlin-nahen Punkten + Null-Insel + Antipode → der
+    Endpoint liefert per Default nur die Cluster-Punkte; mit
+    ``include_outliers=1`` alle gültigen."""
+    app, sender = app_and_outbox
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://t") as client:
+        ident_id = await _login_and_create_identity(
+            client, sender, email="map@example.com"
+        )
+        # 11 Cluster-Punkte (Berlin-Region) — genug für cluster_outlier_mask
+        points: list[tuple[bytes, float | None, float | None, str]] = [
+            (
+                bytes([i]) + bytes(31),
+                52.5 + i * 0.01,
+                13.4 + i * 0.01,
+                f"berlin-{i}",
+            )
+            for i in range(11)
+        ]
+        # Null-Insel (Hard-Filter)
+        points.append((b"\xaa" + bytes(31), 0.0, 0.0, "null-insel"))
+        # Antipode (Cluster-Filter)
+        points.append((b"\xbb" + bytes(31), -33.86, 151.21, "sydney"))
+        await _seed_contacts(ident_id, points)
+
+        r = await client.get(f"/api/v1/companion/identities/{ident_id}/map")
+        assert r.status_code == 200, r.text
+        names = {p["peer_name"] for p in r.json()}
+        assert "null-insel" not in names
+        assert "sydney" not in names
+        assert names == {f"berlin-{i}" for i in range(11)}
+
+        r2 = await client.get(
+            f"/api/v1/companion/identities/{ident_id}/map?include_outliers=1"
+        )
+        assert r2.status_code == 200, r2.text
+        names2 = {p["peer_name"] for p in r2.json()}
+        # Null-Insel kommt zurück (SQL filtert nur NULL), Sydney auch.
+        assert "null-insel" in names2
+        assert "sydney" in names2
+
+
+@pytest.mark.asyncio
+async def test_admin_cleanup_coords_dry_run_and_apply(app_and_outbox) -> None:
+    """POST /api/v1/companion/admin/identities/{id}/cleanup-coords:
+    dry_run=1 → liefert Kandidaten, ändert nichts; dry_run=0 → setzt
+    last_lat/last_lon auf NULL."""
+    app, _sender = app_and_outbox
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://t") as client:
+        # Admin-User direkt anlegen — Signup macht standardmäßig "user".
+        from meshcore_bridge.db import User
+
+        async with get_session() as db:
+            db.add(
+                User(
+                    email="admin@example.com",
+                    password_hash=passwords.hash_password(PASSWORD),
+                    role="admin",
+                    email_verified_at=datetime.now(UTC),
+                )
+            )
+            await db.commit()
+        await client.post(
+            "/login",
+            data={"email": "admin@example.com", "password": PASSWORD},
+            follow_redirects=False,
+        )
+        resp = await client.post(
+            "/api/v1/companion/identities",
+            data={"name": "Antonia", "scope": "public"},
+        )
+        assert resp.status_code == 200, resp.text
+        ident_id = resp.json()["id"]
+
+        points: list[tuple[bytes, float | None, float | None, str]] = [
+            (
+                bytes([i]) + bytes(31),
+                52.5 + i * 0.01,
+                13.4 + i * 0.01,
+                f"berlin-{i}",
+            )
+            for i in range(11)
+        ]
+        points.append((b"\xaa" + bytes(31), 0.0, 0.0, "null-insel"))
+        points.append((b"\xbb" + bytes(31), -33.86, 151.21, "sydney"))
+        await _seed_contacts(ident_id, points)
+
+        r = await client.post(
+            f"/api/v1/companion/admin/identities/{ident_id}/cleanup-coords?dry_run=1"
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["dry_run"] is True
+        assert body["invalid"] == 1
+        assert body["cluster_outliers"] == 1
+        # Nichts in DB geändert.
+        async with get_session() as db:
+            from sqlalchemy import select as sa_select
+
+            rows = list(
+                (
+                    await db.execute(
+                        sa_select(CompanionContact).where(
+                            CompanionContact.identity_id == UUID(ident_id),
+                        )
+                    )
+                ).scalars()
+            )
+        assert sum(1 for r in rows if r.last_lat is not None) == 13
+
+        r2 = await client.post(
+            f"/api/v1/companion/admin/identities/{ident_id}/cleanup-coords?dry_run=0"
+        )
+        assert r2.status_code == 200, r2.text
+        body2 = r2.json()
+        assert body2["applied"] == 2
+        async with get_session() as db:
+            from sqlalchemy import select as sa_select
+
+            rows = list(
+                (
+                    await db.execute(
+                        sa_select(CompanionContact).where(
+                            CompanionContact.identity_id == UUID(ident_id),
+                        )
+                    )
+                ).scalars()
+            )
+        # 11 Berlin-Kontakte mit lat/lon übrig, 2 auf NULL gesetzt.
+        with_coords = [r for r in rows if r.last_lat is not None]
+        without_coords = [r for r in rows if r.last_lat is None]
+        assert len(with_coords) == 11
+        assert len(without_coords) == 2
 
 
 @pytest.mark.asyncio

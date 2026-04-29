@@ -29,7 +29,8 @@ from meshcore_bridge.db import (
     CompanionMessage,
     User,
 )
-from meshcore_bridge.web.deps import current_user_required, get_db
+from meshcore_bridge.web.deps import admin_required, current_user_required, get_db
+from meshcore_companion.coords import cluster_outlier_mask, is_valid_coord
 
 router = APIRouter(prefix="/api/v1/companion")
 ui_router = APIRouter(prefix="/companion")
@@ -809,11 +810,17 @@ async def list_identity_map_pins(
     user: User = Depends(current_user_required),
     db: AsyncSession = Depends(get_db),
     hours: int = Query(default=168, ge=1, le=8760),
+    include_outliers: bool = Query(default=False),
 ) -> list[dict[str, Any]]:
     """Bekannte Kontakte mit Geokoordinaten, deren letzter Advert
     innerhalb der letzten ``hours`` Stunden eintraf (default 168h = 7
     Tage). Begrenzung verhindert, dass alte/abgewanderte Knoten die
-    Karte vollmüllen."""
+    Karte vollmüllen.
+
+    Filter:
+    - Hard-Filter via ``is_valid_coord`` (Range, NaN/Inf, Null-Insel)
+    - Cluster-Filter via ``cluster_outlier_mask`` (Distanz zum Median).
+      Beide deaktivierbar mit ``include_outliers=1`` (Debug)."""
     if not await _user_owns_identity(db, user.id, identity_id):
         raise HTTPException(status_code=404)
     cutoff = datetime.now(UTC) - timedelta(hours=hours)
@@ -829,6 +836,12 @@ async def list_identity_map_pins(
             )
         ).scalars()
     )
+    if not include_outliers:
+        rows = [r for r in rows if is_valid_coord(r.last_lat, r.last_lon)]
+        mask = cluster_outlier_mask(
+            [(r.last_lat, r.last_lon) for r in rows]  # type: ignore[misc]
+        )
+        rows = [r for r, outlier in zip(rows, mask, strict=True) if not outlier]
     return [
         {
             "peer_pubkey_hex": c.peer_pubkey.hex(),
@@ -840,6 +853,67 @@ async def list_identity_map_pins(
         }
         for c in rows
     ]
+
+
+@router.post("/admin/identities/{identity_id}/cleanup-coords")
+async def admin_cleanup_coords(
+    identity_id: UUID,
+    user: User = Depends(admin_required),
+    db: AsyncSession = Depends(get_db),
+    dry_run: bool = Query(default=True),
+) -> dict[str, Any]:
+    """Setzt unplausible ``last_lat``/``last_lon`` einer Identity auf
+    NULL. Dry-Run liefert nur die Liste der Kandidaten zurück.
+
+    Plausibilität: Hard-Filter (Range/NaN/Null-Insel) plus Cluster-
+    Filter über die aktuell gültigen Punkte (Median-Distanz)."""
+    del user  # nur für Admin-Auth
+    rows = list(
+        (
+            await db.execute(
+                select(CompanionContact).where(
+                    CompanionContact.identity_id == identity_id,
+                    CompanionContact.last_lat.is_not(None),
+                    CompanionContact.last_lon.is_not(None),
+                )
+            )
+        ).scalars()
+    )
+    invalid = [r for r in rows if not is_valid_coord(r.last_lat, r.last_lon)]
+    valid = [r for r in rows if is_valid_coord(r.last_lat, r.last_lon)]
+    mask = cluster_outlier_mask(
+        [(r.last_lat, r.last_lon) for r in valid]  # type: ignore[misc]
+    )
+    cluster_outliers = [r for r, outlier in zip(valid, mask, strict=True) if outlier]
+    candidates = invalid + cluster_outliers
+
+    payload: dict[str, Any] = {
+        "identity_id": str(identity_id),
+        "dry_run": dry_run,
+        "considered": len(rows),
+        "invalid": len(invalid),
+        "cluster_outliers": len(cluster_outliers),
+        "candidates": [
+            {
+                "peer_pubkey_hex": c.peer_pubkey.hex(),
+                "peer_name": c.peer_name,
+                "lat": c.last_lat,
+                "lon": c.last_lon,
+                "reason": "invalid"
+                if not is_valid_coord(c.last_lat, c.last_lon)
+                else "cluster_outlier",
+            }
+            for c in candidates
+        ],
+    }
+    if dry_run:
+        return payload
+    for c in candidates:
+        c.last_lat = None
+        c.last_lon = None
+    await db.commit()
+    payload["applied"] = len(candidates)
+    return payload
 
 
 @router.get("/identities/{identity_id}/channels/{channel_id}/messages")
