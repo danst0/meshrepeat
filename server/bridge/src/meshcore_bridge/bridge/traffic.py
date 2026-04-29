@@ -24,9 +24,9 @@ from typing import Any
 from uuid import UUID
 
 # MeshCore Header-Byte (siehe firmware/lib/meshcore/src/Packet.h):
-#   bits 7..6  route_type   (00 transport-flood, 01 flood, 10 direct, 11 transport-direct)
+#   bits 1..0  route_type   (00 transport-flood, 01 flood, 10 direct, 11 transport-direct)
 #   bits 5..2  payload_type (siehe unten)
-#   bits 1..0  version      (0)
+#   bits 7..6  version      (PAYLOAD_VER_1=01 in aktueller Firmware)
 
 ROUTE_TYPE_NAMES = {
     0b00: "TRANSPORT_FLOOD",
@@ -98,7 +98,8 @@ def parse_packet_meta(raw: bytes) -> tuple[str, str, list[str], str | None]:
     if not raw:
         return ("?", "?", [], None)
     header = raw[0]
-    route_type = ROUTE_TYPE_NAMES.get((header >> 6) & 0b11, f"R{header >> 6:02b}")
+    route_type_id = header & 0b11
+    route_type = ROUTE_TYPE_NAMES.get(route_type_id, f"R{route_type_id:02b}")
     payload_type_id = (header >> 2) & 0b1111
     payload_type = PAYLOAD_TYPE_NAMES.get(payload_type_id, f"0x{payload_type_id:02X}")
 

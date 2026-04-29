@@ -265,9 +265,9 @@ async def inspector_packet_detail(
     decoded: dict[str, Any] = {
         "header_byte": f"0x{header:02X}" if raw else None,
         "header_bits": f"{header:08b}" if raw else None,
-        "route_type_bits": (header >> 6) & 0b11 if raw else None,
+        "route_type_bits": header & 0b11 if raw else None,
         "payload_type_bits": (header >> 2) & 0b1111 if raw else None,
-        "version": header & 0b11 if raw else None,
+        "version": (header >> 6) & 0b11 if raw else None,
     }
     # Path-Bytes-Range (für Hex-Highlighting)
     region = {"header": [0, 1], "path_len": [1, 2]}

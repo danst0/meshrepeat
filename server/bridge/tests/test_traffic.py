@@ -14,8 +14,9 @@ def test_parse_packet_meta_handles_empty() -> None:
 
 
 def test_parse_packet_meta_decodes_route_and_payload() -> None:
-    # Header: route=01 (FLOOD), payload=0010 (TXT_MSG=0x02), version=00 -> 0x48
-    raw = bytes([0b01_0010_00, 0x00])  # plen=0, no path
+    # Firmware-Layout (Packet.h): bits 1..0 = route, bits 5..2 = payload, bits 7..6 = version.
+    # FLOOD route (01) + TXT_MSG (0x02) + version 0 → 0b00_001001 = 0x09
+    raw = bytes([0x09, 0x00])  # plen=0, no path
     route, payload, hashes, advert = parse_packet_meta(raw)
     assert route == "FLOOD"
     assert payload == "TXT_MSG"
@@ -24,9 +25,8 @@ def test_parse_packet_meta_decodes_route_and_payload() -> None:
 
 
 def test_parse_packet_meta_extracts_path_hashes() -> None:
-    # FLOOD + ADVERT (0x04), 1-byte hashes (size encoded as 0 in upper 2 bits → size=1),
-    # 3 hops -> plen byte = 0b00_000011 = 0x03
-    header = (0b01 << 6) | (0x04 << 2)
+    # FLOOD route (01) + ADVERT (0x04), 1-byte hashes, 3 hops → plen 0x03
+    header = (0x04 << 2) | 0x01  # ADVERT + FLOOD
     plen = 0x03
     path = bytes([0x11, 0x22, 0x33])
     pubkey = bytes(32)  # zeros for test
@@ -37,6 +37,21 @@ def test_parse_packet_meta_extracts_path_hashes() -> None:
     assert hashes == ["11", "22", "33"]
     assert advert is not None
     assert advert == "00" * 32
+
+
+def test_parse_packet_meta_distinguishes_all_route_types() -> None:
+    """Sicherstellen, dass alle 4 Route-Type-Werte korrekt decoded werden
+    (Regression: bits 1..0 wurden früher mit bits 7..6 vertauscht)."""
+    cases = [
+        (0b00, "TRANSPORT_FLOOD"),
+        (0b01, "FLOOD"),
+        (0b10, "DIRECT"),
+        (0b11, "TRANSPORT_DIRECT"),
+    ]
+    for route_bits, name in cases:
+        header = (0x02 << 2) | route_bits  # TXT_MSG + route
+        route, _payload, _hashes, _advert = parse_packet_meta(bytes([header, 0x00]))
+        assert route == name, f"route bits {route_bits:02b}: got {route}, want {name}"
 
 
 def test_traffic_log_records_and_recents() -> None:
@@ -63,11 +78,12 @@ def test_traffic_log_records_and_recents() -> None:
 def test_traffic_log_event_serialises_to_dict() -> None:
     site = uuid4()
     other = uuid4()
+    # DIRECT (0b10) + ADVERT (0x04) + version 0 → 0b00_010010 = 0x12
     e = make_event(
         site_id=site,
         site_name="S1",
         scope="public",
-        raw=bytes([(0b10 << 6) | (0x04 << 2), 0x00]),  # DIRECT + ADVERT, no path, no body
+        raw=bytes([0x12, 0x00]),  # DIRECT + ADVERT, no path, no body
         forwarded_to_pairs=[(other, "S2")],
         dropped_reason=None,
     )
@@ -79,7 +95,7 @@ def test_traffic_log_event_serialises_to_dict() -> None:
     assert d["forwarded_to"] == [{"site_id": str(other), "name": "S2"}]
     assert d["dropped_reason"] is None
     # raw_hex muss in der Default-Serialisierung mit drin sein (Inspector liest das)
-    assert d["raw_hex"] == "9000"
+    assert d["raw_hex"] == "1200"
     assert e.as_dict(include_raw=False).get("raw_hex") is None
 
 
