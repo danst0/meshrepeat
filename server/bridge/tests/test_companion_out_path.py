@@ -88,7 +88,11 @@ async def test_send_dm_uses_flood_when_no_out_path(service_env) -> None:
     ok = await svc.send_dm(identity_id=me.id, peer_pubkey=peer.pub_key, text="hi")
     assert ok
 
-    raws = [Packet.decode(r) for r, _ in sent if Packet.decode(r).payload_type == PayloadType.TXT_MSG]
+    raws = [
+        Packet.decode(r)
+        for r, _ in sent
+        if Packet.decode(r).payload_type == PayloadType.TXT_MSG
+    ]
     assert len(raws) == 1
     assert raws[0].route_type == RouteType.FLOOD
     assert raws[0].path == b""
@@ -123,7 +127,11 @@ async def test_send_dm_uses_direct_with_learned_path(service_env) -> None:
     ok = await svc.send_dm(identity_id=me.id, peer_pubkey=peer.pub_key, text="ping")
     assert ok
 
-    txt = [Packet.decode(r) for r, _ in sent if Packet.decode(r).payload_type == PayloadType.TXT_MSG]
+    txt = [
+        Packet.decode(r)
+        for r, _ in sent
+        if Packet.decode(r).payload_type == PayloadType.TXT_MSG
+    ]
     assert len(txt) == 1
     assert txt[0].route_type == RouteType.DIRECT
     assert txt[0].path == fake_path
