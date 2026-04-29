@@ -309,6 +309,48 @@ async def _lookup_pubkey_prefix(
     return matches
 
 
+async def _resolve_path_geo(
+    db: AsyncSession, path_hashes_hex: list[str]
+) -> list[dict[str, Any]]:
+    """Für jeden Pfad-Hash: alle bekannten Contacts mit passendem
+    Pubkey-Präfix UND Geo-Daten. ``CompanionContact`` lernt Lat/Lon
+    aus ADVERT-app_data; Repeater haben ``node_type=2``.
+
+    Bei 1-Byte-Hashes ist ~1/256 Kollisionswahrscheinlichkeit normal —
+    Frontend zeigt alle Kandidaten + greedy-best-guess-Linie."""
+    if not path_hashes_hex:
+        return []
+    contacts = (
+        await db.execute(
+            select(CompanionContact).where(
+                CompanionContact.last_lat.is_not(None),
+                CompanionContact.last_lon.is_not(None),
+            )
+        )
+    ).scalars().all()
+    out: list[dict[str, Any]] = []
+    for hop_hex in path_hashes_hex:
+        try:
+            prefix = bytes.fromhex(hop_hex)
+        except ValueError:
+            out.append({"hash": hop_hex, "candidates": []})
+            continue
+        n = len(prefix)
+        cands = [
+            {
+                "name": c.peer_name or "?",
+                "pubkey": c.peer_pubkey.hex(),
+                "lat": c.last_lat,
+                "lon": c.last_lon,
+                "node_type": c.node_type,
+            }
+            for c in contacts
+            if c.peer_pubkey[:n] == prefix
+        ]
+        out.append({"hash": hop_hex, "candidates": cands})
+    return out
+
+
 async def _lookup_channel_hash(
     db: AsyncSession, channel_hash: bytes
 ) -> list[dict[str, str]]:
@@ -471,6 +513,7 @@ async def inspector_packet_detail(
     decoded["body_fields"] = await _decode_payload_fields(
         db, raw, rp_route, rp_payload, body_start
     )
+    decoded["path_geo"] = await _resolve_path_geo(db, rp_hashes)
 
     try:
         forwarded = json.loads(row.forwarded_to)

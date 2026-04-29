@@ -1,6 +1,8 @@
 {% extends "base.html.j2" %}
 {% block title %}Packet-Inspector — MeshCore Spiegel{% endblock %}
 {% block head_extra %}
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<script defer src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <style>
   .insp-toolbar { display: flex; flex-wrap: wrap; gap: .8rem; align-items: end; }
   .insp-toolbar > div { display: flex; flex-direction: column; gap: .2rem; }
@@ -260,6 +262,68 @@ async function selectPacket(id) {
   }
 }
 
+let mapInstance = null;
+
+function destroyMap() {
+  if (mapInstance) { try { mapInstance.remove(); } catch (e) {} mapInstance = null; }
+}
+
+function renderPathMap(geo) {
+  if (typeof L === 'undefined' || !geo) return;
+  const total = geo.reduce((n, h) => n + (h.candidates?.length || 0), 0);
+  const wrap = document.getElementById('insp-map-wrap');
+  const el = document.getElementById('insp-map');
+  if (total === 0) {
+    destroyMap();
+    if (wrap) wrap.style.display = 'none';
+    return;
+  }
+  if (!el || !wrap) return;
+  destroyMap();
+  wrap.style.display = 'block';
+  mapInstance = L.map(el, {scrollWheelZoom: false});
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    maxZoom: 18,
+    attribution: '© <a href="https://openstreetmap.org/copyright">OpenStreetMap</a>',
+  }).addTo(mapInstance);
+
+  const bounds = [];
+  let prev = null;
+  const linePts = [];
+  geo.forEach((hop, idx) => {
+    if (!hop.candidates || hop.candidates.length === 0) return;
+    let chosen = hop.candidates[0];
+    if (prev && hop.candidates.length > 1) {
+      let bestD = Infinity;
+      for (const c of hop.candidates) {
+        const d = Math.hypot(c.lat - prev.lat, c.lon - prev.lon);
+        if (d < bestD) { bestD = d; chosen = c; }
+      }
+    }
+    const ambig = hop.candidates.length > 1;
+    for (const c of hop.candidates) {
+      const isPick = c === chosen;
+      const m = L.circleMarker([c.lat, c.lon], {
+        radius: isPick ? 7 : 4,
+        color: isPick ? '#82aaff' : '#5f7e97',
+        fillColor: isPick ? '#82aaff' : '#5f7e97',
+        fillOpacity: isPick ? 0.85 : 0.35,
+        weight: isPick ? 2 : 1,
+      }).addTo(mapInstance);
+      const tag = ambig ? ' (mehrdeutig)' : '';
+      m.bindTooltip(`Hop ${idx+1} · ${escape(hop.hash)} · ${escape(c.name)}${tag}`);
+      bounds.push([c.lat, c.lon]);
+    }
+    linePts.push([chosen.lat, chosen.lon]);
+    prev = chosen;
+  });
+  if (linePts.length >= 2) {
+    L.polyline(linePts, {color:'#82aaff', weight:2, opacity:0.7, dashArray:'4 4'}).addTo(mapInstance);
+  }
+  if (bounds.length === 1) mapInstance.setView(bounds[0], 11);
+  else if (bounds.length > 1) mapInstance.fitBounds(bounds, {padding:[30,30]});
+}
+
 function renderBodyFields(fields) {
   if (!fields || fields.length === 0) return '';
   const rows = fields.map(f => {
@@ -302,6 +366,14 @@ function renderDetail(p) {
       ${advertHtml}
     </dl>
     ${renderBodyFields(d.body_fields)}
+    <div id="insp-map-wrap" style="display:none">
+      <h3>Path-Karte (best-guess)</h3>
+      <div id="insp-map" style="height:340px;border-radius:6px;border:1px solid var(--border,#1f2630);margin-bottom:1rem"></div>
+      <p style="color:var(--muted);font-size:.78rem;margin:-.5rem 0 1rem 0">
+        Marker = bekannte Repeater mit passendem Hash-Präfix (aus Companion-Adverts mit Lat/Lon).
+        Volle Punkte = greedy-best-guess je Hop, kleine = mehrdeutig. Linie ist eine Schätzung.
+      </p>
+    </div>
     <h3>Hex-Dump</h3>
     <div class="hexdump">${renderHex(p.raw_hex, r)}</div>
     <p style="color:var(--muted);font-size:.78rem;margin-top:.6rem">
@@ -312,6 +384,8 @@ function renderDetail(p) {
       <span style="padding:0 4px">Body (verschlüsselt)</span>
     </p>
   `;
+  // Karte (verzögert, damit insp-map im DOM ist und Leaflet geladen sein kann)
+  setTimeout(() => renderPathMap(d.path_geo), 0);
 }
 
 function arm() {
