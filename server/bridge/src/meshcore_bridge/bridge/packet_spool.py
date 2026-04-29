@@ -81,9 +81,7 @@ class PacketSpool:
 
     async def start(self) -> None:
         self._loop = asyncio.get_running_loop()
-        self._writer_task = asyncio.create_task(
-            self._writer_loop(), name="packet_spool_writer"
-        )
+        self._writer_task = asyncio.create_task(self._writer_loop(), name="packet_spool_writer")
         self._retention_task = asyncio.create_task(
             self._retention_loop(), name="packet_spool_retention"
         )
@@ -163,9 +161,7 @@ class PacketSpool:
     async def _purge_old(self) -> None:
         cutoff = datetime.now(UTC) - self._retention
         async with self._sessionmaker() as session:
-            result = await session.execute(
-                delete(RawPacket).where(RawPacket.ts < cutoff)
-            )
+            result = await session.execute(delete(RawPacket).where(RawPacket.ts < cutoff))
             await session.commit()
         deleted = getattr(result, "rowcount", 0) or 0
         if deleted:
@@ -201,9 +197,7 @@ def attach(spool: PacketSpool, traffic: TrafficLog) -> None:
 
 
 @asynccontextmanager
-async def lifecycle(
-    spool: PacketSpool, traffic: TrafficLog
-) -> AsyncIterator[PacketSpool]:
+async def lifecycle(spool: PacketSpool, traffic: TrafficLog) -> AsyncIterator[PacketSpool]:
     attach(spool, traffic)
     await spool.start()
     try:

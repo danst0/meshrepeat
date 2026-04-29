@@ -40,9 +40,7 @@ def _templates(request: Request) -> Jinja2Templates:
     return templates  # type: ignore[no-any-return]
 
 
-def _set_session_cookie(
-    response: Response, *, sid: bytes, cfg: AppConfig
-) -> None:
+def _set_session_cookie(response: Response, *, sid: bytes, cfg: AppConfig) -> None:
     response.set_cookie(
         cfg.web.session_cookie_name,
         encode_cookie(sid),
@@ -114,9 +112,7 @@ async def signup_submit(
             },
             status_code=400,
         )
-    existing = (
-        await db.execute(select(User).where(User.email == email))
-    ).scalar_one_or_none()
+    existing = (await db.execute(select(User).where(User.email == email))).scalar_one_or_none()
     if existing is not None:
         return _templates(request).TemplateResponse(
             request,

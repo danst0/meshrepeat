@@ -43,9 +43,7 @@ def upgrade() -> None:
         sa.Column("forwarded_to", sa.String(), nullable=False, server_default="[]"),
         sa.Column("dropped_reason", sa.String(64), nullable=True),
     )
-    op.create_index(
-        "ix_raw_packets_site_ts", "raw_packets", ["site_id", "ts"]
-    )
+    op.create_index("ix_raw_packets_site_ts", "raw_packets", ["site_id", "ts"])
     op.create_index("ix_raw_packets_ts", "raw_packets", ["ts"])
 
 

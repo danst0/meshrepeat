@@ -234,9 +234,7 @@ async def test_companion_detail_page_and_settings(app_and_outbox) -> None:
         assert 'data-tab="map"' in body
 
         # Map-API leer (noch keine Adverts mit Lat/Lon empfangen)
-        resp = await client.get(
-            f"/api/v1/companion/identities/{ident_id}/map"
-        )
+        resp = await client.get(f"/api/v1/companion/identities/{ident_id}/map")
         assert resp.status_code == 200
         assert resp.json() == []
 
@@ -259,9 +257,7 @@ async def test_companion_detail_page_and_settings(app_and_outbox) -> None:
         assert resp.status_code == 303
 
         # Threads-API listet den Channel
-        resp = await client.get(
-            f"/api/v1/companion/identities/{ident_id}/threads"
-        )
+        resp = await client.get(f"/api/v1/companion/identities/{ident_id}/threads")
         assert resp.status_code == 200
         j = resp.json()
         chan_names = [c["name"] for c in j["channels"]]
@@ -276,9 +272,7 @@ async def test_companion_detail_page_and_settings(app_and_outbox) -> None:
         )
         assert resp.status_code == 303
 
-        resp = await client.get(
-            f"/api/v1/companion/identities/{ident_id}/threads"
-        )
+        resp = await client.get(f"/api/v1/companion/identities/{ident_id}/threads")
         chan_names = [c["name"] for c in resp.json()["channels"]]
         assert "tech" not in chan_names
 
@@ -343,14 +337,10 @@ async def test_two_repeaters_route_pkt_between_them(app_and_outbox) -> None:
         tc.websocket_connect("/api/v1/bridge") as ws_b,
     ):
         ws_a.send_bytes(
-            encode_frame(
-                Hello(site=UUID(a_site), tok=a_tok, fw="v0", proto=1, scope="public")
-            )
+            encode_frame(Hello(site=UUID(a_site), tok=a_tok, fw="v0", proto=1, scope="public"))
         )
         ws_b.send_bytes(
-            encode_frame(
-                Hello(site=UUID(b_site), tok=b_tok, fw="v0", proto=1, scope="public")
-            )
+            encode_frame(Hello(site=UUID(b_site), tok=b_tok, fw="v0", proto=1, scope="public"))
         )
         assert isinstance(decode_frame(ws_a.receive_bytes()), HelloAck)
         assert isinstance(decode_frame(ws_b.receive_bytes()), HelloAck)

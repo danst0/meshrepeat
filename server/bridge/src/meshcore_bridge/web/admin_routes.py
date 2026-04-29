@@ -15,6 +15,12 @@ from sqlalchemy import desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meshcore_bridge.bridge import PolicyState
+from meshcore_bridge.bridge.repeater_metrics import (
+    WINDOW_PRESETS as _RM_WINDOW_PRESETS,
+)
+from meshcore_bridge.bridge.repeater_metrics import (
+    compute_repeater_metrics,
+)
 from meshcore_bridge.bridge.traffic import (
     PAYLOAD_TYPE_NAMES,
     ROUTE_TYPE_NAMES,
@@ -150,9 +156,7 @@ async def list_repeaters(
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
     """Liste aller bekannten Repeater (für Inspector-Dropdown)."""
-    rows = (
-        await db.execute(select(Repeater).order_by(Repeater.name.asc()))
-    ).scalars().all()
+    rows = (await db.execute(select(Repeater).order_by(Repeater.name.asc()))).scalars().all()
     return {
         "repeaters": [
             {
@@ -268,9 +272,7 @@ _MAC_LEN = 2
 _EPHEMERAL_PUBKEY_LEN = 32
 
 
-async def _lookup_pubkey_prefix(
-    db: AsyncSession, prefix: bytes
-) -> list[dict[str, str]]:
+async def _lookup_pubkey_prefix(db: AsyncSession, prefix: bytes) -> list[dict[str, str]]:
     """Findet Identities + Contacts, deren Pubkey mit ``prefix`` beginnt.
 
     Hash-Größe ist üblicherweise 1 Byte (PAYLOAD_VER_1) → bis zu 256 mögliche
@@ -281,9 +283,7 @@ async def _lookup_pubkey_prefix(
     n = len(prefix)
     matches: list[dict[str, str]] = []
 
-    idents = (
-        await db.execute(select(CompanionIdentity))
-    ).scalars().all()
+    idents = (await db.execute(select(CompanionIdentity))).scalars().all()
     for ident in idents:
         if ident.pubkey[:n] == prefix:
             matches.append(
@@ -294,9 +294,7 @@ async def _lookup_pubkey_prefix(
                 }
             )
 
-    contacts = (
-        await db.execute(select(CompanionContact))
-    ).scalars().all()
+    contacts = (await db.execute(select(CompanionContact))).scalars().all()
     for c in contacts:
         if c.peer_pubkey[:n] == prefix:
             matches.append(
@@ -309,9 +307,7 @@ async def _lookup_pubkey_prefix(
     return matches
 
 
-async def _resolve_path_geo(
-    db: AsyncSession, path_hashes_hex: list[str]
-) -> list[dict[str, Any]]:
+async def _resolve_path_geo(db: AsyncSession, path_hashes_hex: list[str]) -> list[dict[str, Any]]:
     """Für jeden Pfad-Hash: alle bekannten Contacts mit passendem
     Pubkey-Präfix UND Geo-Daten. ``CompanionContact`` lernt Lat/Lon
     aus ADVERT-app_data; Repeater haben ``node_type=2``.
@@ -321,13 +317,17 @@ async def _resolve_path_geo(
     if not path_hashes_hex:
         return []
     contacts = (
-        await db.execute(
-            select(CompanionContact).where(
-                CompanionContact.last_lat.is_not(None),
-                CompanionContact.last_lon.is_not(None),
+        (
+            await db.execute(
+                select(CompanionContact).where(
+                    CompanionContact.last_lat.is_not(None),
+                    CompanionContact.last_lon.is_not(None),
+                )
             )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     out: list[dict[str, Any]] = []
     for hop_hex in path_hashes_hex:
         try:
@@ -351,14 +351,10 @@ async def _resolve_path_geo(
     return out
 
 
-async def _lookup_channel_hash(
-    db: AsyncSession, channel_hash: bytes
-) -> list[dict[str, str]]:
+async def _lookup_channel_hash(db: AsyncSession, channel_hash: bytes) -> list[dict[str, str]]:
     if not channel_hash:
         return []
-    rows = (
-        await db.execute(select(CompanionChannel))
-    ).scalars().all()
+    rows = (await db.execute(select(CompanionChannel))).scalars().all()
     return [
         {"kind": "channel", "name": ch.name, "hash_hex": ch.channel_hash.hex()}
         for ch in rows
@@ -510,9 +506,7 @@ async def inspector_packet_detail(
     }
 
     body_start = region.get("body", [len(raw), len(raw)])[0] if raw else 0
-    decoded["body_fields"] = await _decode_payload_fields(
-        db, raw, rp_route, rp_payload, body_start
-    )
+    decoded["body_fields"] = await _decode_payload_fields(db, raw, rp_route, rp_payload, body_start)
     decoded["path_geo"] = await _resolve_path_geo(db, rp_hashes)
 
     try:
@@ -561,9 +555,7 @@ async def inspector_stats(
 
     total_row = (
         await db.execute(
-            select(func.count(), func.coalesce(func.sum(raw_size), 0)).where(
-                RawPacket.ts >= cutoff
-            )
+            select(func.count(), func.coalesce(func.sum(raw_size), 0)).where(RawPacket.ts >= cutoff)
         )
     ).one()
 
@@ -619,12 +611,9 @@ async def inspector_stats(
         "cutoff": cutoff.isoformat(),
         "total": {"count": int(total_row[0]), "bytes": int(total_row[1])},
         "by_payload_type": [
-            {"key": key, "count": int(count), "bytes": int(b)}
-            for key, count, b in pt_rows
+            {"key": key, "count": int(count), "bytes": int(b)} for key, count, b in pt_rows
         ],
-        "by_route_type": [
-            {"key": key, "count": int(count)} for key, count in rt_rows
-        ],
+        "by_route_type": [{"key": key, "count": int(count)} for key, count in rt_rows],
         "by_site": [
             {
                 "site_id": str(site_id),
@@ -667,6 +656,63 @@ async def stats_page(
     return _templates(request).TemplateResponse(
         request,
         "admin_stats.html.j2",
+        {"user": user, "flash": None},
+    )
+
+
+@router.get("/repeaters/metrics")
+async def repeater_metrics_endpoint(
+    window: str = Query(default="7d"),
+    _user: User = Depends(admin_required),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Wichtigkeits-Score pro bekanntem Repeater-Pubkey im Zeitfenster."""
+    delta = _RM_WINDOW_PRESETS.get(window)
+    if delta is None:
+        raise HTTPException(
+            status_code=http_status.HTTP_400_BAD_REQUEST,
+            detail=f"invalid window (use one of {list(_RM_WINDOW_PRESETS)})",
+        )
+    result = await compute_repeater_metrics(db, delta, window_label=window)
+    return {
+        "window": result.window,
+        "cutoff": result.cutoff.isoformat(),
+        "total_packets": result.total_packets,
+        "repeater_count": result.repeater_count,
+        "forward_truncated_to_7d": result.forward_truncated_to_7d,
+        "repeaters": [
+            {
+                "pubkey_hex": m.pubkey_hex,
+                "pubkey_short": m.pubkey_hex[:12],
+                "name": m.name,
+                "last_lat": m.last_lat,
+                "last_lon": m.last_lon,
+                "last_seen_at": (m.last_seen_at.isoformat() if m.last_seen_at else None),
+                "forward_count": m.forward_count,
+                "forward_share": m.forward_share,
+                "unique_paths": m.unique_paths,
+                "reach_endpoints": m.reach_endpoints,
+                "bottleneck_origins": m.bottleneck_origins,
+                "advert_count": m.advert_count,
+                "forwarding_score": m.forwarding_score,
+                "bottleneck_score": m.bottleneck_score,
+                "reach_score": m.reach_score,
+                "liveness_score": m.liveness_score,
+                "total_score": m.total_score,
+            }
+            for m in result.metrics
+        ],
+    }
+
+
+@ui_router.get("/repeaters", response_class=HTMLResponse)
+async def repeaters_page(
+    request: Request,
+    user: User = Depends(admin_required),
+) -> HTMLResponse:
+    return _templates(request).TemplateResponse(
+        request,
+        "admin_repeaters.html.j2",
         {"user": user, "flash": None},
     )
 

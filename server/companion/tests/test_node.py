@@ -115,9 +115,7 @@ def test_response_decrypt_roundtrip() -> None:
         payload_type=PayloadType.RESPONSE,
         payload=body,
     )
-    decoded = bob.try_decrypt_response(
-        packet=pkt, peer_candidates=[Identity(alice.pub_key)]
-    )
+    decoded = bob.try_decrypt_response(packet=pkt, peer_candidates=[Identity(alice.pub_key)])
     assert decoded is not None
     assert decoded.tag == 0xABCD1234
     assert decoded.sender_pubkey == alice.pub_key
@@ -142,9 +140,7 @@ def test_response_decrypt_wrong_peer_returns_none() -> None:
     )
     # Bob versucht mit Eve als Kandidat — passt nicht, src_hash matched
     # vielleicht zufällig, MAC schlägt aber fehl
-    res = bob.try_decrypt_response(
-        packet=pkt, peer_candidates=[Identity(eve.pub_key)]
-    )
+    res = bob.try_decrypt_response(packet=pkt, peer_candidates=[Identity(eve.pub_key)])
     # entweder src_hash mismatch oder MAC mismatch
     if res is not None:
         # Bei zufälliger Kollision der Hash-Prefixes (1/256) → MAC sollte greifen
@@ -243,9 +239,9 @@ def test_dm_ack_hash_matches_firmware_formula() -> None:
     from meshcore_companion.node import compute_dm_ack_hash
 
     sender_pk = bytes(range(32))
-    expected = hashlib.sha256(
-        struct.pack("<I", 1234) + bytes([0]) + b"hello" + sender_pk
-    ).digest()[:4]
+    expected = hashlib.sha256(struct.pack("<I", 1234) + bytes([0]) + b"hello" + sender_pk).digest()[
+        :4
+    ]
     actual = compute_dm_ack_hash(
         timestamp=1234, flags=0, text_bytes=b"hello", sender_pubkey=sender_pk
     )
@@ -314,12 +310,7 @@ def _build_room_push_packet(
     examples/simple_room_server/MyMesh.cpp:53-69. Liefert das Paket und
     den vollen Plaintext (für ACK-Hash-Vergleich)."""
     flags = (2 << 2) | (attempt & 3)  # TXT_TYPE_SIGNED_PLAIN=2
-    plain = (
-        struct.pack("<I", timestamp)
-        + bytes([flags])
-        + author_prefix
-        + text.encode("utf-8")
-    )
+    plain = struct.pack("<I", timestamp) + bytes([flags]) + author_prefix + text.encode("utf-8")
     secret = room.local.calc_shared_secret(receiver_pubkey)
     encrypted = encrypt_then_mac(secret, plain)
     body = receiver_pubkey[:1] + room.pub_key[:1] + encrypted
@@ -342,9 +333,7 @@ def test_room_push_decode_roundtrip() -> None:
         author_prefix=fake_author.pub_key[:4],
         text="hi from bob",
     )
-    decoded = antonia.try_decrypt_room_push(
-        packet=pkt, room_candidates=[Identity(room.pub_key)]
-    )
+    decoded = antonia.try_decrypt_room_push(packet=pkt, room_candidates=[Identity(room.pub_key)])
     assert decoded is not None
     assert decoded.room_pubkey == room.pub_key
     assert decoded.author_prefix == fake_author.pub_key[:4]
@@ -359,9 +348,7 @@ def test_room_push_decode_rejects_plain_dm() -> None:
     alice = CompanionNode(LocalIdentity.generate())
     bob = CompanionNode(LocalIdentity.generate())
     pkt = alice.make_dm(peer_pubkey=bob.pub_key, text="reguläre DM")
-    decoded = bob.try_decrypt_room_push(
-        packet=pkt, room_candidates=[Identity(alice.pub_key)]
-    )
+    decoded = bob.try_decrypt_room_push(packet=pkt, room_candidates=[Identity(alice.pub_key)])
     assert decoded is None
 
 

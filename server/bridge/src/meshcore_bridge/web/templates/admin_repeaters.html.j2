@@ -1,0 +1,276 @@
+{% extends "base.html.j2" %}
+{% block title %}Repeater-Wichtigkeit — MeshCore Spiegel{% endblock %}
+{% block head_extra %}
+<style>
+  .rep-toolbar { display: flex; flex-wrap: wrap; gap: .8rem; align-items: end; }
+  .rep-toolbar > div { display: flex; flex-direction: column; gap: .2rem; }
+  .rep-toolbar label { margin: 0; font-size: .8rem; }
+  .rep-toolbar select, .rep-toolbar button { padding: .35rem .5rem; }
+  .rep-summary { font-size: 1.05rem; margin: .8rem 0; }
+  .rep-summary strong { color: var(--accent); }
+  .rep-summary .muted { color: var(--muted); margin-left: .6rem; font-size: .85rem; }
+  .rep-banner {
+    background: rgba(255,200,90,.10); border-left: 3px solid rgba(255,200,90,.6);
+    padding: .5rem .8rem; margin: .8rem 0; font-size: .85rem; color: var(--muted);
+  }
+  .rep-table { width: 100%; font-size: .9rem; border-collapse: collapse; }
+  .rep-table th {
+    text-align: left; color: var(--muted); font-weight: 500;
+    cursor: pointer; user-select: none; padding: .35rem .5rem;
+    border-bottom: 1px solid rgba(130,170,255,.10);
+  }
+  .rep-table th.num, .rep-table td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .rep-table th.sort-asc::after { content: " ▲"; color: var(--accent); }
+  .rep-table th.sort-desc::after { content: " ▼"; color: var(--accent); }
+  .rep-table td { padding: .35rem .5rem; border-bottom: 1px solid rgba(130,170,255,.05); }
+  .rep-table tr:hover { background: rgba(130,170,255,.05); cursor: pointer; }
+  .rep-table .pkkey { font-family: ui-monospace, monospace; color: var(--muted); font-size: .8rem; }
+  .rep-bar-svg rect.b-track { fill: rgba(130,170,255,.06); }
+  .rep-bar-svg rect.b-total  { fill: rgba(255,200,90,.55); }
+  .rep-bar-svg rect.b-fwd    { fill: rgba(120,210,140,.55); }
+  .rep-bar-svg rect.b-bottle { fill: rgba(255,88,116,.55); }
+  .rep-bar-svg rect.b-reach  { fill: rgba(130,170,255,.55); }
+  .rep-bar-svg rect.b-life   { fill: rgba(200,160,255,.55); }
+  .rep-empty { color: var(--muted); padding: 1.5rem; text-align: center; }
+
+  .rep-modal-bg {
+    position: fixed; inset: 0; background: rgba(0,0,0,.6);
+    display: none; align-items: center; justify-content: center; z-index: 100;
+  }
+  .rep-modal-bg.open { display: flex; }
+  .rep-modal {
+    background: var(--bg, #1a1c20); border: 1px solid rgba(130,170,255,.15);
+    border-radius: 6px; padding: 1.2rem; max-width: 640px; max-height: 80vh;
+    overflow-y: auto; box-shadow: 0 8px 32px rgba(0,0,0,.5);
+  }
+  .rep-modal h3 { margin-top: 0; }
+  .rep-modal dl { display: grid; grid-template-columns: max-content 1fr; gap: .25rem .8rem; font-size: .9rem; }
+  .rep-modal dt { color: var(--muted); }
+  .rep-modal dd { margin: 0; }
+  .rep-modal .pkkey { font-family: ui-monospace, monospace; font-size: .8rem; }
+  .rep-modal .close { float: right; cursor: pointer; color: var(--muted); }
+</style>
+{% endblock %}
+{% block content %}
+  <h1>Repeater-Wichtigkeit</h1>
+  <p>Bewertung pro Repeater-Pubkey, abgeleitet aus den persistierten LoRa-Paketen.
+     Vier Sub-Scores: <em>Forwarding</em> (Hops in <code>path_hashes</code>),
+     <em>Bottleneck</em> (Repeater liegt in jedem distinkten Pfad eines Origins),
+     <em>Reach</em> (über wie viele unterschiedliche ADVERT-Origins er gesehen wurde),
+     <em>Liveness</em> (Decay über last_seen).</p>
+
+  <div class="card">
+    <form id="filters" class="rep-toolbar" onsubmit="return false">
+      <div>
+        <label for="f-window">Zeitraum</label>
+        <select id="f-window">
+          <option value="24h">letzte 24 h</option>
+          <option value="7d" selected>letzte 7 d</option>
+          <option value="30d">letzte 30 d</option>
+        </select>
+      </div>
+      <div>
+        <label>&nbsp;</label>
+        <button type="button" id="btn-reload">Neu laden</button>
+      </div>
+      <div>
+        <label>&nbsp;</label>
+        <span id="stat" style="color:var(--muted)"></span>
+      </div>
+    </form>
+    <div class="rep-summary" id="summary">—</div>
+    <div class="rep-banner" id="banner-trunc" style="display:none">
+      Hinweis: Forwarding/Reach/Bottleneck sind durch die 7-Tage-Retention der
+      Paket-Tabelle gekappt. Liveness und Advert-Count nutzen das volle Fenster.
+    </div>
+  </div>
+
+  <div class="card" style="margin-top:1rem">
+    <table class="rep-table" id="rep-tbl">
+      <thead>
+        <tr>
+          <th data-sort="name">Name</th>
+          <th data-sort="total" class="num sort-desc">Score</th>
+          <th class="num">Score-Bar</th>
+          <th data-sort="fwd" class="num">Forwarding</th>
+          <th data-sort="bottle" class="num">Bottleneck</th>
+          <th data-sort="reach" class="num">Reach</th>
+          <th data-sort="life" class="num">Liveness</th>
+          <th data-sort="adv" class="num">Adverts</th>
+          <th data-sort="last">Last seen</th>
+        </tr>
+      </thead>
+      <tbody id="rep-rows"><tr><td colspan="9" class="rep-empty">—</td></tr></tbody>
+    </table>
+  </div>
+
+  <div class="rep-modal-bg" id="modal-bg">
+    <div class="rep-modal" id="modal">
+      <span class="close" id="modal-close">✕</span>
+      <h3 id="modal-name">—</h3>
+      <dl id="modal-body"></dl>
+    </div>
+  </div>
+
+<script>
+const elWindow = document.getElementById('f-window');
+const elStat = document.getElementById('stat');
+const elSummary = document.getElementById('summary');
+const elBanner = document.getElementById('banner-trunc');
+const elRows = document.getElementById('rep-rows');
+const elTable = document.getElementById('rep-tbl');
+const elModalBg = document.getElementById('modal-bg');
+const elModalName = document.getElementById('modal-name');
+const elModalBody = document.getElementById('modal-body');
+
+let lastData = null;
+let sortKey = 'total';
+let sortDir = 'desc';
+
+function fmtNum(n) { return Number(n).toLocaleString('de-DE'); }
+function fmtPct(n) { return (n * 100).toFixed(1) + '%'; }
+function fmtScore(n) { return n.toFixed(3); }
+function escape(s) {
+  return String(s == null ? '' : s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+}
+function fmtRel(iso) {
+  if (!iso) return '—';
+  const t = new Date(iso);
+  const dh = (Date.now() - t.getTime()) / 3600000;
+  if (dh < 1) return Math.round(dh * 60) + ' min';
+  if (dh < 24) return dh.toFixed(1) + ' h';
+  return (dh / 24).toFixed(1) + ' d';
+}
+
+function bar(value, cls) {
+  const w = Math.max(0, Math.min(110, Math.round(value * 110)));
+  return '<svg class="rep-bar-svg" width="120" height="10">'
+    + '<rect class="b-track" x="0" y="2" width="120" height="6" rx="2"></rect>'
+    + (w ? '<rect class="' + cls + '" x="0" y="2" width="' + w + '" height="6" rx="2"></rect>' : '')
+    + '</svg>';
+}
+
+const SORT_ACCESSORS = {
+  name:   r => (r.name || '').toLowerCase(),
+  total:  r => r.total_score,
+  fwd:    r => r.forwarding_score,
+  bottle: r => r.bottleneck_score,
+  reach:  r => r.reach_score,
+  life:   r => r.liveness_score,
+  adv:    r => r.advert_count,
+  last:   r => r.last_seen_at || '',
+};
+
+function sortRows(rows) {
+  const acc = SORT_ACCESSORS[sortKey] || SORT_ACCESSORS.total;
+  const sign = sortDir === 'asc' ? 1 : -1;
+  return rows.slice().sort((a, b) => {
+    const va = acc(a), vb = acc(b);
+    if (va < vb) return -1 * sign;
+    if (va > vb) return  1 * sign;
+    return 0;
+  });
+}
+
+function render() {
+  if (!lastData) return;
+  const rows = sortRows(lastData.repeaters);
+  if (!rows.length) {
+    elRows.innerHTML = '<tr><td colspan="9" class="rep-empty">keine Repeater bekannt</td></tr>';
+    return;
+  }
+  elRows.innerHTML = rows.map((r, i) => {
+    const short = r.pubkey_short || (r.pubkey_hex || '').slice(0, 12);
+    return '<tr data-idx="' + i + '">'
+      + '<td><strong>' + escape(r.name || '?') + '</strong>'
+      + ' <span class="pkkey">' + escape(short) + '…</span></td>'
+      + '<td class="num">' + fmtScore(r.total_score) + '</td>'
+      + '<td class="num">' + bar(r.total_score, 'b-total') + '</td>'
+      + '<td class="num">' + bar(r.forwarding_score, 'b-fwd')
+        + '<div style="font-size:.75rem;color:var(--muted)">' + fmtPct(r.forward_share) + '</div></td>'
+      + '<td class="num">' + bar(r.bottleneck_score, 'b-bottle')
+        + '<div style="font-size:.75rem;color:var(--muted)">' + fmtNum(r.bottleneck_origins) + '</div></td>'
+      + '<td class="num">' + bar(r.reach_score, 'b-reach')
+        + '<div style="font-size:.75rem;color:var(--muted)">' + fmtNum(r.reach_endpoints) + '</div></td>'
+      + '<td class="num">' + bar(r.liveness_score, 'b-life') + '</td>'
+      + '<td class="num">' + fmtNum(r.advert_count) + '</td>'
+      + '<td>' + fmtRel(r.last_seen_at) + '</td>'
+      + '</tr>';
+  }).join('');
+  // re-attach handlers
+  elRows.querySelectorAll('tr').forEach(tr => {
+    tr.addEventListener('click', () => openModal(parseInt(tr.dataset.idx, 10)));
+  });
+  // header sort indicators
+  elTable.querySelectorAll('th[data-sort]').forEach(th => {
+    th.classList.remove('sort-asc', 'sort-desc');
+    if (th.dataset.sort === sortKey) {
+      th.classList.add(sortDir === 'asc' ? 'sort-asc' : 'sort-desc');
+    }
+  });
+}
+
+function openModal(idx) {
+  const rows = sortRows(lastData.repeaters);
+  const r = rows[idx];
+  if (!r) return;
+  elModalName.textContent = r.name || '?';
+  elModalBody.innerHTML =
+    '<dt>Pubkey</dt><dd class="pkkey">' + escape(r.pubkey_hex) + '</dd>'
+    + '<dt>Total-Score</dt><dd>' + fmtScore(r.total_score) + '</dd>'
+    + '<dt>Forwarding</dt><dd>' + fmtScore(r.forwarding_score)
+      + ' (' + fmtNum(r.forward_count.toFixed(1)) + ' Hops, ' + fmtPct(r.forward_share) + ' aller Pakete)</dd>'
+    + '<dt>Unique paths</dt><dd>' + fmtNum(r.unique_paths) + '</dd>'
+    + '<dt>Bottleneck</dt><dd>' + fmtScore(r.bottleneck_score)
+      + ' (Origin-Count ' + fmtNum(r.bottleneck_origins) + ')</dd>'
+    + '<dt>Reach</dt><dd>' + fmtScore(r.reach_score)
+      + ' (' + fmtNum(r.reach_endpoints) + ' verschiedene Origins)</dd>'
+    + '<dt>Liveness</dt><dd>' + fmtScore(r.liveness_score)
+      + ' (last_seen ' + fmtRel(r.last_seen_at) + ')</dd>'
+    + '<dt>Advert-Count</dt><dd>' + fmtNum(r.advert_count) + '</dd>'
+    + (r.last_lat != null && r.last_lon != null
+        ? '<dt>Position</dt><dd>' + r.last_lat.toFixed(5) + ', ' + r.last_lon.toFixed(5) + '</dd>' : '');
+  elModalBg.classList.add('open');
+}
+elModalBg.addEventListener('click', e => {
+  if (e.target === elModalBg || e.target.id === 'modal-close') {
+    elModalBg.classList.remove('open');
+  }
+});
+
+elTable.querySelectorAll('th[data-sort]').forEach(th => {
+  th.addEventListener('click', () => {
+    const k = th.dataset.sort;
+    if (sortKey === k) {
+      sortDir = (sortDir === 'asc' ? 'desc' : 'asc');
+    } else {
+      sortKey = k;
+      sortDir = (k === 'name' || k === 'last') ? 'asc' : 'desc';
+    }
+    render();
+  });
+});
+
+async function refresh() {
+  elStat.textContent = 'lade …';
+  try {
+    const r = await fetch('/api/v1/admin/repeaters/metrics?window=' + elWindow.value, {credentials:'same-origin'});
+    if (!r.ok) { elStat.textContent = 'fetch ' + r.status; return; }
+    lastData = await r.json();
+    elSummary.innerHTML =
+      '<strong>' + fmtNum(lastData.repeater_count) + '</strong> Repeater bekannt · '
+      + '<strong>' + fmtNum(lastData.total_packets) + '</strong> Pakete im Fenster'
+      + '<span class="muted">Fenster: ' + escape(lastData.window) + ' — seit ' + escape(lastData.cutoff) + '</span>';
+    elBanner.style.display = lastData.forward_truncated_to_7d ? '' : 'none';
+    render();
+    elStat.textContent = '';
+  } catch (e) {
+    elStat.textContent = 'fetch-fail: ' + e;
+  }
+}
+
+elWindow.addEventListener('change', refresh);
+document.getElementById('btn-reload').addEventListener('click', refresh);
+refresh();
+</script>
+{% endblock %}

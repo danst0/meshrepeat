@@ -80,6 +80,7 @@ def _identity_dict(row: CompanionIdentity) -> dict[str, Any]:
 
 # ---------- REST ----------
 
+
 @router.get("/identities")
 async def list_identities(
     user: User = Depends(current_user_required),
@@ -269,9 +270,7 @@ def _channel_dict(c: CompanionChannel) -> dict[str, Any]:
     }
 
 
-async def _user_owns_identity(
-    db: AsyncSession, user_id: UUID, identity_id: UUID
-) -> bool:
+async def _user_owns_identity(db: AsyncSession, user_id: UUID, identity_id: UUID) -> bool:
     row = await db.get(CompanionIdentity, identity_id)
     return row is not None and row.user_id == user_id
 
@@ -314,9 +313,7 @@ async def create_channel(
     svc = _service(request)
     if svc is None:
         raise HTTPException(status_code=503, detail="companion-service not running")
-    channel = await svc.add_channel(
-        identity_id=identity_id, name=name.strip(), password=password
-    )
+    channel = await svc.add_channel(identity_id=identity_id, name=name.strip(), password=password)
     if channel is None:
         raise HTTPException(status_code=409, detail="identity not loaded or duplicate name")
     return _channel_dict(channel)
@@ -336,9 +333,7 @@ async def send_channel_message(
     svc = _service(request)
     if svc is None:
         raise HTTPException(status_code=503)
-    ok = await svc.send_channel(
-        identity_id=identity_id, channel_id=channel_id, text=text
-    )
+    ok = await svc.send_channel(identity_id=identity_id, channel_id=channel_id, text=text)
     if not ok:
         raise HTTPException(status_code=404, detail="channel not found")
     return {"ok": ok, "ts": datetime.now(UTC).isoformat()}
@@ -360,9 +355,7 @@ def _hop_count(raw: bytes | None) -> int | None:
         return None
 
 
-def _message_dict(
-    m: CompanionMessage, *, room_sender_name: str | None = None
-) -> dict[str, Any]:
+def _message_dict(m: CompanionMessage, *, room_sender_name: str | None = None) -> dict[str, Any]:
     return {
         "id": str(m.id),
         "direction": m.direction,
@@ -373,9 +366,7 @@ def _message_dict(
         "text": m.text,
         "ts": _ts_iso(m.ts),
         "hops": _hop_count(m.raw),
-        "room_sender_prefix_hex": (
-            m.room_sender_pubkey.hex() if m.room_sender_pubkey else None
-        ),
+        "room_sender_prefix_hex": (m.room_sender_pubkey.hex() if m.room_sender_pubkey else None),
         "room_sender_name": room_sender_name,
     }
 
@@ -388,11 +379,7 @@ async def _resolve_room_sender_names(
     """Eine Subquery für alle in den Messages vorkommenden 4-Byte-Author-
     Prefixes — vermeidet N+1. Bei Prefix-Kollisionen gewinnt der Contact
     mit dem jüngsten last_seen_at."""
-    prefixes = {
-        bytes(m.room_sender_pubkey)
-        for m in messages
-        if m.room_sender_pubkey
-    }
+    prefixes = {bytes(m.room_sender_pubkey) for m in messages if m.room_sender_pubkey}
     if not prefixes:
         return {}
     rows = list(
@@ -469,11 +456,7 @@ async def list_identity_threads(
     for m in msgs:
         if m.peer_pubkey is not None and m.peer_pubkey not in last_msg_by_peer:
             last_msg_by_peer[m.peer_pubkey] = m
-        elif (
-            m.peer_pubkey is None
-            and m.channel_name
-            and m.channel_name not in chan_last
-        ):
+        elif m.peer_pubkey is None and m.channel_name and m.channel_name not in chan_last:
             chan_last[m.channel_name] = m
 
     dms: list[dict[str, Any]] = []
@@ -743,9 +726,7 @@ async def request_contact_login(
     svc = _service(request)
     if svc is None:
         raise HTTPException(status_code=503, detail="companion-service not running")
-    ok = await svc.request_login(
-        identity_id=identity_id, peer_pubkey=peer, password=password
-    )
+    ok = await svc.request_login(identity_id=identity_id, peer_pubkey=peer, password=password)
     if not ok:
         raise HTTPException(status_code=409, detail="identity not loaded in service")
     return {"ok": True, "ts": datetime.now(UTC).isoformat()}
@@ -996,11 +977,15 @@ async def search_messages(
         """
     )
     rows = (
-        await db.execute(
-            sql,
-            {"q": fts_query, "identity_id": identity_id.bytes, "limit": limit},
+        (
+            await db.execute(
+                sql,
+                {"q": fts_query, "identity_id": identity_id.bytes, "limit": limit},
+            )
         )
-    ).mappings().all()
+        .mappings()
+        .all()
+    )
 
     # Pro Channel müssen wir die channel_id auflösen (Frontend springt per id).
     channel_ids: dict[str, str] = {}
@@ -1102,17 +1087,11 @@ async def internal_companion_scan(
         for action in valid_actions:
             try:
                 if action == "login":
-                    await svc.request_login(
-                        identity_id=identity_id, peer_pubkey=c.peer_pubkey
-                    )
+                    await svc.request_login(identity_id=identity_id, peer_pubkey=c.peer_pubkey)
                 elif action == "status":
-                    await svc.request_status(
-                        identity_id=identity_id, peer_pubkey=c.peer_pubkey
-                    )
+                    await svc.request_status(identity_id=identity_id, peer_pubkey=c.peer_pubkey)
                 elif action == "telemetry":
-                    await svc.request_telemetry(
-                        identity_id=identity_id, peer_pubkey=c.peer_pubkey
-                    )
+                    await svc.request_telemetry(identity_id=identity_id, peer_pubkey=c.peer_pubkey)
                 else:
                     continue
                 triggered.append(action)
@@ -1182,6 +1161,7 @@ async def companion_stream(
 
 
 # ---------- UI ----------
+
 
 @ui_router.get("/", response_class=HTMLResponse)
 async def companion_index(
@@ -1271,9 +1251,7 @@ async def companion_detail(
     contact_rows = list(
         (
             await db.execute(
-                select(CompanionContact).where(
-                    CompanionContact.identity_id == identity_id
-                )
+                select(CompanionContact).where(CompanionContact.identity_id == identity_id)
             )
         ).scalars()
     )
@@ -1319,9 +1297,7 @@ async def companion_detail(
         if key in seen:
             continue
         seen.add(key)
-        at_targets.append(
-            {"name": name, "pubkey_hex": None, "contact_id": None, "favorite": False}
-        )
+        at_targets.append({"name": name, "pubkey_hex": None, "contact_id": None, "favorite": False})
     at_targets.sort(key=lambda t: t["name"].lower())
 
     return _templates(request).TemplateResponse(
@@ -1352,9 +1328,7 @@ async def companion_identity_rename(
         raise HTTPException(status_code=503)
     if not await svc.rename_identity(identity_id, name):
         raise HTTPException(status_code=400, detail="invalid name")
-    return RedirectResponse(
-        url=f"/companion/{identity_id}/#tab=settings", status_code=303
-    )
+    return RedirectResponse(url=f"/companion/{identity_id}/#tab=settings", status_code=303)
 
 
 @ui_router.post("/{identity_id}/advert", response_model=None)
@@ -1373,9 +1347,7 @@ async def companion_identity_advert(
     if loaded is None:
         raise HTTPException(status_code=409, detail="identity not loaded in service")
     await svc._send_advert(loaded)
-    return RedirectResponse(
-        url=f"/companion/{identity_id}/#tab=settings", status_code=303
-    )
+    return RedirectResponse(url=f"/companion/{identity_id}/#tab=settings", status_code=303)
 
 
 @ui_router.post("/{identity_id}/archive", response_model=None)
@@ -1409,9 +1381,7 @@ async def companion_identity_channel_create(
     if svc is None:
         raise HTTPException(status_code=503)
     await svc.add_channel(identity_id=identity_id, name=name.strip(), password=password)
-    return RedirectResponse(
-        url=f"/companion/{identity_id}/#tab=settings", status_code=303
-    )
+    return RedirectResponse(url=f"/companion/{identity_id}/#tab=settings", status_code=303)
 
 
 @ui_router.post("/channels/{channel_id}/delete", response_model=None)
@@ -1432,6 +1402,4 @@ async def companion_channel_delete(
         raise HTTPException(status_code=503)
     identity_id = channel.identity_id
     await svc.delete_channel(channel_id)
-    return RedirectResponse(
-        url=f"/companion/{identity_id}/#tab=settings", status_code=303
-    )
+    return RedirectResponse(url=f"/companion/{identity_id}/#tab=settings", status_code=303)

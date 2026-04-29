@@ -100,9 +100,14 @@ def test_seen_sites_returns_set_copy() -> None:
 # ---------- payload_dedup_key (hop-invariant) ----------
 
 
-def _build_raw(*, route_type: RouteType, payload_type: PayloadType,
-               path: bytes, payload: bytes,
-               transport_codes: tuple[int, int] = (0, 0)) -> bytes:
+def _build_raw(
+    *,
+    route_type: RouteType,
+    payload_type: PayloadType,
+    path: bytes,
+    payload: bytes,
+    transport_codes: tuple[int, int] = (0, 0),
+) -> bytes:
     return MCPacket(
         route_type=route_type,
         payload_type=payload_type,

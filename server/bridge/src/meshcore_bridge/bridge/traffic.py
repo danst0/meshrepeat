@@ -188,8 +188,7 @@ def make_event(
         path_hashes=path_hashes,
         advert_pubkey=advert_pubkey,
         forwarded_to=[
-            {"site_id": str(sid), "name": name or ""}
-            for sid, name in forwarded_to_pairs
+            {"site_id": str(sid), "name": name or ""} for sid, name in forwarded_to_pairs
         ],
         dropped_reason=dropped_reason,
     )

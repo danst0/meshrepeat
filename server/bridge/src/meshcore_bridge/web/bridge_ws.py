@@ -160,9 +160,7 @@ async def bridge_socket(ws: WebSocket) -> None:
     try:
         while True:
             try:
-                data = await asyncio.wait_for(
-                    ws.receive_bytes(), timeout=hb_timeout
-                )
+                data = await asyncio.wait_for(ws.receive_bytes(), timeout=hb_timeout)
             except TimeoutError:
                 if time.monotonic() - last_hback_at > hb_timeout:
                     log.warning("heartbeat_timeout")
@@ -195,9 +193,7 @@ async def bridge_socket(ws: WebSocket) -> None:
                 await routing.on_packet(source=conn, packet=frame)
                 companion = getattr(ws.app.state, "companion_service", None)
                 if companion is not None:
-                    await companion.on_inbound_packet(
-                        raw=frame.raw, scope=conn.scope
-                    )
+                    await companion.on_inbound_packet(raw=frame.raw, scope=conn.scope)
             elif isinstance(frame, HeartbeatAck):
                 last_hback_at = time.monotonic()
             elif isinstance(frame, Heartbeat):
@@ -243,9 +239,7 @@ async def _heartbeat_loop(ws: WebSocket, sink: _WsSink, hb_iv: int) -> None:
 async def _authenticate(hello: Hello) -> Repeater | None:
     prefix = token_prefix(hello.tok)
     async with get_session() as db:
-        result = await db.execute(
-            select(Repeater).where(Repeater.token_prefix == prefix)
-        )
+        result = await db.execute(select(Repeater).where(Repeater.token_prefix == prefix))
         candidates = list(result.scalars())
         for candidate in candidates:
             if candidate.site_id != hello.site:

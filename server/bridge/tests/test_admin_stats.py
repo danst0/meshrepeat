@@ -78,9 +78,7 @@ async def admin_client(tmp_path: Path):
             )
             async with get_session() as db:
                 await db.execute(
-                    update(User)
-                    .where(User.email == "admin@example.com")
-                    .values(role="admin")
+                    update(User).where(User.email == "admin@example.com").values(role="admin")
                 )
                 await db.commit()
 
@@ -91,47 +89,75 @@ async def admin_client(tmp_path: Path):
                 # Site A — 3 ADVERT, 1 TXT_MSG, 1 dropped TRACE
                 RawPacket(
                     ts=now - timedelta(minutes=2),
-                    site_id=site_a, site_name="A", scope="public",
-                    route_type="FLOOD", payload_type="ADVERT",
-                    raw=b"\x10" * 100, path_hashes="",
+                    site_id=site_a,
+                    site_name="A",
+                    scope="public",
+                    route_type="FLOOD",
+                    payload_type="ADVERT",
+                    raw=b"\x10" * 100,
+                    path_hashes="",
                 ),
                 RawPacket(
                     ts=now - timedelta(minutes=3),
-                    site_id=site_a, site_name="A", scope="public",
-                    route_type="FLOOD", payload_type="ADVERT",
-                    raw=b"\x10" * 100, path_hashes="",
+                    site_id=site_a,
+                    site_name="A",
+                    scope="public",
+                    route_type="FLOOD",
+                    payload_type="ADVERT",
+                    raw=b"\x10" * 100,
+                    path_hashes="",
                 ),
                 RawPacket(
                     ts=now - timedelta(minutes=4),
-                    site_id=site_a, site_name="A", scope="public",
-                    route_type="FLOOD", payload_type="ADVERT",
-                    raw=b"\x10" * 100, path_hashes="",
+                    site_id=site_a,
+                    site_name="A",
+                    scope="public",
+                    route_type="FLOOD",
+                    payload_type="ADVERT",
+                    raw=b"\x10" * 100,
+                    path_hashes="",
                 ),
                 RawPacket(
                     ts=now - timedelta(minutes=1),
-                    site_id=site_a, site_name="A", scope="public",
-                    route_type="DIRECT", payload_type="TXT_MSG",
-                    raw=b"\x20" * 50, path_hashes="aa",
+                    site_id=site_a,
+                    site_name="A",
+                    scope="public",
+                    route_type="DIRECT",
+                    payload_type="TXT_MSG",
+                    raw=b"\x20" * 50,
+                    path_hashes="aa",
                 ),
                 RawPacket(
                     ts=now - timedelta(minutes=2),
-                    site_id=site_a, site_name="A", scope="public",
-                    route_type="FLOOD", payload_type="TRACE",
-                    raw=b"\x30" * 30, path_hashes="",
+                    site_id=site_a,
+                    site_name="A",
+                    scope="public",
+                    route_type="FLOOD",
+                    payload_type="TRACE",
+                    raw=b"\x30" * 30,
+                    path_hashes="",
                     dropped_reason="rate-limit",
                 ),
                 # Site B — 2 TXT_MSG (eins davon älter als 5 min)
                 RawPacket(
                     ts=now - timedelta(minutes=2),
-                    site_id=site_b, site_name="B", scope="public",
-                    route_type="DIRECT", payload_type="TXT_MSG",
-                    raw=b"\x40" * 80, path_hashes="bb",
+                    site_id=site_b,
+                    site_name="B",
+                    scope="public",
+                    route_type="DIRECT",
+                    payload_type="TXT_MSG",
+                    raw=b"\x40" * 80,
+                    path_hashes="bb",
                 ),
                 RawPacket(
                     ts=now - timedelta(hours=2),
-                    site_id=site_b, site_name="B", scope="public",
-                    route_type="DIRECT", payload_type="TXT_MSG",
-                    raw=b"\x40" * 80, path_hashes="bb",
+                    site_id=site_b,
+                    site_name="B",
+                    scope="public",
+                    route_type="DIRECT",
+                    payload_type="TXT_MSG",
+                    raw=b"\x40" * 80,
+                    path_hashes="bb",
                 ),
             ]
             async with get_session() as db:

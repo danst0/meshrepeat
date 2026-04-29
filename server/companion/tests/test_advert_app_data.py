@@ -24,9 +24,7 @@ def test_encode_name_only_sets_name_flag() -> None:
 
 
 def test_encode_with_latlon() -> None:
-    data = encode_advert_app_data(
-        name="repeater", adv_type=ADV_TYPE_REPEATER, lat=52.5, lon=13.4
-    )
+    data = encode_advert_app_data(name="repeater", adv_type=ADV_TYPE_REPEATER, lat=52.5, lon=13.4)
     flags = data[0]
     assert flags & ADV_LATLON_MASK
     assert flags & ADV_NAME_MASK
@@ -62,11 +60,7 @@ def test_roundtrip_with_latlon() -> None:
 def test_parse_real_world_repeater_advert() -> None:
     # flags = REPEATER | LATLON | NAME = 0x02 | 0x10 | 0x80 = 0x92
     flags = ADV_TYPE_REPEATER | ADV_LATLON_MASK | ADV_NAME_MASK
-    payload = (
-        bytes([flags])
-        + struct.pack("<ii", 51_400_000, 7_600_000)
-        + b"DE-NW-ME-VBT08"
-    )
+    payload = bytes([flags]) + struct.pack("<ii", 51_400_000, 7_600_000) + b"DE-NW-ME-VBT08"
     parsed = parse_advert_app_data(payload)
     assert parsed.name == "DE-NW-ME-VBT08"
     assert parsed.adv_type == ADV_TYPE_REPEATER

@@ -150,8 +150,11 @@ def main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--port", default=DEFAULT_PORT, help=f"Serial-Port (Default {DEFAULT_PORT})")
     p.add_argument("--baud", type=int, default=DEFAULT_BAUD)
-    p.add_argument("--no-prompt", action="store_true",
-                   help="Erwartet alle Werte als ENV (MESHCORE_SETUP_*) — für Skripten")
+    p.add_argument(
+        "--no-prompt",
+        action="store_true",
+        help="Erwartet alle Werte als ENV (MESHCORE_SETUP_*) — für Skripten",
+    )
     p.add_argument(
         "--no-reset",
         action="store_true",
@@ -204,20 +207,24 @@ def main() -> int:
     sequence: list[tuple[str, bool]] = []
     if cfg.wifi_mac:
         sequence.append((f"set bridge.wifi.mac {cfg.wifi_mac}", False))
-    sequence.extend([
-        (f"set bridge.wifi.ssid {cfg.wifi_ssid}", False),
-        (f"set bridge.wifi.psk {cfg.wifi_psk}",   True),
-        (f"set bridge.host {cfg.host}",           False),
-        (f"set bridge.token {cfg.token}",         True),
-        (f"set bridge.site {cfg.site}",           False),
-        (f"set bridge.scope {cfg.scope}",         False),
-    ])
+    sequence.extend(
+        [
+            (f"set bridge.wifi.ssid {cfg.wifi_ssid}", False),
+            (f"set bridge.wifi.psk {cfg.wifi_psk}", True),
+            (f"set bridge.host {cfg.host}", False),
+            (f"set bridge.token {cfg.token}", True),
+            (f"set bridge.site {cfg.site}", False),
+            (f"set bridge.scope {cfg.scope}", False),
+        ]
+    )
     if cfg.new_password:
         sequence.append((f"password {cfg.new_password}", True))
-    sequence.extend([
-        ("bridge enable", False),
-        ("bridge status", False),
-    ])
+    sequence.extend(
+        [
+            ("bridge enable", False),
+            ("bridge status", False),
+        ]
+    )
 
     failures = []
     for cmd, hide in sequence:

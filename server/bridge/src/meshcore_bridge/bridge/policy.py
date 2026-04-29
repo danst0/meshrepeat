@@ -128,6 +128,7 @@ class PolicyEngine:
 @dataclass
 class PolicyState:
     """Snapshot for ctl-Tool / status endpoints."""
+
     default: str
     rate_limit_pkts_per_s: int
     rate_limit_burst: int

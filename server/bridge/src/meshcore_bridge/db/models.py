@@ -185,9 +185,7 @@ class CompanionMessage(Base):
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
 
-    __table_args__ = (
-        Index("ix_companion_messages_identity_ts", "identity_id", "ts"),
-    )
+    __table_args__ = (Index("ix_companion_messages_identity_ts", "identity_id", "ts"),)
 
 
 class CompanionContact(Base):

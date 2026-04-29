@@ -191,11 +191,7 @@ class Advert:
 
     @property
     def signed_message(self) -> bytes:
-        return (
-            self.pubkey
-            + int.to_bytes(self.timestamp, 4, "little", signed=False)
-            + self.app_data
-        )
+        return self.pubkey + int.to_bytes(self.timestamp, 4, "little", signed=False) + self.app_data
 
     def encode(self) -> bytes:
         if not self.signature:

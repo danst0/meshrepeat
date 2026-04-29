@@ -309,9 +309,7 @@ class CompanionService:
         Request-Typ zuzuordnen (Status, Telemetrie, …)."""
         now = time.monotonic()
         cutoff = now - self._PENDING_REQ_TTL_S
-        self._pending_reqs = {
-            t: v for t, v in self._pending_reqs.items() if v[0] >= cutoff
-        }
+        self._pending_reqs = {t: v for t, v in self._pending_reqs.items() if v[0] >= cutoff}
         self._pending_reqs[tag] = (now, req_type, identity_id, peer_pubkey)
 
     # User-facing Timeout für REQ → RESPONSE. Nach Ablauf wird der Pending-
@@ -341,10 +339,7 @@ class CompanionService:
         icon, label = self._REQ_KIND_META.get(kind, ("?", kind))
         now_ts = datetime.now(UTC)
         expires_at = now_ts + timedelta(seconds=self._REQ_TIMEOUT_S)
-        text = (
-            f"{icon} {label} angefragt — warte auf Antwort… "
-            f"({self._REQ_TIMEOUT_S}s)"
-        )
+        text = f"{icon} {label} angefragt — warte auf Antwort… ({self._REQ_TIMEOUT_S}s)"
         async with self.sessionmaker() as db:
             peer_name = (
                 await db.execute(
@@ -505,9 +500,7 @@ class CompanionService:
             await self.inject(pkt, loaded.scope)
         return True
 
-    def get_login_session(
-        self, identity_id: UUID, peer_pubkey: bytes
-    ) -> LoginSession | None:
+    def get_login_session(self, identity_id: UUID, peer_pubkey: bytes) -> LoginSession | None:
         """Liefert eine aktive LoginSession oder ``None`` wenn ausgeloggt
         bzw. abgelaufen. Räumt nebenbei abgelaufene Einträge auf."""
         key = (identity_id, peer_pubkey)
@@ -532,9 +525,7 @@ class CompanionService:
         loaded = self._by_id.get(identity_id)
         if loaded is None:
             return False
-        pkt, tag = loaded.node.make_anon_login_req(
-            peer_pubkey=peer_pubkey, password=password
-        )
+        pkt, tag = loaded.node.make_anon_login_req(peer_pubkey=peer_pubkey, password=password)
         self._track_pending_req(
             tag=tag,
             req_type=self.REQ_TYPE_LOGIN,
@@ -771,9 +762,7 @@ class CompanionService:
         now = time.monotonic()
         if len(self._seen_raw) > self._SEEN_RAW_MAX:
             cutoff = now - self._SEEN_RAW_TTL_S
-            self._seen_raw = {
-                k: v for k, v in self._seen_raw.items() if v >= cutoff
-            }
+            self._seen_raw = {k: v for k, v in self._seen_raw.items() if v >= cutoff}
         prev = self._seen_raw.get(key)
         if prev is not None and now - prev < self._SEEN_RAW_TTL_S:
             return True
@@ -788,9 +777,7 @@ class CompanionService:
             return
         # Dedup-Key: payload_type + payload — ohne path_len/path_hashes,
         # die jeder Repeater beim Forward inkrementiert.
-        dedup_key = hashlib.sha256(
-            bytes([int(pkt.payload_type)]) + pkt.payload
-        ).digest()
+        dedup_key = hashlib.sha256(bytes([int(pkt.payload_type)]) + pkt.payload).digest()
         if self._seen_already(dedup_key):
             return
         if pkt.payload_type == PayloadType.ADVERT:
@@ -1036,16 +1023,10 @@ class CompanionService:
         """
         from meshcore_bridge.db import CompanionMessage
 
-        room_contact = next(
-            (c for c in contacts if c.peer_pubkey == room_post.room_pubkey), None
-        )
+        room_contact = next((c for c in contacts if c.peer_pubkey == room_post.room_pubkey), None)
         room_name = room_contact.peer_name if room_contact else None
 
-        author_candidates = [
-            c
-            for c in contacts
-            if c.peer_pubkey[:4] == room_post.author_prefix
-        ]
+        author_candidates = [c for c in contacts if c.peer_pubkey[:4] == room_post.author_prefix]
         author_contact = None
         if author_candidates:
             author_contact = max(
@@ -1137,9 +1118,7 @@ class CompanionService:
             except Exception:
                 _log.exception("room_ack_send_failed")
 
-    async def _handle_inbound_grp_txt(
-        self, *, pkt: Packet, scope: str, raw: bytes
-    ) -> None:
+    async def _handle_inbound_grp_txt(self, *, pkt: Packet, scope: str, raw: bytes) -> None:
         from meshcore_bridge.db import CompanionChannel, CompanionMessage
 
         in_scope = [li for li in self._by_id.values() if li.scope == scope]
@@ -1150,23 +1129,17 @@ class CompanionService:
             channels = list(
                 (
                     await db.execute(
-                        select(CompanionChannel).where(
-                            CompanionChannel.identity_id.in_(own_ids)
-                        )
+                        select(CompanionChannel).where(CompanionChannel.identity_id.in_(own_ids))
                     )
                 ).scalars()
             )
         if not channels:
             return
         pairs = [(ch.channel_hash, ch.secret) for ch in channels]
-        decoded: IncomingChannelMessage | None = try_decrypt_grp_txt(
-            packet=pkt, channels=pairs
-        )
+        decoded: IncomingChannelMessage | None = try_decrypt_grp_txt(packet=pkt, channels=pairs)
         if decoded is None:
             return
-        target = next(
-            (ch for ch in channels if ch.secret == decoded.channel_secret), None
-        )
+        target = next((ch for ch in channels if ch.secret == decoded.channel_secret), None)
         if target is None:
             return
         loaded = self._by_id.get(target.identity_id)
@@ -1525,9 +1498,7 @@ class CompanionService:
             _log.warning("send_advert_no_inject", identity=loaded.name)
             return
         # MeshCore-Advert-Format: flags(1) [lat lon]? name…
-        app_data = encode_advert_app_data(
-            name=loaded.name[:32], adv_type=ADV_TYPE_CHAT
-        )
+        app_data = encode_advert_app_data(name=loaded.name[:32], adv_type=ADV_TYPE_CHAT)
         pkt = loaded.node.make_advert(
             timestamp=int(time.time()),
             app_data=app_data,

@@ -74,11 +74,11 @@ class Router:
         if self._policy is not None:
             decision = self._policy.evaluate(source_site=source.site_id)
             if not decision.allow:
-                self._log.debug(
-                    "drop_policy", site=str(source.site_id), reason=decision.reason
-                )
+                self._log.debug("drop_policy", site=str(source.site_id), reason=decision.reason)
                 self._record_traffic(
-                    source=source, raw=packet.raw, forwarded=[],
+                    source=source,
+                    raw=packet.raw,
+                    forwarded=[],
                     dropped_reason=decision.reason,
                 )
                 return RouteResult(forwarded_to=[], dropped_policy=decision.reason)
@@ -86,11 +86,11 @@ class Router:
         key = payload_dedup_key(packet.raw)
         is_new_for_source = self._dedup.observe(key, source.site_id)
         if not is_new_for_source:
-            self._log.debug(
-                "drop_origin_known", site=str(source.site_id), key=key.hex()[:16]
-            )
+            self._log.debug("drop_origin_known", site=str(source.site_id), key=key.hex()[:16])
             self._record_traffic(
-                source=source, raw=packet.raw, forwarded=[],
+                source=source,
+                raw=packet.raw,
+                forwarded=[],
                 dropped_reason="origin-known",
             )
             return RouteResult(forwarded_to=[], dropped_origin=True)
@@ -114,6 +114,9 @@ class Router:
             forwarded.append(peer)
 
         self._record_traffic(
-            source=source, raw=packet.raw, forwarded=forwarded, dropped_reason=None,
+            source=source,
+            raw=packet.raw,
+            forwarded=forwarded,
+            dropped_reason=None,
         )
         return RouteResult(forwarded_to=forwarded)

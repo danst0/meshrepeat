@@ -59,7 +59,7 @@ def test_aes_ecb_roundtrip_with_partial_last_block() -> None:
     assert len(ct) == 16
     decoded = aes128_ecb_decrypt(key, ct)
     assert decoded[: len(pt)] == pt
-    assert decoded[len(pt):] == b"\x00" * (16 - len(pt))
+    assert decoded[len(pt) :] == b"\x00" * (16 - len(pt))
 
 
 def test_encrypt_then_mac_format_and_roundtrip() -> None:

@@ -173,10 +173,7 @@ def _ensure_fts5(sync_conn) -> None:  # type: ignore[no-untyped-def]
     create_all/Migration-frei aufgewachsen sind. Backfill befüllt aus
     companion_messages."""
     existing = sync_conn.execute(
-        text(
-            "SELECT name FROM sqlite_master WHERE type IN ('table','view') "
-            "AND name = :n"
-        ),
+        text("SELECT name FROM sqlite_master WHERE type IN ('table','view') AND name = :n"),
         {"n": _FTS5_TABLE},
     ).scalar_one_or_none()
     if existing:

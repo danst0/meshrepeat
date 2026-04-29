@@ -146,6 +146,7 @@ def build_app(cfg: AppConfig) -> FastAPI:
         # CompanionService aufsetzen (sofern db_key vorhanden ist)
         companion_service: CompanionService | None = None
         if cfg.companion.enabled and cfg.db_key:
+
             async def _inject(packet: MCPacket, scope: str) -> None:
                 wire = WirePacket(raw=packet.encode())
                 conns = list(registry.in_scope(scope))
@@ -160,9 +161,7 @@ def build_app(cfg: AppConfig) -> FastAPI:
                     try:
                         await conn.send(wire)
                     except Exception:
-                        log.exception(
-                            "companion_inject_send_failed", site=str(conn.site_id)
-                        )
+                        log.exception("companion_inject_send_failed", site=str(conn.site_id))
 
             companion_service = CompanionService(
                 master_key=cfg.db_key,

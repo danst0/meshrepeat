@@ -327,9 +327,7 @@ class CompanionNode:
             txt_type = flags >> 2
             if txt_type != TXT_TYPE_SIGNED_PLAIN:
                 continue
-            author_prefix = plain[
-                _TIMESTAMP_LEN + 1 : _TIMESTAMP_LEN + 1 + _ROOM_AUTHOR_PREFIX_LEN
-            ]
+            author_prefix = plain[_TIMESTAMP_LEN + 1 : _TIMESTAMP_LEN + 1 + _ROOM_AUTHOR_PREFIX_LEN]
             try:
                 text = plain[_ROOM_PUSH_HEADER_LEN:].rstrip(b"\x00").decode("utf-8")
             except UnicodeDecodeError:
@@ -373,11 +371,7 @@ class CompanionNode:
         if tag is None:
             tag = ts & 0xFFFFFFFF
         pw_bytes = password.encode("utf-8")
-        plaintext = (
-            int.to_bytes(tag, 4, "little", signed=False)
-            + pw_bytes
-            + b"\x00"
-        )
+        plaintext = int.to_bytes(tag, 4, "little", signed=False) + pw_bytes + b"\x00"
         secret = self.local.calc_shared_secret(peer_pubkey)
         encrypted = encrypt_then_mac(secret, plaintext)
         peer = Identity(peer_pubkey)
@@ -680,11 +674,7 @@ def compute_dm_ack_hash(
     Empfänger sendet diesen Hash im PATH-Return-extra zurück, damit die
     Mobile-App des Senders die DM in der UI als 'delivered' markiert.
     """
-    plaintext = (
-        int.to_bytes(timestamp, 4, "little", signed=False)
-        + bytes([flags])
-        + text_bytes
-    )
+    plaintext = int.to_bytes(timestamp, 4, "little", signed=False) + bytes([flags]) + text_bytes
     return hashlib.sha256(plaintext + sender_pubkey).digest()[:4]
 
 
@@ -716,10 +706,10 @@ class TelemetryGPS:
 # LPP-Type-IDs → Datenlänge in Bytes (ohne chan+type-Prefix). Quelle:
 # firmware/lib/meshcore/src/helpers/sensors/LPPDataHelpers.h skipData().
 _LPP_DATA_SIZE: dict[int, int] = {
-    0: 1,    # DIGITAL_INPUT
-    1: 1,    # DIGITAL_OUTPUT
-    2: 2,    # ANALOG_INPUT
-    3: 2,    # ANALOG_OUTPUT
+    0: 1,  # DIGITAL_INPUT
+    1: 1,  # DIGITAL_OUTPUT
+    2: 2,  # ANALOG_INPUT
+    3: 2,  # ANALOG_OUTPUT
     100: 4,  # GENERIC_SENSOR
     101: 2,  # LUMINOSITY
     102: 1,  # PRESENCE
@@ -910,9 +900,7 @@ def try_decrypt_grp_txt(
         if txt_type & 0xFC:  # high 6 bits must be zero
             continue
         try:
-            body_str = (
-                plain[_TIMESTAMP_LEN + 1 :].rstrip(b"\x00").decode("utf-8")
-            )
+            body_str = plain[_TIMESTAMP_LEN + 1 :].rstrip(b"\x00").decode("utf-8")
         except UnicodeDecodeError:
             continue
         if ": " in body_str:

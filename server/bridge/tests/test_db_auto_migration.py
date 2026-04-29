@@ -22,9 +22,7 @@ async def test_fresh_db_creates_tables_and_stamps_head(tmp_path: Path) -> None:
     await init_engine(db)
     await close_engine()
     with sqlite3.connect(db) as conn:
-        tables = {r[0] for r in conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table'"
-        )}
+        tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         assert "companion_contacts" in tables
         assert "companion_messages" in tables
         assert "alembic_version" in tables

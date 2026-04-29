@@ -131,9 +131,7 @@ async def repeater_create(
     )
 
 
-async def _load_owned_repeater(
-    repeater_id: UUID, *, user: User, db: AsyncSession
-) -> Repeater:
+async def _load_owned_repeater(repeater_id: UUID, *, user: User, db: AsyncSession) -> Repeater:
     repeater = await db.get(Repeater, repeater_id)
     if repeater is None or repeater.owner_id != user.id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)

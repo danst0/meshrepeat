@@ -84,16 +84,12 @@ async def destroy_all_user_sessions(db: AsyncSession, user_id: UUID) -> None:
 
 async def cleanup_expired(db: AsyncSession, *, idle_timeout: timedelta) -> int:
     cutoff = datetime.now(UTC) - idle_timeout
-    result = await db.execute(
-        delete(SessionRow).where(SessionRow.last_seen_at < cutoff)
-    )
+    result = await db.execute(delete(SessionRow).where(SessionRow.last_seen_at < cutoff))
     await db.commit()
     rowcount: int = getattr(result, "rowcount", 0) or 0
     return rowcount
 
 
 async def list_user_sessions(db: AsyncSession, user_id: UUID) -> list[SessionRow]:
-    result = await db.execute(
-        select(SessionRow).where(SessionRow.user_id == user_id)
-    )
+    result = await db.execute(select(SessionRow).where(SessionRow.user_id == user_id))
     return list(result.scalars())

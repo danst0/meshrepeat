@@ -94,6 +94,7 @@ def test_advert_sign_decode_verify_roundtrip() -> None:
     assert decoded.signature == a.signature
     # Signatur ist gegen pubkey + ts + app_data, nicht gegen sig selbst
     from meshcore_companion.crypto import Identity
+
     assert Identity(li.pub_key).verify(decoded.signature, decoded.signed_message)
 
 

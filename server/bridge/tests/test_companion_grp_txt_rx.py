@@ -75,12 +75,8 @@ async def service_env(tmp_path: Path):
 async def test_inbound_grp_txt_persists_message(service_env) -> None:
     svc, sessionmaker, user_id, _sent = service_env
 
-    loaded = await svc.add_identity(
-        user_id=user_id, name="Antonia", scope="public"
-    )
-    ch = await svc.add_channel(
-        identity_id=loaded.id, name="tech", password="hunter2"
-    )
+    loaded = await svc.add_identity(user_id=user_id, name="Antonia", scope="public")
+    ch = await svc.add_channel(identity_id=loaded.id, name="tech", password="hunter2")
     assert ch is not None
 
     # externer Sender: gleiches channel-secret/name
@@ -119,12 +115,8 @@ async def test_inbound_grp_txt_dedups_same_raw(service_env) -> None:
     """Bei mehreren verbundenen Repeatern liefert jeder denselben LoRa-
     Frame einmal. Wir dürfen ihn nur einmal in der DB persistieren."""
     svc, sessionmaker, user_id, _sent = service_env
-    loaded = await svc.add_identity(
-        user_id=user_id, name="Antonia", scope="public"
-    )
-    ch = await svc.add_channel(
-        identity_id=loaded.id, name="tech", password="hunter2"
-    )
+    loaded = await svc.add_identity(user_id=user_id, name="Antonia", scope="public")
+    ch = await svc.add_channel(identity_id=loaded.id, name="tech", password="hunter2")
     assert ch is not None
 
     secret = derive_channel_secret("tech", "hunter2")
@@ -164,12 +156,8 @@ async def test_inbound_grp_txt_dedups_across_hops(service_env) -> None:
     from meshcore_companion.packet import Packet, PayloadType, RouteType
 
     svc, sessionmaker, user_id, _sent = service_env
-    loaded = await svc.add_identity(
-        user_id=user_id, name="Antonia", scope="public"
-    )
-    ch = await svc.add_channel(
-        identity_id=loaded.id, name="tech", password="hunter2"
-    )
+    loaded = await svc.add_identity(user_id=user_id, name="Antonia", scope="public")
+    ch = await svc.add_channel(identity_id=loaded.id, name="tech", password="hunter2")
     assert ch is not None
 
     secret = derive_channel_secret("tech", "hunter2")
@@ -218,12 +206,8 @@ async def test_inbound_grp_txt_dedups_across_hops(service_env) -> None:
 async def test_inbound_grp_txt_suppresses_own_echo(service_env) -> None:
     svc, sessionmaker, user_id, _sent = service_env
 
-    loaded = await svc.add_identity(
-        user_id=user_id, name="Antonia", scope="public"
-    )
-    ch = await svc.add_channel(
-        identity_id=loaded.id, name="tech", password="hunter2"
-    )
+    loaded = await svc.add_identity(user_id=user_id, name="Antonia", scope="public")
+    ch = await svc.add_channel(identity_id=loaded.id, name="tech", password="hunter2")
     assert ch is not None
 
     # Wir simulieren ein Echo unseres eigenen Posts: sender_name == loaded.name
@@ -257,12 +241,8 @@ async def test_inbound_grp_txt_suppresses_own_echo(service_env) -> None:
 async def test_inbound_grp_txt_wrong_scope_ignored(service_env) -> None:
     svc, sessionmaker, user_id, _sent = service_env
 
-    loaded = await svc.add_identity(
-        user_id=user_id, name="Antonia", scope="public"
-    )
-    ch = await svc.add_channel(
-        identity_id=loaded.id, name="tech", password="hunter2"
-    )
+    loaded = await svc.add_identity(user_id=user_id, name="Antonia", scope="public")
+    ch = await svc.add_channel(identity_id=loaded.id, name="tech", password="hunter2")
     assert ch is not None
 
     secret = derive_channel_secret("tech", "hunter2")
@@ -275,17 +255,13 @@ async def test_inbound_grp_txt_wrong_scope_ignored(service_env) -> None:
         timestamp=3000,
     )
 
-    await svc.on_inbound_packet(
-        raw=pkt.encode(), scope=f"pool:{uuid4()}"
-    )
+    await svc.on_inbound_packet(raw=pkt.encode(), scope=f"pool:{uuid4()}")
 
     async with sessionmaker() as db:
         rows = list(
             (
                 await db.execute(
-                    select(CompanionMessage).where(
-                        CompanionMessage.identity_id == loaded.id
-                    )
+                    select(CompanionMessage).where(CompanionMessage.identity_id == loaded.id)
                 )
             ).scalars()
         )
@@ -297,9 +273,7 @@ async def test_inbound_grp_txt_wrong_scope_ignored(service_env) -> None:
 @pytest.mark.asyncio
 async def test_rename_identity_updates_db_and_memory(service_env) -> None:
     svc, sessionmaker, user_id, _sent = service_env
-    loaded = await svc.add_identity(
-        user_id=user_id, name="Old", scope="public"
-    )
+    loaded = await svc.add_identity(user_id=user_id, name="Old", scope="public")
     ok = await svc.rename_identity(loaded.id, "New")
     assert ok is True
     assert svc.get(loaded.id).name == "New"
@@ -321,9 +295,7 @@ async def test_public_channel_uses_meshcore_psk(service_env) -> None:
     from sqlalchemy import select
 
     svc, sessionmaker, user_id, _sent = service_env
-    loaded = await svc.add_identity(
-        user_id=user_id, name="Antonia", scope="public"
-    )
+    loaded = await svc.add_identity(user_id=user_id, name="Antonia", scope="public")
     expected_real = base64.b64decode("izOH6cXN6mrJ5e26oRXNcg==")
     expected_secret = expected_real.ljust(32, b"\x00")
     expected_hash = hashlib.sha256(expected_real).digest()[:1]
@@ -350,9 +322,7 @@ async def test_public_channel_inbound_with_real_psk(service_env) -> None:
     from sqlalchemy import select
 
     svc, sessionmaker, user_id, _sent = service_env
-    loaded = await svc.add_identity(
-        user_id=user_id, name="Antonia", scope="public"
-    )
+    loaded = await svc.add_identity(user_id=user_id, name="Antonia", scope="public")
 
     real = base64.b64decode("izOH6cXN6mrJ5e26oRXNcg==")
     secret_padded = real.ljust(32, b"\x00")
@@ -389,9 +359,7 @@ async def test_inbound_advert_persists_lat_lon(service_env) -> None:
     """ADVERT mit Geokoordinaten füllt CompanionContact.last_lat/last_lon —
     Grundlage für die Karten-Ansicht."""
     svc, sessionmaker, user_id, _sent = service_env
-    loaded = await svc.add_identity(
-        user_id=user_id, name="Antonia", scope="public"
-    )
+    loaded = await svc.add_identity(user_id=user_id, name="Antonia", scope="public")
     other = CompanionNode(LocalIdentity.generate())
     app_data = encode_advert_app_data(name="Drusilla", lat=51.0, lon=7.0)
     pkt = other.make_advert(app_data=app_data, timestamp=1000)
@@ -401,9 +369,7 @@ async def test_inbound_advert_persists_lat_lon(service_env) -> None:
         rows = list(
             (
                 await db.execute(
-                    select(CompanionContact).where(
-                        CompanionContact.identity_id == loaded.id
-                    )
+                    select(CompanionContact).where(CompanionContact.identity_id == loaded.id)
                 )
             ).scalars()
         )
@@ -417,9 +383,7 @@ async def test_inbound_advert_persists_lat_lon(service_env) -> None:
 async def test_inbound_advert_without_lat_lon_keeps_previous(service_env) -> None:
     """Ein Advert ohne Geo-Flag darf vorhandene Koordinaten nicht löschen."""
     svc, sessionmaker, user_id, _sent = service_env
-    loaded = await svc.add_identity(
-        user_id=user_id, name="Antonia", scope="public"
-    )
+    loaded = await svc.add_identity(user_id=user_id, name="Antonia", scope="public")
     other = CompanionNode(LocalIdentity.generate())
 
     pkt1 = other.make_advert(
@@ -436,9 +400,7 @@ async def test_inbound_advert_without_lat_lon_keeps_previous(service_env) -> Non
     async with sessionmaker() as db:
         row = (
             await db.execute(
-                select(CompanionContact).where(
-                    CompanionContact.identity_id == loaded.id
-                )
+                select(CompanionContact).where(CompanionContact.identity_id == loaded.id)
             )
         ).scalar_one()
     assert row.last_lat == pytest.approx(51.0, abs=1e-5)
@@ -454,9 +416,7 @@ async def test_inbound_dm_persists_with_sender_ts_and_dedups_retries(
     import struct
 
     svc, sessionmaker, user_id, _sent = service_env
-    loaded = await svc.add_identity(
-        user_id=user_id, name="Antonia", scope="public"
-    )
+    loaded = await svc.add_identity(user_id=user_id, name="Antonia", scope="public")
     peer = LocalIdentity.generate()
     async with sessionmaker() as db:
         db.add(
@@ -527,9 +487,7 @@ async def test_inbound_dm_emits_path_ack_on_flood(service_env) -> None:
     import struct
 
     svc, sessionmaker, user_id, sent = service_env
-    loaded = await svc.add_identity(
-        user_id=user_id, name="Antonia", scope="public"
-    )
+    loaded = await svc.add_identity(user_id=user_id, name="Antonia", scope="public")
     peer = LocalIdentity.generate()
     async with sessionmaker() as db:
         db.add(
@@ -558,12 +516,10 @@ async def test_inbound_dm_emits_path_ack_on_flood(service_env) -> None:
 
     # Erwartung: PATH-Return (ACK piggybacked) + zusätzlich separater ACK-Frame
     path_frames = [
-        (raw, sc) for raw, sc in sent
-        if Packet.decode(raw).payload_type == PayloadType.PATH
+        (raw, sc) for raw, sc in sent if Packet.decode(raw).payload_type == PayloadType.PATH
     ]
     ack_frames = [
-        (raw, sc) for raw, sc in sent
-        if Packet.decode(raw).payload_type == PayloadType.ACK
+        (raw, sc) for raw, sc in sent if Packet.decode(raw).payload_type == PayloadType.ACK
     ]
     assert len(path_frames) == 1
     assert len(ack_frames) == 1
@@ -585,9 +541,7 @@ async def test_inbound_dm_direct_emits_ack_only_no_path(service_env) -> None:
     import struct
 
     svc, sessionmaker, user_id, sent = service_env
-    loaded = await svc.add_identity(
-        user_id=user_id, name="Antonia", scope="public"
-    )
+    loaded = await svc.add_identity(user_id=user_id, name="Antonia", scope="public")
     peer = LocalIdentity.generate()
     async with sessionmaker() as db:
         db.add(
@@ -615,30 +569,24 @@ async def test_inbound_dm_direct_emits_ack_only_no_path(service_env) -> None:
     await svc.on_inbound_packet(raw=pkt.encode(), scope="public")
 
     path_frames = [
-        (raw, sc) for raw, sc in sent
-        if Packet.decode(raw).payload_type == PayloadType.PATH
+        (raw, sc) for raw, sc in sent if Packet.decode(raw).payload_type == PayloadType.PATH
     ]
     ack_frames = [
-        (raw, sc) for raw, sc in sent
-        if Packet.decode(raw).payload_type == PayloadType.ACK
+        (raw, sc) for raw, sc in sent if Packet.decode(raw).payload_type == PayloadType.ACK
     ]
     assert len(path_frames) == 0  # KEIN PATH bei DIRECT-RX
-    assert len(ack_frames) == 1   # nur ACK
+    assert len(ack_frames) == 1  # nur ACK
 
 
 @pytest.mark.asyncio
 async def test_telemetry_request_emits_req_packet(service_env) -> None:
     """request_telemetry baut ein REQ und schickt es via inject."""
     svc, _sessionmaker, user_id, sent = service_env
-    loaded = await svc.add_identity(
-        user_id=user_id, name="Antonia", scope="public"
-    )
+    loaded = await svc.add_identity(user_id=user_id, name="Antonia", scope="public")
     sent.clear()  # advert von add_identity raus
 
     peer = LocalIdentity.generate()
-    ok = await svc.request_telemetry(
-        identity_id=loaded.id, peer_pubkey=peer.pub_key
-    )
+    ok = await svc.request_telemetry(identity_id=loaded.id, peer_pubkey=peer.pub_key)
     assert ok is True
     assert len(sent) == 1
     raw, scope = sent[0]
@@ -657,9 +605,7 @@ async def test_telemetry_response_persists_geo(service_env) -> None:
     import struct
 
     svc, sessionmaker, user_id, _sent = service_env
-    loaded = await svc.add_identity(
-        user_id=user_id, name="Antonia", scope="public"
-    )
+    loaded = await svc.add_identity(user_id=user_id, name="Antonia", scope="public")
     # Peer als Contact eintragen (sonst kann response nicht decoded werden)
     peer = LocalIdentity.generate()
     async with sessionmaker() as db:
@@ -677,9 +623,11 @@ async def test_telemetry_response_persists_geo(service_env) -> None:
     lat, lon, alt = 51.1907, 6.5722, 42.0
     voltage = bytes([1, 116]) + struct.pack(">H", 385)
     lat_i, lon_i, alt_i = int(lat * 10000), int(lon * 10000), int(alt * 100)
+
     def b3(v: int) -> bytes:
         u = v + (1 << 24) if v < 0 else v
         return bytes([(u >> 16) & 0xFF, (u >> 8) & 0xFF, u & 0xFF])
+
     gps = bytes([1, 136]) + b3(lat_i) + b3(lon_i) + b3(alt_i)
     lpp_buf = voltage + gps
 
@@ -716,9 +664,7 @@ async def test_telemetry_response_zero_geo_ignored(service_env) -> None:
     import struct
 
     svc, sessionmaker, user_id, _sent = service_env
-    loaded = await svc.add_identity(
-        user_id=user_id, name="Antonia", scope="public"
-    )
+    loaded = await svc.add_identity(user_id=user_id, name="Antonia", scope="public")
     peer = LocalIdentity.generate()
     async with sessionmaker() as db:
         db.add(
@@ -747,9 +693,7 @@ async def test_telemetry_response_zero_geo_ignored(service_env) -> None:
     async with sessionmaker() as db:
         contact = (
             await db.execute(
-                select(CompanionContact).where(
-                    CompanionContact.identity_id == loaded.id
-                )
+                select(CompanionContact).where(CompanionContact.identity_id == loaded.id)
             )
         ).scalar_one()
     assert contact.last_lat is None
@@ -759,12 +703,8 @@ async def test_telemetry_response_zero_geo_ignored(service_env) -> None:
 @pytest.mark.asyncio
 async def test_delete_channel(service_env) -> None:
     svc, sessionmaker, user_id, _sent = service_env
-    loaded = await svc.add_identity(
-        user_id=user_id, name="X", scope="public"
-    )
-    ch = await svc.add_channel(
-        identity_id=loaded.id, name="tech", password="p"
-    )
+    loaded = await svc.add_identity(user_id=user_id, name="X", scope="public")
+    ch = await svc.add_channel(identity_id=loaded.id, name="tech", password="p")
     assert ch is not None
     ok = await svc.delete_channel(ch.id)
     assert ok is True

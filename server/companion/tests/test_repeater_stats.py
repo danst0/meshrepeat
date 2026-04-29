@@ -20,21 +20,24 @@ def test_parse_repeater_stats_round_trip() -> None:
     # firmware/src/MyMesh.h:47.
     raw = struct.pack(
         "<HHhhIIIIIIIIHhHHII",
-        3812,           # batt_milli_volts
-        2,              # curr_tx_queue_len
-        -118,           # noise_floor
-        -85,            # last_rssi
-        12345,          # n_packets_recv
-        9876,           # n_packets_sent
-        420,            # total_air_time_secs
-        86400,          # total_up_time_secs (1 Tag)
-        100, 200,       # n_sent_flood, n_sent_direct
-        300, 400,       # n_recv_flood, n_recv_direct
-        7,              # err_events
-        24,             # last_snr_q (24 / 4 = 6 dB)
-        5, 11,          # n_direct_dups, n_flood_dups
-        180,            # total_rx_air_time_secs
-        2,              # n_recv_errors
+        3812,  # batt_milli_volts
+        2,  # curr_tx_queue_len
+        -118,  # noise_floor
+        -85,  # last_rssi
+        12345,  # n_packets_recv
+        9876,  # n_packets_sent
+        420,  # total_air_time_secs
+        86400,  # total_up_time_secs (1 Tag)
+        100,
+        200,  # n_sent_flood, n_sent_direct
+        300,
+        400,  # n_recv_flood, n_recv_direct
+        7,  # err_events
+        24,  # last_snr_q (24 / 4 = 6 dB)
+        5,
+        11,  # n_direct_dups, n_flood_dups
+        180,  # total_rx_air_time_secs
+        2,  # n_recv_errors
     )
     assert len(raw) == 56
 

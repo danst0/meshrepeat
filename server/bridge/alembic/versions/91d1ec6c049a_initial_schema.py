@@ -69,13 +69,9 @@ def upgrade() -> None:
         sa.Column("consumed_at", sa.DateTime(timezone=True), nullable=True),
         sa.ForeignKeyConstraint(["user_id"], ["users.id"]),
         sa.PrimaryKeyConstraint("token_hash"),
-        sa.UniqueConstraint(
-            "user_id", "purpose", name="uq_email_verification_user_purpose"
-        ),
+        sa.UniqueConstraint("user_id", "purpose", name="uq_email_verification_user_purpose"),
     )
-    op.create_index(
-        "ix_email_verifications_user", "email_verifications", ["user_id"], unique=False
-    )
+    op.create_index("ix_email_verifications_user", "email_verifications", ["user_id"], unique=False)
 
     op.create_table(
         "repeaters",

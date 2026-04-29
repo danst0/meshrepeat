@@ -14,7 +14,7 @@ import secrets
 from meshcore_bridge.auth.passwords import hash_password, verify_password
 
 TOKEN_BYTES = 20  # 160 bit
-TOKEN_LEN = 32    # base32 ohne Padding
+TOKEN_LEN = 32  # base32 ohne Padding
 
 
 def generate_bearer_token() -> str:

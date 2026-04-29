@@ -87,9 +87,7 @@ def test_cluster_outlier_far_from_median() -> None:
     # 11 Punkte um Berlin + 1 weit weg in Australien — der Australien-
     # Punkt liegt mehr als 5000 km vom Median entfernt und muss True
     # werden, alle anderen False.
-    cluster = [
-        (52.5 + i * 0.01, 13.4 + i * 0.01) for i in range(-5, 6)
-    ]  # 11 Punkte
+    cluster = [(52.5 + i * 0.01, 13.4 + i * 0.01) for i in range(-5, 6)]  # 11 Punkte
     pts = [*cluster, (-33.86, 151.21)]
     mask = cluster_outlier_mask(pts)
     assert mask[:-1] == [False] * len(cluster)
