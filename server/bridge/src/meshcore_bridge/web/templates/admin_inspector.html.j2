@@ -287,19 +287,51 @@ function renderPathMap(geo) {
     attribution: '© <a href="https://openstreetmap.org/copyright">OpenStreetMap</a>',
   }).addTo(mapInstance);
 
+  // Viterbi: wähle je Hop genau einen Kandidaten so, dass die Gesamt-
+  // Pfaddistanz minimal wird. Für Hops mit 0 Kandidaten überspringen
+  // wir die Lücke (Linie verbindet ringsum).
+  const hopsFilled = geo.filter(h => h.candidates && h.candidates.length > 0);
+  const dp = [];
+  if (hopsFilled.length > 0) {
+    dp.push(hopsFilled[0].candidates.map(() => ({d: 0, p: -1})));
+    for (let i = 1; i < hopsFilled.length; i++) {
+      const row = [];
+      const curList = hopsFilled[i].candidates;
+      const prevList = hopsFilled[i-1].candidates;
+      for (let j = 0; j < curList.length; j++) {
+        const cur = curList[j];
+        let bestD = Infinity, bestP = -1;
+        for (let k = 0; k < prevList.length; k++) {
+          const prev = prevList[k];
+          const step = Math.hypot(cur.lat - prev.lat, cur.lon - prev.lon);
+          const total = dp[i-1][k].d + step;
+          if (total < bestD) { bestD = total; bestP = k; }
+        }
+        row.push({d: bestD, p: bestP});
+      }
+      dp.push(row);
+    }
+  }
+  // Backtrack
+  const chosenForHop = new Map();  // hopRefInHopsFilled → cand
+  if (dp.length > 0) {
+    let idx = 0, bestD = Infinity;
+    const last = dp[dp.length-1];
+    for (let j = 0; j < last.length; j++) {
+      if (last[j].d < bestD) { bestD = last[j].d; idx = j; }
+    }
+    for (let i = dp.length-1; i >= 0; i--) {
+      chosenForHop.set(hopsFilled[i], hopsFilled[i].candidates[idx]);
+      idx = dp[i][idx].p;
+      if (idx === -1) break;
+    }
+  }
+
   const bounds = [];
-  let prev = null;
   const linePts = [];
   geo.forEach((hop, idx) => {
     if (!hop.candidates || hop.candidates.length === 0) return;
-    let chosen = hop.candidates[0];
-    if (prev && hop.candidates.length > 1) {
-      let bestD = Infinity;
-      for (const c of hop.candidates) {
-        const d = Math.hypot(c.lat - prev.lat, c.lon - prev.lon);
-        if (d < bestD) { bestD = d; chosen = c; }
-      }
-    }
+    const chosen = chosenForHop.get(hop) || hop.candidates[0];
     const ambig = hop.candidates.length > 1;
     for (const c of hop.candidates) {
       const isPick = c === chosen;
@@ -315,13 +347,14 @@ function renderPathMap(geo) {
       bounds.push([c.lat, c.lon]);
     }
     linePts.push([chosen.lat, chosen.lon]);
-    prev = chosen;
   });
   if (linePts.length >= 2) {
     L.polyline(linePts, {color:'#82aaff', weight:2, opacity:0.7, dashArray:'4 4'}).addTo(mapInstance);
   }
-  if (bounds.length === 1) mapInstance.setView(bounds[0], 11);
-  else if (bounds.length > 1) mapInstance.fitBounds(bounds, {padding:[30,30]});
+  // Auf den best-guess-Pfad zoomen, nicht auf Outlier-Kandidaten
+  const focus = linePts.length > 0 ? linePts : bounds;
+  if (focus.length === 1) mapInstance.setView(focus[0], 11);
+  else if (focus.length > 1) mapInstance.fitBounds(focus, {padding:[30,30]});
 }
 
 function renderBodyFields(fields) {
