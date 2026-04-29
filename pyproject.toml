@@ -54,7 +54,7 @@ extend-immutable-calls = [
 # Companion-Routes greifen via app.state — Type-Annotation für Service kommt später
 "**/web/companion_routes.py" = ["PLR2004"]
 # Admin-Routes nutzen Header-Bit-Magicvalues beim Paket-Decoder
-"**/web/admin_routes.py" = ["PLR2004"]
+"**/web/admin_routes.py" = ["PLR2004", "PLR0912"]
 # CLI-Tools sind lineare prozedurale Skripten
 "tools/spiegel-tbeam-setup.py" = ["PLR0912", "PLR0915"]
 

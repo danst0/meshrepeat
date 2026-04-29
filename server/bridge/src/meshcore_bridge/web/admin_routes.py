@@ -21,7 +21,14 @@ from meshcore_bridge.bridge.traffic import (
     parse_packet_meta,
 )
 from meshcore_bridge.config import AppConfig
-from meshcore_bridge.db import RawPacket, Repeater, User
+from meshcore_bridge.db import (
+    CompanionChannel,
+    CompanionContact,
+    CompanionIdentity,
+    RawPacket,
+    Repeater,
+    User,
+)
 from meshcore_bridge.web.deps import admin_required, get_config, get_db
 
 router = APIRouter(prefix="/api/v1/admin")
@@ -249,6 +256,177 @@ async def inspector_packets(
     }
 
 
+# Payload-Layouts laut firmware/lib/meshcore/src/Packet.h. PAYLOAD_VER_1
+# (header bits 7..6 = 00) nutzt 1-Byte src/dest-Hashes und 2-Byte MAC.
+# Bei TRANSPORT_FLOOD/TRANSPORT_DIRECT kommen vor dem Body 4 Byte
+# transport_codes — die addieren wir auf body_start drauf.
+_PAYLOADS_WITH_DEST_SRC = {"REQ", "RESPONSE", "TXT_MSG", "ACK", "PATH", "TRACE"}
+_TRANSPORT_CODE_BYTES = 4
+_DEST_HASH_LEN = 1
+_SRC_HASH_LEN = 1
+_MAC_LEN = 2
+_EPHEMERAL_PUBKEY_LEN = 32
+
+
+async def _lookup_pubkey_prefix(
+    db: AsyncSession, prefix: bytes
+) -> list[dict[str, str]]:
+    """Findet Identities + Contacts, deren Pubkey mit ``prefix`` beginnt.
+
+    Hash-Größe ist üblicherweise 1 Byte (PAYLOAD_VER_1) → bis zu 256 mögliche
+    Werte und entsprechend viele Kollisionen; wir geben alle Treffer zurück
+    und überlassen die Disambiguierung dem Leser."""
+    if not prefix:
+        return []
+    n = len(prefix)
+    matches: list[dict[str, str]] = []
+
+    idents = (
+        await db.execute(select(CompanionIdentity))
+    ).scalars().all()
+    for ident in idents:
+        if ident.pubkey[:n] == prefix:
+            matches.append(
+                {
+                    "kind": "identity",
+                    "name": ident.name,
+                    "pubkey_hex": ident.pubkey.hex(),
+                }
+            )
+
+    contacts = (
+        await db.execute(select(CompanionContact))
+    ).scalars().all()
+    for c in contacts:
+        if c.peer_pubkey[:n] == prefix:
+            matches.append(
+                {
+                    "kind": "contact",
+                    "name": c.peer_name or "?",
+                    "pubkey_hex": c.peer_pubkey.hex(),
+                }
+            )
+    return matches
+
+
+async def _lookup_channel_hash(
+    db: AsyncSession, channel_hash: bytes
+) -> list[dict[str, str]]:
+    if not channel_hash:
+        return []
+    rows = (
+        await db.execute(select(CompanionChannel))
+    ).scalars().all()
+    return [
+        {"kind": "channel", "name": ch.name, "hash_hex": ch.channel_hash.hex()}
+        for ch in rows
+        if ch.channel_hash == channel_hash
+    ]
+
+
+async def _decode_payload_fields(
+    db: AsyncSession,
+    raw: bytes,
+    route_type: str,
+    payload_type: str,
+    body_start: int,
+) -> list[dict[str, Any]]:
+    """Liefert die ersten Klartext-Felder im Body, mit Lookups gegen
+    bekannte Companion-Identities/-Contacts/-Channels."""
+    fields: list[dict[str, Any]] = []
+    cursor = body_start
+    if route_type in ("TRANSPORT_FLOOD", "TRANSPORT_DIRECT"):
+        if cursor + _TRANSPORT_CODE_BYTES <= len(raw):
+            fields.append(
+                {
+                    "label": "Transport-Codes",
+                    "hex": raw[cursor : cursor + _TRANSPORT_CODE_BYTES].hex(),
+                    "candidates": [],
+                }
+            )
+            cursor += _TRANSPORT_CODE_BYTES
+        else:
+            return fields
+
+    if payload_type in _PAYLOADS_WITH_DEST_SRC:
+        if cursor + _DEST_HASH_LEN <= len(raw):
+            dest = raw[cursor : cursor + _DEST_HASH_LEN]
+            fields.append(
+                {
+                    "label": "Dest-Hash",
+                    "hex": dest.hex(),
+                    "candidates": await _lookup_pubkey_prefix(db, dest),
+                }
+            )
+            cursor += _DEST_HASH_LEN
+        if cursor + _SRC_HASH_LEN <= len(raw):
+            src = raw[cursor : cursor + _SRC_HASH_LEN]
+            fields.append(
+                {
+                    "label": "Src-Hash",
+                    "hex": src.hex(),
+                    "candidates": await _lookup_pubkey_prefix(db, src),
+                }
+            )
+            cursor += _SRC_HASH_LEN
+        if cursor + _MAC_LEN <= len(raw):
+            fields.append(
+                {
+                    "label": "MAC",
+                    "hex": raw[cursor : cursor + _MAC_LEN].hex(),
+                    "candidates": [],
+                }
+            )
+    elif payload_type in ("GRP_TXT", "GRP_DATA"):
+        if cursor + 1 <= len(raw):
+            ch = raw[cursor : cursor + 1]
+            fields.append(
+                {
+                    "label": "Channel-Hash",
+                    "hex": ch.hex(),
+                    "candidates": await _lookup_channel_hash(db, ch),
+                }
+            )
+            cursor += 1
+        if cursor + _MAC_LEN <= len(raw):
+            fields.append(
+                {
+                    "label": "MAC",
+                    "hex": raw[cursor : cursor + _MAC_LEN].hex(),
+                    "candidates": [],
+                }
+            )
+    elif payload_type == "ANON_REQ":
+        if cursor + _DEST_HASH_LEN <= len(raw):
+            dest = raw[cursor : cursor + _DEST_HASH_LEN]
+            fields.append(
+                {
+                    "label": "Dest-Hash",
+                    "hex": dest.hex(),
+                    "candidates": await _lookup_pubkey_prefix(db, dest),
+                }
+            )
+            cursor += _DEST_HASH_LEN
+        if cursor + _EPHEMERAL_PUBKEY_LEN <= len(raw):
+            fields.append(
+                {
+                    "label": "Ephemeral-Pubkey",
+                    "hex": raw[cursor : cursor + _EPHEMERAL_PUBKEY_LEN].hex(),
+                    "candidates": [],
+                }
+            )
+            cursor += _EPHEMERAL_PUBKEY_LEN
+        if cursor + _MAC_LEN <= len(raw):
+            fields.append(
+                {
+                    "label": "MAC",
+                    "hex": raw[cursor : cursor + _MAC_LEN].hex(),
+                    "candidates": [],
+                }
+            )
+    return fields
+
+
 @router.get("/inspector/packets/{packet_id}")
 async def inspector_packet_detail(
     packet_id: int,
@@ -288,6 +466,11 @@ async def inspector_packet_detail(
         "path_hashes": rp_hashes,
         "advert_pubkey": rp_advert,
     }
+
+    body_start = region.get("body", [len(raw), len(raw)])[0] if raw else 0
+    decoded["body_fields"] = await _decode_payload_fields(
+        db, raw, rp_route, rp_payload, body_start
+    )
 
     try:
         forwarded = json.loads(row.forwarded_to)

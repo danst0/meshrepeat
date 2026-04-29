@@ -260,6 +260,24 @@ async function selectPacket(id) {
   }
 }
 
+function renderBodyFields(fields) {
+  if (!fields || fields.length === 0) return '';
+  const rows = fields.map(f => {
+    let candHtml = '';
+    if (f.candidates && f.candidates.length > 0) {
+      const tags = f.candidates.map(c => {
+        const kindMark = c.kind === 'identity' ? '🪪' : (c.kind === 'channel' ? '📢' : '👤');
+        const full = c.pubkey_hex || c.hash_hex || '';
+        const short = full ? ' <span style="color:var(--muted);font-size:.75rem">' + escape(full.slice(0,12)) + '…</span>' : '';
+        return '<span class="pill">' + kindMark + ' ' + escape(c.name) + short + '</span>';
+      }).join(' ');
+      candHtml = ' → ' + tags;
+    }
+    return '<dt>' + escape(f.label) + '</dt><dd><code>' + escape(f.hex) + '</code>' + candHtml + '</dd>';
+  }).join('');
+  return '<h3>Body-Felder (Klartext-Header)</h3><dl>' + rows + '</dl>';
+}
+
 function renderDetail(p) {
   const d = p.decoded;
   const r = d.regions || {};
@@ -283,6 +301,7 @@ function renderDetail(p) {
       <dt>Forwarded</dt><dd>${escape(fwd)}</dd>
       ${advertHtml}
     </dl>
+    ${renderBodyFields(d.body_fields)}
     <h3>Hex-Dump</h3>
     <div class="hexdump">${renderHex(p.raw_hex, r)}</div>
     <p style="color:var(--muted);font-size:.78rem;margin-top:.6rem">
