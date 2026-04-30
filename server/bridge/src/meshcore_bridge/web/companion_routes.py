@@ -17,7 +17,7 @@ from uuid import UUID, uuid4
 from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import desc, select
+from sqlalchemy import desc, or_, select
 from sqlalchemy import func as sa_func
 from sqlalchemy import text as sql_text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -813,13 +813,14 @@ async def list_identity_map_pins(
     identity_id: UUID,
     user: User = Depends(current_user_required),
     db: AsyncSession = Depends(get_db),
-    hours: int = Query(default=168, ge=1, le=8760),
+    hours: int = Query(default=72, ge=1, le=8760),
     include_outliers: bool = Query(default=False),
 ) -> list[dict[str, Any]]:
     """Bekannte Kontakte mit Geokoordinaten, deren letzter Advert
-    innerhalb der letzten ``hours`` Stunden eintraf (default 168h = 7
-    Tage). Begrenzung verhindert, dass alte/abgewanderte Knoten die
-    Karte vollmüllen.
+    innerhalb der letzten ``hours`` Stunden eintraf (default 72h).
+    Begrenzung verhindert, dass alte/abgewanderte Knoten die Karte
+    vollmüllen. Ausgenommen: Favoriten und Peers, mit denen es schon
+    DM-Verkehr gab — die bleiben unabhängig vom Cutoff sichtbar.
 
     Filter:
     - Hard-Filter via ``is_valid_coord`` (Range, NaN/Inf, Null-Insel)
@@ -828,6 +829,14 @@ async def list_identity_map_pins(
     if not await _user_owns_identity(db, user.id, identity_id):
         raise HTTPException(status_code=404)
     cutoff = datetime.now(UTC) - timedelta(hours=hours)
+    dm_peers_subq = (
+        select(CompanionMessage.peer_pubkey)
+        .where(
+            CompanionMessage.identity_id == identity_id,
+            CompanionMessage.peer_pubkey.is_not(None),
+        )
+        .distinct()
+    )
     rows = list(
         (
             await db.execute(
@@ -835,7 +844,11 @@ async def list_identity_map_pins(
                     CompanionContact.identity_id == identity_id,
                     CompanionContact.last_lat.is_not(None),
                     CompanionContact.last_lon.is_not(None),
-                    CompanionContact.last_seen_at >= cutoff,
+                    or_(
+                        CompanionContact.last_seen_at >= cutoff,
+                        CompanionContact.favorite.is_(True),
+                        CompanionContact.peer_pubkey.in_(dm_peers_subq),
+                    ),
                 )
             )
         ).scalars()

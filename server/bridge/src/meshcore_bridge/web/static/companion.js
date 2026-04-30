@@ -1124,7 +1124,7 @@
         mapMarkers.addLayer(marker);
         bounds.push([p.lat, p.lon]);
       }
-      status.textContent = pins.length + " Knoten (letzte 7 Tage)";
+      status.textContent = pins.length + " Knoten (letzte 72 h + Favoriten/DMs)";
       if (!userTouchedMap) {
         if (bounds.length === 1) mapInstance.setView(bounds[0], 12);
         else if (bounds.length > 1) mapInstance.fitBounds(bounds, {padding: [40, 40], maxZoom: 13});

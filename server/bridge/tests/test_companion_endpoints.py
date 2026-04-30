@@ -330,6 +330,98 @@ async def test_map_endpoint_filters_outliers(app_and_outbox) -> None:
 
 
 @pytest.mark.asyncio
+async def test_map_endpoint_filters_stale_keeps_favorite_and_dm(app_and_outbox) -> None:
+    """Default-Cutoff 72h: stale Knoten fliegen raus, Favoriten und
+    Peers mit DM-Verkehr bleiben sichtbar."""
+    app, sender = app_and_outbox
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://t") as client:
+        ident_id = await _login_and_create_identity(client, sender, email="staleth@example.com")
+        # Berlin-Cluster: 11 frische Punkte, sodass cluster_outlier_mask
+        # nicht alles als Ausreißer wirft.
+        fresh_now = datetime.now(UTC)
+        stale = fresh_now - timedelta(hours=80)
+        peer_fresh = bytes([0x01]) + bytes(31)
+        peer_stale_plain = bytes([0x02]) + bytes(31)
+        peer_stale_fav = bytes([0x03]) + bytes(31)
+        peer_stale_dm = bytes([0x04]) + bytes(31)
+        async with get_session() as db:
+            # 10 reguläre frische Cluster-Knoten (Lückenfüller).
+            for i in range(10):
+                db.add(
+                    CompanionContact(
+                        identity_id=UUID(ident_id),
+                        peer_pubkey=bytes([0x10 + i]) + bytes(31),
+                        peer_name=f"cluster-{i}",
+                        last_seen_at=fresh_now,
+                        last_lat=52.5 + i * 0.01,
+                        last_lon=13.4 + i * 0.01,
+                    )
+                )
+            db.add(
+                CompanionContact(
+                    identity_id=UUID(ident_id),
+                    peer_pubkey=peer_fresh,
+                    peer_name="fresh",
+                    last_seen_at=fresh_now,
+                    last_lat=52.6,
+                    last_lon=13.5,
+                )
+            )
+            db.add(
+                CompanionContact(
+                    identity_id=UUID(ident_id),
+                    peer_pubkey=peer_stale_plain,
+                    peer_name="stale-plain",
+                    last_seen_at=stale,
+                    last_lat=52.61,
+                    last_lon=13.51,
+                )
+            )
+            db.add(
+                CompanionContact(
+                    identity_id=UUID(ident_id),
+                    peer_pubkey=peer_stale_fav,
+                    peer_name="stale-fav",
+                    last_seen_at=stale,
+                    last_lat=52.62,
+                    last_lon=13.52,
+                    favorite=True,
+                )
+            )
+            db.add(
+                CompanionContact(
+                    identity_id=UUID(ident_id),
+                    peer_pubkey=peer_stale_dm,
+                    peer_name="stale-dm",
+                    last_seen_at=stale,
+                    last_lat=52.63,
+                    last_lon=13.53,
+                )
+            )
+            db.add(
+                CompanionMessage(
+                    identity_id=UUID(ident_id),
+                    direction="in",
+                    payload_type=2,
+                    peer_pubkey=peer_stale_dm,
+                    peer_name="stale-dm",
+                    text="hi",
+                    raw=b"\x00",
+                )
+            )
+            await db.commit()
+
+        r = await client.get(f"/api/v1/companion/identities/{ident_id}/map")
+        assert r.status_code == 200, r.text
+        names = {p["peer_name"] for p in r.json()}
+        assert "fresh" in names
+        assert "stale-fav" in names
+        assert "stale-dm" in names
+        assert "stale-plain" not in names
+
+
+@pytest.mark.asyncio
 async def test_admin_cleanup_coords_dry_run_and_apply(app_and_outbox) -> None:
     """POST /api/v1/companion/admin/identities/{id}/cleanup-coords:
     dry_run=1 → liefert Kandidaten, ändert nichts; dry_run=0 → setzt
