@@ -1,0 +1,224 @@
+#!/usr/bin/env python3
+"""spiegel-link-probe — Erreichbarkeits-Probe gegen einen MeshCore-Peer.
+
+Schickt eine STATUS-REQ an einen Peer (Repeater) und persistiert das
+Ergebnis in ``companion_link_probes``. Anders als ein DM verschmutzt
+das den DM-Verlauf nicht. Aggregierte Stabilitäts-Kennzahlen (loss%,
+RTT-median/p95) liefert das ``summary``-Subkommando.
+
+Subkommandos:
+  probe --identity UUID --peer HEX                Probe absetzen
+  history --identity UUID --peer HEX [-n N]       letzte N Probes anzeigen
+  summary --identity UUID --peer HEX [--hours H]  Stabilitäts-Kennzahlen
+  burst --identity UUID --peer HEX -n N --interval S
+                                                  N Probes mit S Sekunden Abstand
+
+Auth wie ``spiegel-ctl`` (E-Mail + Passwort, Cookie). Der Peer-Endpoint
+schickt eine FLOOD-Probe wenn kein out_path gelernt ist, sonst DIRECT —
+beides wird in ``route_kind`` festgehalten.
+
+ENV (gleich wie spiegel-ctl):
+  MESHCORE_CTL_URL    z.B. https://meshcore.dumke.me  (Default)
+  MESHCORE_CTL_EMAIL  Owner-E-Mail
+  MESHCORE_CTL_PASSWORD  Passwort
+"""
+
+from __future__ import annotations
+
+import argparse
+import getpass
+import json
+import os
+import sys
+import time
+from typing import Any
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
+from urllib.request import HTTPCookieProcessor, Request, build_opener
+
+DEFAULT_URL = "https://meshcore.dumke.me"
+
+
+class Client:
+    def __init__(self, base_url: str) -> None:
+        self.base = base_url.rstrip("/")
+        self._opener = build_opener(HTTPCookieProcessor())
+
+    def request(
+        self,
+        path: str,
+        *,
+        method: str = "GET",
+        data: dict[str, str] | None = None,
+    ) -> Any:
+        body: bytes | None = None
+        headers: dict[str, str] = {}
+        if data is not None:
+            body = urlencode(data).encode("utf-8")
+            headers["Content-Type"] = "application/x-www-form-urlencoded"
+            method = "POST"
+        url = f"{self.base}{path}"
+        req = Request(url, data=body, method=method, headers=headers)
+        try:
+            with self._opener.open(req, timeout=30) as resp:
+                ct = resp.headers.get("content-type", "")
+                payload = resp.read()
+                if "application/json" in ct:
+                    return json.loads(payload)
+                return payload.decode("utf-8", errors="replace")
+        except HTTPError as e:
+            sys.stderr.write(
+                f"HTTP {e.code} on {url}\n"
+                f"{e.read().decode('utf-8', errors='replace')}\n"
+            )
+            raise
+        except URLError as e:
+            sys.stderr.write(f"URL-Fehler: {e}\n")
+            raise
+
+    def login(self, email: str, password: str) -> None:
+        try:
+            self.request("/login", data={"email": email, "password": password})
+        except HTTPError as e:
+            if e.code in (302, 303):
+                return
+            raise
+
+
+def _probe_path(identity: str, peer_hex: str) -> str:
+    return f"/api/v1/companion/identities/{identity}/contacts/{peer_hex}/probe"
+
+
+def _history_path(identity: str, peer_hex: str, *, limit: int, hours: int | None) -> str:
+    qs = f"?limit={limit}"
+    if hours is not None:
+        qs += f"&since_hours={hours}"
+    return f"/api/v1/companion/identities/{identity}/contacts/{peer_hex}/probes{qs}"
+
+
+def cmd_probe(c: Client, args: argparse.Namespace) -> int:
+    j = c.request(_probe_path(args.identity, args.peer), method="POST", data={})
+    print(json.dumps(j, indent=2))
+    return 0
+
+
+def cmd_history(c: Client, args: argparse.Namespace) -> int:
+    j = c.request(
+        _history_path(args.identity, args.peer, limit=args.n, hours=args.hours)
+    )
+    summary = j["summary"]
+    print(f"=== Probe-History ({summary.get('count', 0)} finalisiert) ===\n")
+    print(f"  pending: {summary.get('pending', 0)}")
+    print(f"  ack:     {summary.get('ack', 0)}")
+    print(f"  timeout: {summary.get('timeout', 0)}")
+    if "loss_pct" in summary:
+        print(f"  loss:    {summary['loss_pct']}%")
+    if "rtt_ms_median" in summary:
+        print(
+            f"  RTT:     median={summary['rtt_ms_median']}ms  "
+            f"p95={summary['rtt_ms_p95']}ms  "
+            f"min/max={summary['rtt_ms_min']}/{summary['rtt_ms_max']}ms"
+        )
+    print()
+    if not args.summary_only:
+        print(f"{'sent_at':<25} {'status':<8} {'route':<6} {'hops':>4} {'rtt_ms':>7}")
+        for p in j["probes"]:
+            rtt = "-" if p["rtt_ms"] is None else str(p["rtt_ms"])
+            hops = "-" if p["hop_count"] is None else str(p["hop_count"])
+            print(
+                f"{p['sent_at']:<25} {p['status']:<8} "
+                f"{p['route_kind']:<6} {hops:>4} {rtt:>7}"
+            )
+    return 0
+
+
+def cmd_summary(c: Client, args: argparse.Namespace) -> int:
+    args.summary_only = True
+    args.n = 1000
+    return cmd_history(c, args)
+
+
+def cmd_burst(c: Client, args: argparse.Namespace) -> int:
+    """N Probes hintereinander; nützlich, um eine kurze Stabilitäts-
+    Stichprobe ohne Daemon einzuholen. Achtung Airtime — konservativ
+    halten (z.B. n=5 interval=10)."""
+    if args.n < 1:
+        print("--n muss >= 1 sein", file=sys.stderr)
+        return 2
+    print(f"Sende {args.n} Probes alle {args.interval}s an {args.peer[:8]}…")
+    for i in range(args.n):
+        if i > 0:
+            time.sleep(args.interval)
+        try:
+            j = c.request(
+                _probe_path(args.identity, args.peer), method="POST", data={}
+            )
+            print(f"  [{i + 1}/{args.n}] probe_id={j['probe_id']}")
+        except HTTPError:
+            return 2
+    # Kurze Wartepause auf das letzte Timeout (PROBE_TIMEOUT_S=30 server-
+    # seitig — wir warten nur die Hälfte und zeigen ggf. pending).
+    print(f"\nWarte 35s auf finale Antworten …")
+    time.sleep(35)
+    return cmd_summary(c, args)
+
+
+def main() -> int:
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("--url", default=os.environ.get("MESHCORE_CTL_URL", DEFAULT_URL))
+    p.add_argument("--email", default=os.environ.get("MESHCORE_CTL_EMAIL"))
+    p.add_argument(
+        "--password",
+        default=os.environ.get("MESHCORE_CTL_PASSWORD"),
+        help="Default: prompt or MESHCORE_CTL_PASSWORD",
+    )
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    def add_target(sp: argparse.ArgumentParser) -> None:
+        sp.add_argument("--identity", required=True, help="Companion-Identity-UUID")
+        sp.add_argument("--peer", required=True, help="Peer-Pubkey (hex, 64 chars)")
+
+    pp = sub.add_parser("probe", help="Eine Probe absetzen")
+    add_target(pp)
+    pp.set_defaults(func=cmd_probe, summary_only=False)
+
+    hp = sub.add_parser("history", help="Letzte N Probes anzeigen")
+    add_target(hp)
+    hp.add_argument("-n", type=int, default=20, help="Anzahl letzter Probes (Default 20)")
+    hp.add_argument("--hours", type=int, default=None, help="Nur Probes der letzten H Stunden")
+    hp.add_argument("--summary-only", action="store_true", help="Nur Aggregat-Zeile")
+    hp.set_defaults(func=cmd_history)
+
+    sp = sub.add_parser("summary", help="Nur Aggregat (loss-quote, RTT-Stats)")
+    add_target(sp)
+    sp.add_argument("--hours", type=int, default=24, help="Zeitfenster in Stunden (Default 24)")
+    sp.set_defaults(func=cmd_summary)
+
+    bp = sub.add_parser("burst", help="N Probes mit Intervall absetzen + Summary")
+    add_target(bp)
+    bp.add_argument("-n", type=int, default=5, help="Anzahl Probes (Default 5)")
+    bp.add_argument(
+        "--interval", type=float, default=10.0, help="Sekunden zwischen Probes (Default 10)"
+    )
+    bp.add_argument("--hours", type=int, default=1)
+    bp.set_defaults(func=cmd_burst, summary_only=True)
+
+    args = p.parse_args()
+
+    if not args.peer or len(args.peer) != 64:
+        print("--peer muss ein 64-Zeichen Hex-Pubkey sein", file=sys.stderr)
+        return 2
+
+    email = args.email or input("owner email: ").strip()
+    password = args.password or getpass.getpass("password: ")
+    c = Client(args.url)
+    try:
+        c.login(email, password)
+    except HTTPError as e:
+        sys.stderr.write(f"login fehlgeschlagen: {e}\n")
+        return 2
+    return args.func(c, args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

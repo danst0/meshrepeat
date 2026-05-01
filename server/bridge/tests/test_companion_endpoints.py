@@ -242,6 +242,68 @@ async def test_login_request_endpoint(app_and_outbox) -> None:
 
 
 @pytest.mark.asyncio
+async def test_link_probe_endpoint_persists_pending_then_acks(app_and_outbox) -> None:
+    """POST /probe legt einen pending-Eintrag in companion_link_probes an,
+    eine simulierte RESPONSE räumt ihn weg → status='ack' mit RTT.
+    """
+    from meshcore_bridge.db import CompanionLinkProbe
+    from meshcore_companion.crypto import LocalIdentity
+
+    app, sender = app_and_outbox
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://t") as client:
+        ident_id = await _login_and_create_identity(client, sender, email="probe@example.com")
+        peer_hex = LocalIdentity.generate().pub_key.hex()
+
+        r = await client.post(
+            f"/api/v1/companion/identities/{ident_id}/contacts/{peer_hex}/probe"
+        )
+        assert r.status_code == 200, r.text
+        probe_id = UUID(r.json()["probe_id"])
+
+        # DB: pending mit zugewiesenem Tag, Route=FLOOD (kein out_path).
+        async with get_session() as db:
+            row = await db.get(CompanionLinkProbe, probe_id)
+            assert row is not None
+            assert row.status == "pending"
+            assert row.route_kind == "FLOOD"
+            assert row.rtt_ms is None
+            tag = row.req_tag
+
+        # Service hat den Tag in _pending_probes (NICHT _pending_reqs —
+        # Probes sollen den DM-Verlauf nicht verschmutzen).
+        svc = app.state.companion_service
+        assert tag in svc._pending_probes
+        assert tag not in svc._pending_reqs
+
+        # Simulierte RESPONSE: hänge _record_probe_response direkt an.
+        peer_pubkey = bytes.fromhex(peer_hex)
+        pending = svc._pending_probes.pop(tag)
+        await svc._record_probe_response(
+            tag=tag, pending=pending, sender_pubkey=peer_pubkey
+        )
+
+        # DB: status='ack' + rtt_ms gesetzt + answered_at gesetzt.
+        async with get_session() as db:
+            row = await db.get(CompanionLinkProbe, probe_id)
+            assert row is not None
+            assert row.status == "ack"
+            assert row.rtt_ms is not None and row.rtt_ms >= 0
+            assert row.answered_at is not None
+
+        # History-Endpoint liefert Summary mit ack=1.
+        r = await client.get(
+            f"/api/v1/companion/identities/{ident_id}/contacts/{peer_hex}/probes"
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["summary"]["ack"] == 1
+        assert body["summary"]["timeout"] == 0
+        assert len(body["probes"]) == 1
+        assert body["probes"][0]["status"] == "ack"
+
+
+@pytest.mark.asyncio
 async def test_status_request_endpoint(app_and_outbox) -> None:
     """POST /contacts/{hex}/status: Endpoint funktioniert + Validierung.
     Wir nutzen einen *echten* Ed25519-Pubkey, weil

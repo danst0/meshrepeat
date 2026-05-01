@@ -26,6 +26,7 @@ from meshcore_bridge.db import (
     CompanionChannel,
     CompanionContact,
     CompanionIdentity,
+    CompanionLinkProbe,
     CompanionMessage,
     User,
 )
@@ -806,6 +807,90 @@ async def request_contact_status(
     if not ok:
         raise HTTPException(status_code=409, detail="identity not loaded in service")
     return {"ok": True, "ts": datetime.now(UTC).isoformat()}
+
+
+@router.post(
+    "/identities/{identity_id}/contacts/{peer_pubkey_hex}/probe", response_model=None
+)
+async def trigger_link_probe(
+    request: Request,
+    identity_id: UUID,
+    peer_pubkey_hex: str,
+    user: User = Depends(current_user_required),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Schickt eine Stabilität-Probe (STATUS-REQ ohne UI-Bubble) und
+    persistiert das Ergebnis in ``companion_link_probes``. Geeignet für
+    automatisierte Erreichbarkeits-Messung über die Zeit. Liefert die
+    Probe-ID; das Ergebnis (ack vs. timeout, rtt_ms) ist asynchron via
+    History-Endpoint abrufbar."""
+    peer = await _validate_peer_for_request(db, user.id, identity_id, peer_pubkey_hex)
+    svc = _service(request)
+    if svc is None:
+        raise HTTPException(status_code=503, detail="companion-service not running")
+    probe_id = await svc.send_link_probe(identity_id=identity_id, peer_pubkey=peer)
+    if probe_id is None:
+        raise HTTPException(status_code=409, detail="identity not loaded in service")
+    return {
+        "ok": True,
+        "probe_id": str(probe_id),
+        "ts": datetime.now(UTC).isoformat(),
+    }
+
+
+@router.get("/identities/{identity_id}/contacts/{peer_pubkey_hex}/probes")
+async def list_link_probes(
+    identity_id: UUID,
+    peer_pubkey_hex: str,
+    user: User = Depends(current_user_required),
+    db: AsyncSession = Depends(get_db),
+    limit: int = Query(default=100, ge=1, le=1000),
+    since_hours: int | None = Query(default=None, ge=1, le=720),
+) -> dict[str, Any]:
+    """Probe-History für (identity, peer). Liefert Liste + aggregierte
+    Stabilitäts-Kennzahlen (loss%, RTT-median/p95)."""
+    peer = await _validate_peer_for_request(db, user.id, identity_id, peer_pubkey_hex)
+    q = select(CompanionLinkProbe).where(
+        CompanionLinkProbe.identity_id == identity_id,
+        CompanionLinkProbe.peer_pubkey == peer,
+    )
+    if since_hours is not None:
+        cutoff = datetime.now(UTC) - timedelta(hours=since_hours)
+        q = q.where(CompanionLinkProbe.sent_at >= cutoff)
+    q = q.order_by(desc(CompanionLinkProbe.sent_at)).limit(limit)
+    rows = list((await db.execute(q)).scalars())
+    probes = [
+        {
+            "id": str(r.id),
+            "sent_at": _ts_iso(r.sent_at),
+            "answered_at": _ts_iso(r.answered_at),
+            "status": r.status,
+            "rtt_ms": r.rtt_ms,
+            "route_kind": r.route_kind,
+            "hop_count": r.hop_count,
+        }
+        for r in rows
+    ]
+    finalized = [p for p in probes if p["status"] in ("ack", "timeout")]
+    ack_rtts = sorted(
+        p["rtt_ms"]
+        for p in finalized
+        if p["status"] == "ack" and p["rtt_ms"] is not None
+    )
+    summary: dict[str, Any] = {
+        "count": len(finalized),
+        "ack": len(ack_rtts),
+        "timeout": sum(1 for p in finalized if p["status"] == "timeout"),
+        "pending": sum(1 for p in probes if p["status"] == "pending"),
+    }
+    if finalized:
+        summary["loss_pct"] = round(100.0 * summary["timeout"] / len(finalized), 1)
+    if ack_rtts:
+        summary["rtt_ms_median"] = ack_rtts[len(ack_rtts) // 2]
+        summary["rtt_ms_p95"] = ack_rtts[min(len(ack_rtts) - 1, int(0.95 * len(ack_rtts)))]
+        summary["rtt_ms_min"] = ack_rtts[0]
+        summary["rtt_ms_max"] = ack_rtts[-1]
+    return {"summary": summary, "probes": probes}
 
 
 @router.get("/identities/{identity_id}/map")

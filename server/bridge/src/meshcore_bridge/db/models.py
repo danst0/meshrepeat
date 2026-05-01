@@ -280,3 +280,40 @@ class CompanionChannel(Base):
         UniqueConstraint("identity_id", "name", name="uq_companion_channel_name"),
         Index("ix_companion_channels_identity", "identity_id"),
     )
+
+
+class CompanionLinkProbe(Base):
+    """Ergebnis einer Companion→Peer-Erreichbarkeitsprobe.
+
+    Probe = STATUS-REQ (PayloadType.REQ, REQ_TYPE_GET_STATUS) mit Tag.
+    Wir tracken Versand-Zeit und matchen die RESPONSE über den Tag, um
+    RTT zu messen. Bleibt die Antwort aus, wird der Eintrag auf
+    ``status='timeout'`` gesetzt. Stabilitäts-Auswertung läuft per
+    Aggregation über (identity_id, peer_pubkey, sent_at)."""
+
+    __tablename__ = "companion_link_probes"
+
+    id: Mapped[UUID] = mapped_column(_UUIDBlob, primary_key=True, default=uuid4)
+    identity_id: Mapped[UUID] = mapped_column(
+        _UUIDBlob, ForeignKey("companion_identities.id"), nullable=False
+    )
+    peer_pubkey: Mapped[bytes] = mapped_column(BLOB, nullable=False)
+    sent_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    # Korrelations-Tag (4 Byte little-endian aus dem REQ-Plaintext, als int).
+    req_tag: Mapped[int] = mapped_column(Integer, nullable=False)
+    # 'FLOOD' oder 'DIRECT' — bei DIRECT zusätzlich hop_count gesetzt.
+    route_kind: Mapped[str] = mapped_column(String(8), nullable=False)
+    hop_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # 'pending' beim Anlegen, später 'ack' oder 'timeout'.
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending")
+    rtt_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    answered_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    __table_args__ = (
+        Index("ix_companion_link_probes_pair_time", "identity_id", "peer_pubkey", "sent_at"),
+        Index("ix_companion_link_probes_tag", "req_tag"),
+    )

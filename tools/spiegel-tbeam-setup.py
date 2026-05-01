@@ -76,7 +76,7 @@ def prompt(label: str, default: str | None = None, *, secret: bool = False) -> s
 def gather_setup() -> Setup:
     print("=== T-Beam-Setup ===")
     wifi_ssid = prompt("WLAN-SSID")
-    wifi_psk = prompt("WLAN-Passwort", secret=True)
+    wifi_psk = prompt("WLAN-Passwort (leer für offenes WLAN)", default="", secret=True)
     host = prompt("Bridge-Host", DEFAULT_HOST)
     token = prompt("Bridge-Token (32 Zeichen, base32)")
     site = prompt("Site-UUID (z.B. 7b2f9e0c-4a51-4d0a-91c8-b5d1e7c63f02)")
@@ -169,7 +169,7 @@ def main() -> int:
         try:
             cfg = Setup(
                 wifi_ssid=os.environ["MESHCORE_SETUP_WIFI_SSID"],
-                wifi_psk=os.environ["MESHCORE_SETUP_WIFI_PSK"],
+                wifi_psk=os.environ.get("MESHCORE_SETUP_WIFI_PSK", ""),
                 host=os.environ.get("MESHCORE_SETUP_HOST", DEFAULT_HOST),
                 token=os.environ["MESHCORE_SETUP_TOKEN"],
                 site=os.environ["MESHCORE_SETUP_SITE"],
