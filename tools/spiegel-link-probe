@@ -29,12 +29,16 @@ import argparse
 import getpass
 import json
 import os
+import random
 import sys
 import time
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import HTTPCookieProcessor, Request, build_opener
+
+# MeshCore ADV_TYPE
+NODE_TYPE_REPEATER = 2
 
 DEFAULT_URL = "https://meshcore.dumke.me"
 
@@ -138,6 +142,104 @@ def cmd_summary(c: Client, args: argparse.Namespace) -> int:
     return cmd_history(c, args)
 
 
+def _fetch_contacts(c: Client, identity: str) -> list[dict[str, Any]]:
+    return c.request(f"/api/v1/companion/identities/{identity}/contacts?limit=500")
+
+
+def cmd_contacts(c: Client, args: argparse.Namespace) -> int:
+    """Listet Contacts der Identity mit voller Pubkey + Heuristik-Info, sodass
+    man Repeater (für Probes) und Chat-Knoten unterscheiden kann."""
+    rows = _fetch_contacts(c, args.identity)
+    if args.repeaters_only:
+        rows = [r for r in rows if r.get("node_type") == NODE_TYPE_REPEATER]
+    print(f"{'name':<24} {'type':<8} {'hops':>4} {'last_seen':<25} pubkey")
+    for r in rows:
+        nt = r.get("node_type")
+        type_lbl = {1: "chat", 2: "repeater", 3: "room", 4: "sensor"}.get(nt, "-")
+        hops = "-" if r.get("hop_count") is None else str(r["hop_count"])
+        seen = (r.get("last_seen_at") or "-")[:19]
+        name = (r.get("peer_name") or "?")[:24]
+        print(f"{name:<24} {type_lbl:<8} {hops:>4} {seen:<25} {r['peer_pubkey_hex']}")
+    return 0
+
+
+def _pick_nearest_repeaters(
+    rows: list[dict[str, Any]], pool: int, sample: int
+) -> list[dict[str, Any]]:
+    """Top ``pool`` nächste Repeater (kleines hop_count zuerst, aktuellster
+    last_seen_at als Tiebreak), davon zufällig ``sample``. Knoten ohne
+    out_path (hop_count=None) werden ans Ende sortiert — wir wissen nicht,
+    wie weit sie sind."""
+    repeaters = [r for r in rows if r.get("node_type") == NODE_TYPE_REPEATER]
+    if not repeaters:
+        return []
+    # Primär: hop_count asc (None ans Ende). Sekundär: last_seen_at desc.
+    def sort_key(r: dict[str, Any]) -> tuple[int, str]:
+        hc = r.get("hop_count")
+        return (hc if hc is not None else 99, "9" + (r.get("last_seen_at") or ""))
+
+    repeaters.sort(key=sort_key)
+    nearest = repeaters[:pool]
+    if sample >= len(nearest):
+        return nearest
+    return random.sample(nearest, sample)
+
+
+def cmd_random(c: Client, args: argparse.Namespace) -> int:
+    """Probe gegen N zufällige Repeater aus den ``--pool`` nächsten."""
+    rows = _fetch_contacts(c, args.identity)
+    picks = _pick_nearest_repeaters(rows, pool=args.pool, sample=args.n)
+    if not picks:
+        print(
+            "Keine Repeater in Contacts gefunden. "
+            "Stelle sicher dass node_type=2 Knoten in deiner "
+            "Companion-Identity sind (Adverts erst empfangen?).",
+            file=sys.stderr,
+        )
+        return 1
+    print(
+        f"Wähle {len(picks)} aus den {min(len(rows), args.pool)} nächsten Repeatern "
+        f"(Hop-Count + last_seen):"
+    )
+    for p in picks:
+        hc = "-" if p.get("hop_count") is None else str(p["hop_count"])
+        print(f"  {p.get('peer_name') or '?'} (hops={hc})  {p['peer_pubkey_hex']}")
+    print()
+    for i, p in enumerate(picks):
+        try:
+            j = c.request(
+                _probe_path(args.identity, p["peer_pubkey_hex"]),
+                method="POST",
+                data={},
+            )
+            print(f"  [{i + 1}/{len(picks)}] {p.get('peer_name') or '?'}: probe_id={j['probe_id']}")
+        except HTTPError:
+            return 2
+        if i < len(picks) - 1:
+            time.sleep(args.interval)
+    print(f"\nWarte 35s auf finale Antworten …")
+    time.sleep(35)
+    print()
+    # Per-Peer-Summary aus history.
+    print(f"{'name':<24} {'route':<6} {'status':<8} {'rtt_ms':>7}")
+    ack = 0
+    for p in picks:
+        hist = c.request(
+            _history_path(args.identity, p["peer_pubkey_hex"], limit=1, hours=1)
+        )
+        if hist["probes"]:
+            row = hist["probes"][0]
+            rtt = "-" if row["rtt_ms"] is None else str(row["rtt_ms"])
+            print(
+                f"{(p.get('peer_name') or '?'):<24} "
+                f"{row['route_kind']:<6} {row['status']:<8} {rtt:>7}"
+            )
+            if row["status"] == "ack":
+                ack += 1
+    print(f"\n→ {ack}/{len(picks)} Repeater haben geantwortet")
+    return 0 if ack > 0 else 1
+
+
 def cmd_burst(c: Client, args: argparse.Namespace) -> int:
     """N Probes hintereinander; nützlich, um eine kurze Stabilitäts-
     Stichprobe ohne Daemon einzuholen. Achtung Airtime — konservativ
@@ -202,6 +304,27 @@ def main() -> int:
     )
     bp.add_argument("--hours", type=int, default=1)
     bp.set_defaults(func=cmd_burst, summary_only=True)
+
+    cp = sub.add_parser("contacts", help="Liste der Contacts (Pubkey + node_type + Hops)")
+    cp.add_argument("--identity", required=True, help="Companion-Identity-UUID")
+    cp.add_argument(
+        "--repeaters-only", action="store_true", help="Nur node_type=Repeater zeigen"
+    )
+    cp.set_defaults(func=cmd_contacts, peer="0" * 64)  # peer dummy, nicht genutzt
+
+    rp = sub.add_parser(
+        "random",
+        help="Probe gegen N zufällige aus den nächsten Repeatern",
+    )
+    rp.add_argument("--identity", required=True, help="Companion-Identity-UUID")
+    rp.add_argument("-n", type=int, default=3, help="Anzahl zufälliger Probes (Default 3)")
+    rp.add_argument(
+        "--pool", type=int, default=10, help="Aus wie vielen nächsten ziehen (Default 10)"
+    )
+    rp.add_argument(
+        "--interval", type=float, default=8.0, help="Sekunden zwischen Probes (Default 8)"
+    )
+    rp.set_defaults(func=cmd_random, peer="0" * 64)  # peer dummy, nicht genutzt
 
     args = p.parse_args()
 

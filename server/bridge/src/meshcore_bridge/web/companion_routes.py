@@ -612,6 +612,8 @@ async def list_identity_contacts(
             "last_seen_at": _ts_iso(c.last_seen_at),
             "lat": c.last_lat,
             "lon": c.last_lon,
+            "node_type": c.node_type,
+            "hop_count": (len(c.out_path) if c.out_path else None),
         }
         for c in rows
     ]
