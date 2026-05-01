@@ -301,8 +301,11 @@ class CompanionLinkProbe(Base):
     sent_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
-    # Korrelations-Tag (4 Byte little-endian aus dem REQ-Plaintext, als int).
-    req_tag: Mapped[int] = mapped_column(Integer, nullable=False)
+    # Korrelations-Schlüssel — nur einer ist gesetzt:
+    #   * ``ack_hash`` (4 Byte) für DM-basierte Probes (aktueller Standard).
+    #   * ``req_tag`` (uint32) für Legacy-Probes über STATUS-REQ.
+    ack_hash: Mapped[bytes | None] = mapped_column(BLOB, nullable=True)
+    req_tag: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # 'FLOOD' oder 'DIRECT' — bei DIRECT zusätzlich hop_count gesetzt.
     route_kind: Mapped[str] = mapped_column(String(8), nullable=False)
     hop_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -315,5 +318,5 @@ class CompanionLinkProbe(Base):
 
     __table_args__ = (
         Index("ix_companion_link_probes_pair_time", "identity_id", "peer_pubkey", "sent_at"),
-        Index("ix_companion_link_probes_tag", "req_tag"),
+        Index("ix_companion_link_probes_ack_hash", "ack_hash"),
     )

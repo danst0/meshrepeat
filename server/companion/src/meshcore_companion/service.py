@@ -202,12 +202,11 @@ class CompanionService:
     # keine Invalidation (kein Pfad zum Verwerfen).
     _pending_dms: dict[bytes, tuple[float, UUID, bytes]] = field(default_factory=dict)
     _dm_timeout_tasks: set[asyncio.Task[None]] = field(default_factory=set)
-    # Pending Link-Probes: tag → (sent_monotonic, probe_id, identity_id, peer_pubkey).
-    # Probe = STATUS-REQ ohne UI-Bubble; getrennter Tracker, damit der
-    # normale REQ-Antwort-Flow (Persistierung als CompanionMessage) nicht
-    # getriggert wird. Kein Retry — Loss soll messbar sein, nicht
-    # maskiert. Siehe ``send_link_probe``.
-    _pending_probes: dict[int, tuple[float, UUID, UUID, bytes]] = field(default_factory=dict)
+    # Pending Link-Probes: ack_hash(4) → (sent_monotonic, probe_id, identity_id, peer_pubkey).
+    # Probe = DM mit Marker-Text, Korrelation per dm-ack_hash. Eigener Tracker,
+    # damit weder DM-Verlauf noch out_path-Invalidation getriggert werden.
+    # Kein Retry — Loss soll messbar sein, nicht maskiert.
+    _pending_probes: dict[bytes, tuple[float, UUID, UUID, bytes]] = field(default_factory=dict)
     _probe_timeout_tasks: set[asyncio.Task[None]] = field(default_factory=set)
 
     # Echo-Rate-Limit-Parameter. Reply 1 → Cooldown 5 s,
@@ -871,19 +870,25 @@ class CompanionService:
             await self.inject(pkt, loaded.scope)
         return True
 
+    # Marker-Text für Probe-DMs. Beim Empfänger taucht das als Chat-Eintrag
+    # auf — bewusst kurz und erkennbar gehalten. Sender-seitig persistieren
+    # wir die DM **nicht** im Verlauf (kein _persist_outgoing-Aufruf).
+    _PROBE_DM_TEXT: ClassVar[str] = "[probe]"
+
     async def send_link_probe(
         self,
         *,
         identity_id: UUID,
         peer_pubkey: bytes,
     ) -> UUID | None:
-        """Schickt eine STATUS-REQ als reine Erreichbarkeits-Probe.
+        """Schickt eine kurze DM als reine Erreichbarkeits-Probe.
 
-        Anders als ``request_status`` landet das **nicht** als Bubble im
-        DM-Verlauf, sondern als Zeile in ``companion_link_probes``. Kein
-        Retry — Loss soll messbar sein. Wenn out_path bekannt → DIRECT,
-        sonst FLOOD. Liefert die Probe-ID zurück (oder ``None`` wenn die
-        Identity nicht existiert).
+        Korrelation per ``ack_hash`` (4 Byte sha256 aus DM-Plaintext +
+        sender_pubkey). Beim Empfänger antwortet die FW automatisch mit
+        einem ACK-Frame (kein Login-Erfordernis, anders als bei
+        STATUS-REQ). Probe wird im DM-Verlauf **nicht** als
+        ``CompanionMessage`` persistiert; nur ``companion_link_probes``
+        wächst. Wenn out_path bekannt → DIRECT, sonst FLOOD.
         """
         from meshcore_bridge.db import CompanionContact, CompanionLinkProbe
 
@@ -891,7 +896,6 @@ class CompanionService:
         if loaded is None:
             return None
 
-        # out_path bestimmen (gleiche Logik wie send_dm).
         out_path = b""
         async with self.sessionmaker() as db:
             contact = (
@@ -905,18 +909,28 @@ class CompanionService:
             if contact is not None and contact.out_path:
                 out_path = contact.out_path
 
+        ts = int(time.time())
+        text_bytes = self._PROBE_DM_TEXT.encode("utf-8")
+        pkt = loaded.node.make_dm(
+            peer_pubkey=peer_pubkey,
+            text=self._PROBE_DM_TEXT,
+            timestamp=ts,
+            path=out_path,
+        )
+        ack_hash = compute_dm_ack_hash(
+            timestamp=ts,
+            flags=0,
+            text_bytes=text_bytes,
+            sender_pubkey=loaded.pubkey,
+        )
         flood = not out_path
-        pkt, tag = loaded.node.make_status_req(peer_pubkey=peer_pubkey, flood=flood)
-        # Wenn out_path bekannt: ergibt sich aus Wire kein Pfad-Header in REQ
-        # (REQ läuft FLOOD oder DIRECT analog DM); wir tracken hop_count nur
-        # zur Info, beeinflusst die Probe selbst nicht.
         hop_count = len(out_path) if out_path else None
 
         async with self.sessionmaker() as db:
             row = CompanionLinkProbe(
                 identity_id=identity_id,
                 peer_pubkey=peer_pubkey,
-                req_tag=tag,
+                ack_hash=ack_hash,
                 route_kind="DIRECT" if not flood else "FLOOD",
                 hop_count=hop_count,
                 status="pending",
@@ -926,14 +940,14 @@ class CompanionService:
             await db.refresh(row)
             probe_id = row.id
 
-        self._pending_probes[tag] = (
+        self._pending_probes[ack_hash] = (
             time.monotonic(),
             probe_id,
             identity_id,
             peer_pubkey,
         )
         task = asyncio.create_task(
-            self._timeout_pending_probe(tag=tag, probe_id=probe_id)
+            self._timeout_pending_probe(ack_hash=ack_hash, probe_id=probe_id)
         )
         self._probe_timeout_tasks.add(task)
         task.add_done_callback(self._probe_timeout_tasks.discard)
@@ -942,7 +956,7 @@ class CompanionService:
             "link_probe_sent",
             identity=loaded.name,
             peer=peer_pubkey[:4].hex(),
-            tag=tag,
+            ack=ack_hash.hex(),
             route="DIRECT" if not flood else "FLOOD",
             hops=hop_count,
         )
@@ -950,49 +964,39 @@ class CompanionService:
             await self.inject(pkt, loaded.scope)
         return probe_id
 
-    async def _timeout_pending_probe(self, *, tag: int, probe_id: UUID) -> None:
+    async def _timeout_pending_probe(
+        self, *, ack_hash: bytes, probe_id: UUID
+    ) -> None:
         """Wartet ``_PROBE_TIMEOUT_S`` und schreibt 'timeout', wenn bis dahin
-        keine RESPONSE eingetroffen ist (ACK-Empfang räumt den Tag aus
+        kein ACK eingetroffen ist (ACK-Empfang räumt den Eintrag aus
         ``_pending_probes`` und macht diesen Task no-op)."""
         from meshcore_bridge.db import CompanionLinkProbe
 
         await asyncio.sleep(self._PROBE_TIMEOUT_S)
-        if self._pending_probes.pop(tag, None) is None:
-            return  # RESPONSE kam rechtzeitig
+        if self._pending_probes.pop(ack_hash, None) is None:
+            return  # ACK kam rechtzeitig
         async with self.sessionmaker() as db:
             row = await db.get(CompanionLinkProbe, probe_id)
             if row is None or row.status != "pending":
                 return
             row.status = "timeout"
             await db.commit()
-        _log.info("link_probe_timeout", tag=tag, probe_id=str(probe_id))
+        _log.info(
+            "link_probe_timeout", ack=ack_hash.hex(), probe_id=str(probe_id)
+        )
 
-    async def _record_probe_response(
+    async def _record_probe_ack(
         self,
         *,
-        tag: int,
+        ack_hash: bytes,
         pending: tuple[float, UUID, UUID, bytes],
-        sender_pubkey: bytes,
     ) -> None:
         """Schreibt das ACK-Ergebnis einer Link-Probe in die DB. Wird vom
-        Response-Pfad aufgerufen, wenn der eingehende Tag zu einer
-        ausstehenden Probe gehört."""
+        ACK-Handler aufgerufen, wenn der ack_hash zu einer ausstehenden
+        Probe gehört."""
         from meshcore_bridge.db import CompanionLinkProbe
 
         sent_mono, probe_id, _identity_id, peer_pubkey = pending
-        if sender_pubkey != peer_pubkey:
-            # Unerwartet: Tag matcht, Sender nicht. Ignorieren — Tag ist
-            # 32 bit random; Kollisionen extrem unwahrscheinlich, aber
-            # falls doch, lieber Probe weiter pending lassen als falsch
-            # als ACK markieren.
-            _log.warning(
-                "probe_response_sender_mismatch",
-                tag=tag,
-                expected=peer_pubkey[:4].hex(),
-                got=sender_pubkey[:4].hex(),
-            )
-            self._pending_probes[tag] = pending  # zurücklegen
-            return
         rtt_ms = int((time.monotonic() - sent_mono) * 1000)
         async with self.sessionmaker() as db:
             row = await db.get(CompanionLinkProbe, probe_id)
@@ -1004,7 +1008,7 @@ class CompanionService:
             await db.commit()
         _log.info(
             "link_probe_ack",
-            tag=tag,
+            ack=ack_hash.hex(),
             probe_id=str(probe_id),
             peer=peer_pubkey[:4].hex(),
             rtt_ms=rtt_ms,
@@ -1752,12 +1756,24 @@ class CompanionService:
             return
 
     def _handle_inbound_ack(self, *, pkt: Packet) -> None:
-        """ACK-Frame (4 Byte unverschlüsselter ack_hash). Wenn er zu einer
-        unserer pending DIRECT-DMs passt → Pending-Eintrag entfernen, was
+        """ACK-Frame (4 Byte unverschlüsselter ack_hash). Erst gegen pending
+        Link-Probes prüfen (Stabilitäts-Messung), sonst gegen pending
+        DIRECT-DMs.
+
+        Wenn er zu einer pending DIRECT-DMs passt → Pending-Eintrag entfernen, was
         den Timeout-Task no-op werden lässt (out_path bleibt erhalten)."""
         if len(pkt.payload) != _ACK_HASH_LEN:
             return
         ack_hash = bytes(pkt.payload)
+        # Probe-Pfad zuerst — eigener Tracker, persistiert Stabilitäts-Daten.
+        probe_pending = self._pending_probes.pop(ack_hash, None)
+        if probe_pending is not None:
+            task = asyncio.create_task(
+                self._record_probe_ack(ack_hash=ack_hash, pending=probe_pending)
+            )
+            self._probe_timeout_tasks.add(task)
+            task.add_done_callback(self._probe_timeout_tasks.discard)
+            return
         entry = self._pending_dms.pop(ack_hash, None)
         if entry is None:
             return
@@ -1892,17 +1908,6 @@ class CompanionService:
           * unbekannt → Telemetrie-Fallback (Legacy).
         """
         from meshcore_bridge.db import CompanionContact, CompanionMessage
-
-        # Probe-Pfad zuerst: STATUS-REQs aus ``send_link_probe`` haben einen
-        # eigenen Tracker und sollen NICHT als CompanionMessage-Bubble
-        # persistiert werden. Wenn der Tag dort liegt → Probe-Eintrag
-        # updaten und früh raus.
-        probe_pending = self._pending_probes.pop(tag, None)
-        if probe_pending is not None:
-            await self._record_probe_response(
-                tag=tag, pending=probe_pending, sender_pubkey=sender_pubkey
-            )
-            return
 
         pending = self._pending_reqs.pop(tag, None)
         # Erfolgreicher Receive → Retry-Meta verwerfen, sonst feuert ein
