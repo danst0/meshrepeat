@@ -28,7 +28,7 @@ from typing import TYPE_CHECKING, ClassVar
 from uuid import UUID
 
 import structlog
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meshcore_companion.coords import is_valid_coord
@@ -892,6 +892,10 @@ class CompanionService:
         STATUS-REQ). Probe wird im DM-Verlauf **nicht** als
         ``CompanionMessage`` persistiert; nur ``companion_link_probes``
         wächst. Wenn out_path bekannt → DIRECT, sonst FLOOD.
+
+        Nicht-Chat-Knoten (Repeater=2, Room=3, Sensor=4) werden
+        übersprungen — deren Firmware ACKt keine DMs, das wäre
+        garantierter Loss und Funk-Müll. Liefert in dem Fall ``None``.
         """
         from meshcore_bridge.db import CompanionContact, CompanionLinkProbe
 
@@ -909,6 +913,14 @@ class CompanionService:
                     )
                 )
             ).scalar_one_or_none()
+            if contact is not None and contact.node_type in (2, 3, 4):
+                _log.info(
+                    "link_probe_skipped_non_chat",
+                    identity=loaded.name,
+                    peer=peer_pubkey[:4].hex(),
+                    node_type=contact.node_type,
+                )
+                return None
             if contact is not None and contact.out_path:
                 out_path = contact.out_path
 
@@ -2147,12 +2159,18 @@ class CompanionService:
             while not self._stop.is_set():
                 for loaded in list(self._by_id.values()):
                     async with self.sessionmaker() as db:
+                        # Nur Chat-Knoten (oder unbekannten node_type) proben.
+                        # Repeater/Rooms/Sensors ACKen keine DMs.
                         favs = list(
                             (
                                 await db.execute(
                                     select(CompanionContact.peer_pubkey).where(
                                         CompanionContact.identity_id == loaded.id,
                                         CompanionContact.favorite.is_(True),
+                                        or_(
+                                            CompanionContact.node_type.is_(None),
+                                            CompanionContact.node_type == 1,
+                                        ),
                                     )
                                 )
                             ).scalars()

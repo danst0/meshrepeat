@@ -454,6 +454,62 @@ async def test_reachability_aggregates_per_contact(app_and_outbox) -> None:
 
 
 @pytest.mark.asyncio
+async def test_link_probe_rejects_repeater_node(app_and_outbox) -> None:
+    """Probes auf Repeater (node_type=2) liefern 422 — Repeater-FW ACKt
+    keine DMs, das wäre garantierter Loss + Funkmüll. Kein Eintrag in
+    companion_link_probes."""
+    from meshcore_bridge.db import CompanionLinkProbe
+    from meshcore_companion.crypto import LocalIdentity
+
+    app, sender = app_and_outbox
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://t") as client:
+        ident_id = await _login_and_create_identity(client, sender, email="rej@example.com")
+        ident_uuid = UUID(ident_id)
+        peer = LocalIdentity.generate().pub_key
+
+        async with get_session() as db:
+            db.add(
+                CompanionContact(
+                    identity_id=ident_uuid,
+                    peer_pubkey=peer,
+                    peer_name="Drusilla",
+                    favorite=True,
+                    last_seen_at=datetime.now(UTC),
+                    node_type=2,  # Repeater
+                )
+            )
+            await db.commit()
+
+        r = await client.post(
+            f"/api/v1/companion/identities/{ident_id}/contacts/{peer.hex()}/probe"
+        )
+        assert r.status_code == 422
+        assert "Repeater" in r.json()["detail"]
+
+        async with get_session() as db:
+            from sqlalchemy import select as _sel
+
+            rows = list(
+                (
+                    await db.execute(
+                        _sel(CompanionLinkProbe).where(
+                            CompanionLinkProbe.identity_id == ident_uuid
+                        )
+                    )
+                ).scalars()
+            )
+        assert rows == [], "kein Probe-Eintrag bei Repeater"
+
+        # Reachability-Endpoint flaggt ihn korrekt als non-eligible.
+        r = await client.get(f"/api/v1/companion/identities/{ident_id}/reachability")
+        body = r.json()
+        assert len(body["contacts"]) == 1
+        assert body["contacts"][0]["probe_eligible"] is False
+        assert body["contacts"][0]["node_type"] == 2
+
+
+@pytest.mark.asyncio
 async def test_status_request_endpoint(app_and_outbox) -> None:
     """POST /contacts/{hex}/status: Endpoint funktioniert + Validierung.
     Wir nutzen einen *echten* Ed25519-Pubkey, weil

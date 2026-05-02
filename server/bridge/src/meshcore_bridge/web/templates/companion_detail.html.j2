@@ -133,8 +133,10 @@
         <strong>last seen</strong>: letzter Empfang vom Peer (Advert/Nachricht).
         <strong>out-path</strong>: Direkt-Pfad gelernt = Peer hat uns kürzlich
         bestätigt empfangen. <strong>Probe</strong>: explizite "[probe]"-DM
-        mit ACK-Messung. Loss%/RTT-Median über das gewählte Fenster. Probe
-        kostet Mesh-Bandbreite — gezielt einsetzen.
+        mit ACK-Messung — funktioniert nur bei <em>Chat-Knoten</em>.
+        Repeater/Rooms/Sensoren ACKen keine DMs (n/a). Loss%/RTT-Median
+        über das gewählte Fenster. Probe kostet Mesh-Bandbreite — gezielt
+        einsetzen.
       </p>
       <div id="reach-status" style="color:var(--muted);font-size:.85em;margin-bottom:.5rem"></div>
       <table class="reach-table">

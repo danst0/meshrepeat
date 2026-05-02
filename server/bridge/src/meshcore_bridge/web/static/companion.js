@@ -1335,10 +1335,11 @@
     const winLabel = data.window_hours + "h";
     const ths = document.querySelectorAll(".reach-table thead th");
     if (ths.length >= 4) ths[3].textContent = `Probes (${winLabel})`;
+    const NODE_TYPE_LABEL = {2: "Repeater", 3: "Room", 4: "Sensor"};
     const rows = data.contacts.map(c => {
-      const name = (c.peer_name || shortHex(c.peer_pubkey_hex)) + (c.favorite ? " ⭐" : "");
+      const typeIcon = nodeTypeIcon(c.node_type);
+      const name = typeIcon + (c.peer_name || shortHex(c.peer_pubkey_hex)) + (c.favorite ? " ⭐" : "");
       const seenAge = fmtAge(c.last_seen_at);
-      const seenTier = liveTier(c.last_seen_at);
       let outPath;
       if (c.out_path_known) {
         const hops = c.hop_count != null ? `${c.hop_count} hop${c.hop_count === 1 ? "" : "s"}` : "direct";
@@ -1346,20 +1347,30 @@
       } else {
         outPath = `<span class="reach-pill reach-pill--unknown">flood</span>`;
       }
-      const probesCell = c.probes_total
-        ? `${c.probes_ack}/${c.probes_total}` + (c.probes_pending ? ` <span style="color:var(--muted)">(+${c.probes_pending} pend)</span>` : "")
-        : (c.probes_pending ? `<span style="color:var(--muted)">${c.probes_pending} pend</span>` : "—");
-      let lossCell = "—";
-      if (c.loss_pct != null) {
-        const cls = c.loss_pct >= 50 ? "reach-pill--bad" : c.loss_pct >= 20 ? "reach-pill--warn" : "reach-pill--ok";
-        lossCell = `<span class="reach-pill ${cls}">${c.loss_pct}%</span>`;
-      }
-      const rttCell = c.rtt_ms_median != null ? c.rtt_ms_median + " ms" : "—";
-      let lastProbeCell = "—";
-      if (c.last_probe_status) {
-        const st = c.last_probe_status;
-        const cls = st === "ack" ? "reach-pill--ok" : st === "timeout" ? "reach-pill--bad" : "reach-pill--unknown";
-        lastProbeCell = `<span class="reach-pill ${cls}" title="${st} ${c.last_probe_route || ""}">${fmtAge(c.last_probe_at)}</span>`;
+      let probesCell, lossCell, rttCell, lastProbeCell, actionCell;
+      if (!c.probe_eligible) {
+        // Repeater/Room/Sensor: ACKen keine DMs. Probes-Spalten leer +
+        // Hinweis statt Button.
+        const label = NODE_TYPE_LABEL[c.node_type] || "n/a";
+        probesCell = lossCell = rttCell = lastProbeCell = `<span class="reach-pill reach-pill--unknown" title="${label} ACKt keine DMs">n/a</span>`;
+        actionCell = `<span style="color:var(--muted);font-size:.8em" title="${label} ACKt keine DMs — Probe ist hier nicht aussagekräftig.">${label}</span>`;
+      } else {
+        probesCell = c.probes_total
+          ? `${c.probes_ack}/${c.probes_total}` + (c.probes_pending ? ` <span style="color:var(--muted)">(+${c.probes_pending} pend)</span>` : "")
+          : (c.probes_pending ? `<span style="color:var(--muted)">${c.probes_pending} pend</span>` : "—");
+        lossCell = "—";
+        if (c.loss_pct != null) {
+          const cls = c.loss_pct >= 50 ? "reach-pill--bad" : c.loss_pct >= 20 ? "reach-pill--warn" : "reach-pill--ok";
+          lossCell = `<span class="reach-pill ${cls}">${c.loss_pct}%</span>`;
+        }
+        rttCell = c.rtt_ms_median != null ? c.rtt_ms_median + " ms" : "—";
+        lastProbeCell = "—";
+        if (c.last_probe_status) {
+          const st = c.last_probe_status;
+          const cls = st === "ack" ? "reach-pill--ok" : st === "timeout" ? "reach-pill--bad" : "reach-pill--unknown";
+          lastProbeCell = `<span class="reach-pill ${cls}" title="${st} ${c.last_probe_route || ""}">${fmtAge(c.last_probe_at)}</span>`;
+        }
+        actionCell = `<button type="button" class="reach-probe-btn" data-peer="${c.peer_pubkey_hex}">Probe</button>`;
       }
       return `<tr data-peer="${c.peer_pubkey_hex}">
         <td><a href="#tab=chats&conv=dm:${c.peer_pubkey_hex}" title="${c.peer_pubkey_hex}">${escText(name)}</a></td>
@@ -1369,7 +1380,7 @@
         <td>${lossCell}</td>
         <td>${rttCell}</td>
         <td>${lastProbeCell}</td>
-        <td><button type="button" class="reach-probe-btn" data-peer="${c.peer_pubkey_hex}">Probe</button></td>
+        <td>${actionCell}</td>
       </tr>`;
     });
     tbody.innerHTML = rows.join("");
@@ -1407,10 +1418,10 @@
     try {
       const r = await fetch(`${API}/identities/${IDENTITY_ID}/reachability?hours=${reachWindow()}`);
       const data = await r.json();
-      const favs = data.contacts.filter(c => c.favorite);
+      const favs = data.contacts.filter(c => c.favorite && c.probe_eligible);
       if (!favs.length) {
         const status = document.getElementById("reach-status");
-        if (status) status.textContent = "Keine Favoriten markiert.";
+        if (status) status.textContent = "Keine probe-fähigen Favoriten (Chat-Knoten) markiert.";
         return;
       }
       // Sequenziell mit kleiner Pause, damit das Mesh nicht überfährt.

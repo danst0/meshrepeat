@@ -839,6 +839,22 @@ async def trigger_link_probe(
     Probe-ID; das Ergebnis (ack vs. timeout, rtt_ms) ist asynchron via
     History-Endpoint abrufbar."""
     peer = await _validate_peer_for_request(db, user.id, identity_id, peer_pubkey_hex)
+    # Vor dem Service-Call den node_type checken — bessere Fehlermeldung als
+    # generisches 409, und der Sync-Pfad ohne Service-Roundtrip.
+    contact = (
+        await db.execute(
+            select(CompanionContact).where(
+                CompanionContact.identity_id == identity_id,
+                CompanionContact.peer_pubkey == peer,
+            )
+        )
+    ).scalar_one_or_none()
+    if contact is not None and contact.node_type in (2, 3, 4):
+        kind = {2: "Repeater", 3: "Room", 4: "Sensor"}[contact.node_type]
+        raise HTTPException(
+            status_code=422,
+            detail=f"{kind} ACKt keine DMs — Probe nicht möglich",
+        )
     svc = _service(request)
     if svc is None:
         raise HTTPException(status_code=503, detail="companion-service not running")
@@ -966,12 +982,16 @@ async def identity_reachability(
                 1,
             )
         rtt_median: int | None = ack_rtts[len(ack_rtts) // 2] if ack_rtts else None
+        # Probe = DM mit ACK-Erwartung. Nur Chat-Knoten (1) oder unbekannt
+        # antworten — Repeater (2), Room (3), Sensor (4) ACKen keine DMs.
+        probe_eligible = c.node_type in (None, 1)
         items.append(
             {
                 "peer_pubkey_hex": c.peer_pubkey.hex(),
                 "peer_name": c.peer_name,
                 "favorite": c.favorite,
                 "node_type": c.node_type,
+                "probe_eligible": probe_eligible,
                 "last_seen_at": _ts_iso(c.last_seen_at),
                 "out_path_known": c.out_path is not None,
                 "hop_count": len(c.out_path) if c.out_path else None,
