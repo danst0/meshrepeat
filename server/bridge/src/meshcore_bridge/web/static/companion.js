@@ -113,6 +113,8 @@
     showTab(b.dataset.tab);
     if (b.dataset.tab === "chats") loadThreads();
     else if (b.dataset.tab === "map") ensureMap();
+    else if (b.dataset.tab === "reach") ensureReach();
+    else stopReachAutoRefresh();
   }));
 
   // ---------- State ----------
@@ -1280,7 +1282,170 @@
     return false;
   }
 
-  const VALID_TABS = ["chats", "map", "settings"];
+  // ---------- Erreichbarkeits-Tab ----------
+  let reachTimer = null;
+  let reachLoading = false;
+
+  function fmtAge(iso) {
+    if (!iso) return "—";
+    const ms = Date.now() - new Date(iso).getTime();
+    if (isNaN(ms) || ms < 0) return "—";
+    const s = Math.floor(ms / 1000);
+    if (s < 60) return s + "s";
+    const m = Math.floor(s / 60);
+    if (m < 60) return m + "m";
+    const h = Math.floor(m / 60);
+    if (h < 48) return h + "h";
+    return Math.floor(h / 24) + "d";
+  }
+
+  function reachWindow() {
+    const sel = document.getElementById("reach-window");
+    return sel ? parseInt(sel.value, 10) || 24 : 24;
+  }
+
+  async function loadReach() {
+    if (reachLoading) return;
+    reachLoading = true;
+    const status = document.getElementById("reach-status");
+    const tbody = document.getElementById("reach-tbody");
+    if (!tbody) { reachLoading = false; return; }
+    try {
+      const hours = reachWindow();
+      if (status) status.textContent = "lädt …";
+      const r = await fetch(`${API}/identities/${IDENTITY_ID}/reachability?hours=${hours}`);
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      const data = await r.json();
+      renderReach(data);
+      if (status) status.textContent = `aktualisiert ${fmtTime(data.generated_at)} · ${data.contacts.length} Kontakte`;
+    } catch (e) {
+      if (status) status.textContent = "Fehler: " + e.message;
+    } finally {
+      reachLoading = false;
+    }
+  }
+
+  function renderReach(data) {
+    const tbody = document.getElementById("reach-tbody");
+    if (!tbody) return;
+    if (!data.contacts.length) {
+      tbody.innerHTML = `<tr><td colspan="8" style="color:var(--muted);padding:.5rem">Noch keine Kontakte.</td></tr>`;
+      return;
+    }
+    const winLabel = data.window_hours + "h";
+    const ths = document.querySelectorAll(".reach-table thead th");
+    if (ths.length >= 4) ths[3].textContent = `Probes (${winLabel})`;
+    const rows = data.contacts.map(c => {
+      const name = (c.peer_name || shortHex(c.peer_pubkey_hex)) + (c.favorite ? " ⭐" : "");
+      const seenAge = fmtAge(c.last_seen_at);
+      const seenTier = liveTier(c.last_seen_at);
+      let outPath;
+      if (c.out_path_known) {
+        const hops = c.hop_count != null ? `${c.hop_count} hop${c.hop_count === 1 ? "" : "s"}` : "direct";
+        outPath = `<span class="reach-pill reach-pill--ok" title="gelernt ${fmtDate(c.out_path_updated_at) || ""}">${hops}</span>`;
+      } else {
+        outPath = `<span class="reach-pill reach-pill--unknown">flood</span>`;
+      }
+      const probesCell = c.probes_total
+        ? `${c.probes_ack}/${c.probes_total}` + (c.probes_pending ? ` <span style="color:var(--muted)">(+${c.probes_pending} pend)</span>` : "")
+        : (c.probes_pending ? `<span style="color:var(--muted)">${c.probes_pending} pend</span>` : "—");
+      let lossCell = "—";
+      if (c.loss_pct != null) {
+        const cls = c.loss_pct >= 50 ? "reach-pill--bad" : c.loss_pct >= 20 ? "reach-pill--warn" : "reach-pill--ok";
+        lossCell = `<span class="reach-pill ${cls}">${c.loss_pct}%</span>`;
+      }
+      const rttCell = c.rtt_ms_median != null ? c.rtt_ms_median + " ms" : "—";
+      let lastProbeCell = "—";
+      if (c.last_probe_status) {
+        const st = c.last_probe_status;
+        const cls = st === "ack" ? "reach-pill--ok" : st === "timeout" ? "reach-pill--bad" : "reach-pill--unknown";
+        lastProbeCell = `<span class="reach-pill ${cls}" title="${st} ${c.last_probe_route || ""}">${fmtAge(c.last_probe_at)}</span>`;
+      }
+      return `<tr data-peer="${c.peer_pubkey_hex}">
+        <td><a href="#tab=chats&conv=dm:${c.peer_pubkey_hex}" title="${c.peer_pubkey_hex}">${escText(name)}</a></td>
+        <td><span class="live-dot ${liveClass(c.last_seen_at)}"></span> ${seenAge}</td>
+        <td>${outPath}</td>
+        <td>${probesCell}</td>
+        <td>${lossCell}</td>
+        <td>${rttCell}</td>
+        <td>${lastProbeCell}</td>
+        <td><button type="button" class="reach-probe-btn" data-peer="${c.peer_pubkey_hex}">Probe</button></td>
+      </tr>`;
+    });
+    tbody.innerHTML = rows.join("");
+    tbody.querySelectorAll(".reach-probe-btn").forEach(btn => {
+      btn.addEventListener("click", () => triggerProbe(btn.dataset.peer, btn));
+    });
+  }
+
+  async function triggerProbe(peerHex, btn) {
+    if (!peerHex) return;
+    const orig = btn ? btn.textContent : "";
+    if (btn) { btn.disabled = true; btn.textContent = "…"; }
+    try {
+      const r = await fetch(
+        `${API}/identities/${IDENTITY_ID}/contacts/${peerHex}/probe`,
+        {method: "POST"}
+      );
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      // ACK/timeout kommt asynchron; nach _PROBE_TIMEOUT_S (30s) ist der
+      // Eintrag final. Wir refreshen nach 5s und nochmal nach 35s.
+      setTimeout(loadReach, 5000);
+      setTimeout(loadReach, 35000);
+    } catch (e) {
+      const status = document.getElementById("reach-status");
+      if (status) status.textContent = "Probe-Fehler: " + e.message;
+    } finally {
+      if (btn) { btn.disabled = false; btn.textContent = orig || "Probe"; }
+    }
+  }
+
+  async function probeFavorites() {
+    const btn = document.getElementById("btn-probe-favs");
+    const orig = btn ? btn.textContent : "";
+    if (btn) { btn.disabled = true; btn.textContent = "läuft …"; }
+    try {
+      const r = await fetch(`${API}/identities/${IDENTITY_ID}/reachability?hours=${reachWindow()}`);
+      const data = await r.json();
+      const favs = data.contacts.filter(c => c.favorite);
+      if (!favs.length) {
+        const status = document.getElementById("reach-status");
+        if (status) status.textContent = "Keine Favoriten markiert.";
+        return;
+      }
+      // Sequenziell mit kleiner Pause, damit das Mesh nicht überfährt.
+      for (const c of favs) {
+        await fetch(`${API}/identities/${IDENTITY_ID}/contacts/${c.peer_pubkey_hex}/probe`, {method: "POST"}).catch(() => {});
+        await new Promise(r => setTimeout(r, 800));
+      }
+      setTimeout(loadReach, 5000);
+      setTimeout(loadReach, 35000);
+    } finally {
+      if (btn) { btn.disabled = false; btn.textContent = orig || "Favoriten jetzt proben"; }
+    }
+  }
+
+  function ensureReach() {
+    loadReach();
+    stopReachAutoRefresh();
+    // Kleine Auto-Refresh-Schleife, solange der Tab offen ist.
+    reachTimer = setInterval(loadReach, 30000);
+    const sel = document.getElementById("reach-window");
+    if (sel && !sel.dataset.bound) {
+      sel.dataset.bound = "1";
+      sel.addEventListener("change", loadReach);
+    }
+    const btnFav = document.getElementById("btn-probe-favs");
+    if (btnFav && !btnFav.dataset.bound) {
+      btnFav.dataset.bound = "1";
+      btnFav.addEventListener("click", probeFavorites);
+    }
+  }
+  function stopReachAutoRefresh() {
+    if (reachTimer) { clearInterval(reachTimer); reachTimer = null; }
+  }
+
+  const VALID_TABS = ["chats", "map", "reach", "settings"];
 
   function restoreState() {
     const s = parseHash();
@@ -1301,6 +1466,8 @@
       });
     } else if (tab === "map") {
       ensureMap();
+    } else if (tab === "reach") {
+      ensureReach();
     }
   }
 
@@ -1314,6 +1481,8 @@
     if (VALID_TABS.includes(tab)) {
       showTab(tab);
       if (tab === "map") ensureMap();
+      else if (tab === "reach") ensureReach();
+      else stopReachAutoRefresh();
     }
     if (s.conv) applyConvSpec(s.conv);
   });

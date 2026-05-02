@@ -256,9 +256,7 @@ async def test_link_probe_endpoint_persists_pending_then_acks(app_and_outbox) ->
         ident_id = await _login_and_create_identity(client, sender, email="probe@example.com")
         peer_hex = LocalIdentity.generate().pub_key.hex()
 
-        r = await client.post(
-            f"/api/v1/companion/identities/{ident_id}/contacts/{peer_hex}/probe"
-        )
+        r = await client.post(f"/api/v1/companion/identities/{ident_id}/contacts/{peer_hex}/probe")
         assert r.status_code == 200, r.text
         probe_id = UUID(r.json()["probe_id"])
 
@@ -291,15 +289,168 @@ async def test_link_probe_endpoint_persists_pending_then_acks(app_and_outbox) ->
             assert row.rtt_ms is not None and row.rtt_ms >= 0
             assert row.answered_at is not None
 
-        r = await client.get(
-            f"/api/v1/companion/identities/{ident_id}/contacts/{peer_hex}/probes"
-        )
+        r = await client.get(f"/api/v1/companion/identities/{ident_id}/contacts/{peer_hex}/probes")
         assert r.status_code == 200, r.text
         body = r.json()
         assert body["summary"]["ack"] == 1
         assert body["summary"]["timeout"] == 0
         assert len(body["probes"]) == 1
         assert body["probes"][0]["status"] == "ack"
+
+
+@pytest_asyncio.fixture
+async def app_with_auto_probe(tmp_path: Path):
+    """Wie app_and_outbox, aber mit aktivem Auto-Probe-Loop (1s Intervall)."""
+    cfg = AppConfig()
+    cfg.storage.sqlite_path = tmp_path / "autoprobe.sqlite"
+    cfg.web.signup.require_email_verification = True
+    cfg.web.base_url = "http://t"
+    cfg.db_key = b"\x42" * 32
+    cfg.companion.probe_interval_s = 1
+
+    sender = _RecordingEmailSender()
+    app = build_app(cfg)
+    async with app.router.lifespan_context(app):
+        set_email_sender(sender)
+        yield app, sender
+
+
+@pytest.mark.asyncio
+async def test_auto_probe_loop_probes_favorites(app_with_auto_probe) -> None:
+    """Bei probe_interval_s>0 läuft der Auto-Probe-Worker und schickt
+    DM-Probes an alle Favoriten — erkennbar an einem CompanionLinkProbe-
+    Row und einem registrierten Pending-ack im Service."""
+    from meshcore_bridge.db import CompanionLinkProbe
+    from meshcore_companion.crypto import LocalIdentity
+
+    app, sender = app_with_auto_probe
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://t") as client:
+        ident_id = await _login_and_create_identity(client, sender, email="auto@example.com")
+        ident_uuid = UUID(ident_id)
+
+        # Echte Ed25519-Pubkeys, weil send_link_probe → make_dm →
+        # calc_shared_secret die Curve25519-Konvertierung erzwingt.
+        fav_peer = LocalIdentity.generate().pub_key
+        plain_peer = LocalIdentity.generate().pub_key
+        async with get_session() as db:
+            db.add(
+                CompanionContact(
+                    identity_id=ident_uuid,
+                    peer_pubkey=fav_peer,
+                    peer_name="FavPeer",
+                    favorite=True,
+                    last_seen_at=datetime.now(UTC),
+                )
+            )
+            db.add(
+                CompanionContact(
+                    identity_id=ident_uuid,
+                    peer_pubkey=plain_peer,
+                    peer_name="PlainPeer",
+                    favorite=False,
+                    last_seen_at=datetime.now(UTC),
+                )
+            )
+            await db.commit()
+
+        # Initial-Wartezeit + erster Lauf.
+        await asyncio.sleep(2.0)
+
+        async with get_session() as db:
+            from sqlalchemy import select as _sel
+
+            rows = list(
+                (
+                    await db.execute(
+                        _sel(CompanionLinkProbe).where(
+                            CompanionLinkProbe.identity_id == ident_uuid,
+                        )
+                    )
+                ).scalars()
+            )
+        # Mindestens ein Probe für den Favoriten — evtl. schon mehrere bei
+        # 1s-Intervall, aber NICHT für PlainPeer.
+        fav_probes = [r for r in rows if r.peer_pubkey == fav_peer]
+        plain_probes = [r for r in rows if r.peer_pubkey == plain_peer]
+        assert len(fav_probes) >= 1, "auto-probe sollte Favoriten gepingt haben"
+        assert plain_probes == [], "Nicht-Favoriten dürfen nicht gepingt werden"
+
+
+@pytest.mark.asyncio
+async def test_reachability_aggregates_per_contact(app_and_outbox) -> None:
+    """GET /reachability liefert pro Kontakt last_seen, out_path-Status und
+    Probe-Aggregat (loss%, RTT-Median) im gewählten Fenster."""
+    from meshcore_bridge.db import CompanionContact, CompanionLinkProbe
+
+    app, sender = app_and_outbox
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://t") as client:
+        ident_id = await _login_and_create_identity(client, sender, email="reach@example.com")
+        ident_uuid = UUID(ident_id)
+        peer_a = bytes([0xA1] * 32)
+        peer_b = bytes([0xB2] * 32)
+        now = datetime.now(UTC)
+        async with get_session() as db:
+            db.add(
+                CompanionContact(
+                    identity_id=ident_uuid,
+                    peer_pubkey=peer_a,
+                    peer_name="Alice",
+                    favorite=True,
+                    last_seen_at=now - timedelta(minutes=5),
+                    out_path=b"\x01\x02",
+                    out_path_updated_at=now - timedelta(minutes=10),
+                )
+            )
+            db.add(
+                CompanionContact(
+                    identity_id=ident_uuid,
+                    peer_pubkey=peer_b,
+                    peer_name="Bob",
+                    favorite=False,
+                    last_seen_at=now - timedelta(hours=2),
+                )
+            )
+            for status, rtt in (("ack", 200), ("ack", 400), ("timeout", None)):
+                db.add(
+                    CompanionLinkProbe(
+                        identity_id=ident_uuid,
+                        peer_pubkey=peer_a,
+                        ack_hash=bytes(4),
+                        route_kind="DIRECT",
+                        hop_count=2,
+                        status=status,
+                        rtt_ms=rtt,
+                        sent_at=now - timedelta(minutes=30),
+                        answered_at=now - timedelta(minutes=29) if rtt else None,
+                    )
+                )
+            await db.commit()
+
+        r = await client.get(f"/api/v1/companion/identities/{ident_id}/reachability")
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["window_hours"] == 24
+        assert len(body["contacts"]) == 2
+
+        alice = body["contacts"][0]
+        bob = body["contacts"][1]
+        assert alice["peer_name"] == "Alice"
+        assert alice["favorite"] is True
+        assert alice["out_path_known"] is True
+        assert alice["hop_count"] == 2
+        assert alice["probes_total"] == 3
+        assert alice["probes_ack"] == 2
+        assert alice["probes_timeout"] == 1
+        assert alice["loss_pct"] == pytest.approx(33.3, abs=0.1)
+        assert alice["rtt_ms_median"] == 400  # sorted [200,400], median index 1
+        assert alice["last_probe_status"] in ("ack", "timeout")
+
+        assert bob["peer_name"] == "Bob"
+        assert bob["out_path_known"] is False
+        assert bob["probes_total"] == 0
+        assert bob["loss_pct"] is None
 
 
 @pytest.mark.asyncio

@@ -22,6 +22,7 @@
   <div class="tabs">
     <button class="tab-btn" data-tab="chats">Chats</button>
     <button class="tab-btn" data-tab="map">Karte</button>
+    <button class="tab-btn" data-tab="reach">Erreichbarkeit</button>
     <button class="tab-btn" data-tab="settings">Settings</button>
   </div>
 
@@ -107,6 +108,52 @@
       <div id="telemetry-list" class="telemetry-list">
         <div class="thread-empty" style="color:var(--muted);padding:.5rem">lade …</div>
       </div>
+    </div>
+  </section>
+
+  {# ---------- Erreichbarkeit ---------- #}
+  <section class="tab-panel" data-tab="reach">
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:.5rem;margin-bottom:.5rem">
+        <h2 style="margin:0">Erreichbarkeit</h2>
+        <div style="display:flex;gap:.5rem;align-items:center;flex-wrap:wrap">
+          <label style="font-size:.85em;color:var(--muted)">Fenster
+            <select id="reach-window">
+              <option value="1">1h</option>
+              <option value="6">6h</option>
+              <option value="24" selected>24h</option>
+              <option value="72">72h</option>
+              <option value="168">7d</option>
+            </select>
+          </label>
+          <button type="button" id="btn-probe-favs">Favoriten jetzt proben</button>
+        </div>
+      </div>
+      <p style="font-size:.85em;color:var(--muted);margin-top:0">
+        <strong>last seen</strong>: letzter Empfang vom Peer (Advert/Nachricht).
+        <strong>out-path</strong>: Direkt-Pfad gelernt = Peer hat uns kürzlich
+        bestätigt empfangen. <strong>Probe</strong>: explizite "[probe]"-DM
+        mit ACK-Messung. Loss%/RTT-Median über das gewählte Fenster. Probe
+        kostet Mesh-Bandbreite — gezielt einsetzen.
+      </p>
+      <div id="reach-status" style="color:var(--muted);font-size:.85em;margin-bottom:.5rem"></div>
+      <table class="reach-table">
+        <thead>
+          <tr>
+            <th>Kontakt</th>
+            <th>last seen</th>
+            <th>out-path</th>
+            <th>Probes ({{ '24h' }})</th>
+            <th>Loss</th>
+            <th>RTT med</th>
+            <th>letzte Probe</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody id="reach-tbody">
+          <tr><td colspan="8" style="color:var(--muted);padding:.5rem">lade …</td></tr>
+        </tbody>
+      </table>
     </div>
   </section>
 

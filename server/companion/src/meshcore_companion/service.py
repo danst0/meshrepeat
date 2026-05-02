@@ -171,10 +171,12 @@ class CompanionService:
     inject: PacketInjector | None = None
     notify: EventNotifier | None = None
     advert_interval_s: int = 600
+    probe_interval_s: int = 0
 
     _by_id: dict[UUID, LoadedIdentity] = field(default_factory=dict)
     _by_pubkey: dict[bytes, LoadedIdentity] = field(default_factory=dict)
     _advert_task: asyncio.Task[None] | None = None
+    _probe_task: asyncio.Task[None] | None = None
     _stop: asyncio.Event = field(default_factory=asyncio.Event)
     # Inbound-Dedup: gleiches raw-Paket kommt pro verbundenem Repeater einmal
     # rein. Ohne dedup persistieren wir GRP_TXT/TXT_MSG mehrfach.
@@ -266,15 +268,18 @@ class CompanionService:
 
         self._stop.clear()
         self._advert_task = asyncio.create_task(self._advert_loop())
+        if self.probe_interval_s > 0:
+            self._probe_task = asyncio.create_task(self._probe_loop())
 
     async def stop(self) -> None:
         self._stop.set()
-        if self._advert_task is not None:
-            self._advert_task.cancel()
-            try:
-                await self._advert_task
-            except asyncio.CancelledError:
-                pass
+        for t in (self._advert_task, self._probe_task):
+            if t is not None:
+                t.cancel()
+                try:
+                    await t
+                except asyncio.CancelledError:
+                    pass
 
     def __len__(self) -> int:
         return len(self._by_id)
@@ -575,9 +580,7 @@ class CompanionService:
         self._request_timeout_tasks.add(task)
         task.add_done_callback(self._request_timeout_tasks.discard)
 
-    def _track_pending_dm(
-        self, *, ack_hash: bytes, identity_id: UUID, peer_pubkey: bytes
-    ) -> None:
+    def _track_pending_dm(self, *, ack_hash: bytes, identity_id: UUID, peer_pubkey: bytes) -> None:
         """Trackt eine ausgehende DIRECT-DM gegen ihren erwarteten ACK-Hash
         und spawnt den Invalidations-Timeout-Task."""
         self._pending_dms[ack_hash] = (time.monotonic(), identity_id, peer_pubkey)
@@ -964,9 +967,7 @@ class CompanionService:
             await self.inject(pkt, loaded.scope)
         return probe_id
 
-    async def _timeout_pending_probe(
-        self, *, ack_hash: bytes, probe_id: UUID
-    ) -> None:
+    async def _timeout_pending_probe(self, *, ack_hash: bytes, probe_id: UUID) -> None:
         """Wartet ``_PROBE_TIMEOUT_S`` und schreibt 'timeout', wenn bis dahin
         kein ACK eingetroffen ist (ACK-Empfang räumt den Eintrag aus
         ``_pending_probes`` und macht diesen Task no-op)."""
@@ -981,9 +982,7 @@ class CompanionService:
                 return
             row.status = "timeout"
             await db.commit()
-        _log.info(
-            "link_probe_timeout", ack=ack_hash.hex(), probe_id=str(probe_id)
-        )
+        _log.info("link_probe_timeout", ack=ack_hash.hex(), probe_id=str(probe_id))
 
     async def _record_probe_ack(
         self,
@@ -1046,9 +1045,7 @@ class CompanionService:
 
         ts = int(time.time())
         text_bytes = text.encode("utf-8")
-        pkt = loaded.node.make_dm(
-            peer_pubkey=peer_pubkey, text=text, timestamp=ts, path=out_path
-        )
+        pkt = loaded.node.make_dm(peer_pubkey=peer_pubkey, text=text, timestamp=ts, path=out_path)
         await self._persist_outgoing(loaded, peer_pubkey=peer_pubkey, text=text, raw=pkt.encode())
 
         if out_path:
@@ -2128,6 +2125,59 @@ class CompanionService:
                     break
                 for loaded in list(self._by_id.values()):
                     await self._send_advert(loaded)
+        except asyncio.CancelledError:
+            return
+
+    async def _probe_loop(self) -> None:
+        """Schickt periodisch eine "[probe]"-DM an alle Favoriten-Kontakte
+        jeder geladenen Identity. Ergebnis (ACK/timeout, RTT) landet in
+        ``companion_link_probes`` über den bestehenden ``send_link_probe``-
+        Pfad. Pause vor dem ersten Lauf, damit der Initial-Advert vorher
+        rausgeht und out_paths schon mal gelernt werden konnten.
+        """
+        from meshcore_bridge.db import CompanionContact
+
+        try:
+            # Initial-Pause: erster Lauf erst nach probe_interval_s, nicht
+            # sofort beim Start (wir wollen frische Adverts vorher).
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=self.probe_interval_s)
+            except TimeoutError:
+                pass
+            while not self._stop.is_set():
+                for loaded in list(self._by_id.values()):
+                    async with self.sessionmaker() as db:
+                        favs = list(
+                            (
+                                await db.execute(
+                                    select(CompanionContact.peer_pubkey).where(
+                                        CompanionContact.identity_id == loaded.id,
+                                        CompanionContact.favorite.is_(True),
+                                    )
+                                )
+                            ).scalars()
+                        )
+                    for peer in favs:
+                        if self._stop.is_set():
+                            return
+                        try:
+                            await self.send_link_probe(identity_id=loaded.id, peer_pubkey=peer)
+                        except Exception:
+                            _log.exception(
+                                "auto_probe_failed",
+                                identity=loaded.name,
+                                peer=peer[:4].hex(),
+                            )
+                        # Kleine Pause zwischen Probes, damit wir das Mesh
+                        # nicht in einem Schub volltreten.
+                        try:
+                            await asyncio.wait_for(self._stop.wait(), timeout=2.0)
+                        except TimeoutError:
+                            pass
+                try:
+                    await asyncio.wait_for(self._stop.wait(), timeout=self.probe_interval_s)
+                except TimeoutError:
+                    pass
         except asyncio.CancelledError:
             return
 

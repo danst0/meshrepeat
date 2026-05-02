@@ -169,6 +169,7 @@ def build_app(cfg: AppConfig) -> FastAPI:
                 inject=_inject,
                 notify=companion_events.publish,
                 advert_interval_s=cfg.companion.advert_interval_s,
+                probe_interval_s=cfg.companion.probe_interval_s,
             )
             await companion_service.start()
             app.state.companion_service = companion_service

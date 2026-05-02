@@ -907,6 +907,110 @@ async def list_link_probes(
     return {"summary": summary, "probes": probes}
 
 
+@router.get("/identities/{identity_id}/reachability")
+async def identity_reachability(
+    identity_id: UUID,
+    user: User = Depends(current_user_required),
+    db: AsyncSession = Depends(get_db),
+    hours: int = Query(default=24, ge=1, le=168),
+) -> dict[str, Any]:
+    """Erreichbarkeits-Übersicht: pro Kontakt der Identity ein Eintrag mit
+    last_seen, out_path-Status und Probe-Aggregat über das gewählte
+    Zeitfenster (default 24h). Ein Aufruf statt N — fürs Dashboard.
+
+    Sortierung: Favoriten oben, dann nach Aktualität (last_seen DESC).
+    """
+    if not await _user_owns_identity(db, user.id, identity_id):
+        raise HTTPException(status_code=404)
+
+    contacts = list(
+        (
+            await db.execute(
+                select(CompanionContact)
+                .where(CompanionContact.identity_id == identity_id)
+                .order_by(desc(CompanionContact.last_seen_at))
+            )
+        ).scalars()
+    )
+
+    cutoff = datetime.now(UTC) - timedelta(hours=hours)
+    probes = list(
+        (
+            await db.execute(
+                select(CompanionLinkProbe)
+                .where(
+                    CompanionLinkProbe.identity_id == identity_id,
+                    CompanionLinkProbe.sent_at >= cutoff,
+                )
+                .order_by(desc(CompanionLinkProbe.sent_at))
+            )
+        ).scalars()
+    )
+
+    by_peer: dict[bytes, list[CompanionLinkProbe]] = {}
+    for p in probes:
+        by_peer.setdefault(p.peer_pubkey, []).append(p)
+
+    items: list[dict[str, Any]] = []
+    for c in contacts:
+        plist = by_peer.get(c.peer_pubkey, [])
+        finalized = [p for p in plist if p.status in ("ack", "timeout")]
+        ack_rtts = sorted(
+            p.rtt_ms for p in finalized if p.status == "ack" and p.rtt_ms is not None
+        )
+        last = plist[0] if plist else None
+        loss_pct: float | None = None
+        if finalized:
+            loss_pct = round(
+                100.0 * sum(1 for p in finalized if p.status == "timeout") / len(finalized),
+                1,
+            )
+        rtt_median: int | None = ack_rtts[len(ack_rtts) // 2] if ack_rtts else None
+        items.append(
+            {
+                "peer_pubkey_hex": c.peer_pubkey.hex(),
+                "peer_name": c.peer_name,
+                "favorite": c.favorite,
+                "node_type": c.node_type,
+                "last_seen_at": _ts_iso(c.last_seen_at),
+                "out_path_known": c.out_path is not None,
+                "hop_count": len(c.out_path) if c.out_path else None,
+                "out_path_updated_at": _ts_iso(c.out_path_updated_at),
+                "probes_total": len(finalized),
+                "probes_ack": len(ack_rtts),
+                "probes_timeout": sum(1 for p in finalized if p.status == "timeout"),
+                "probes_pending": sum(1 for p in plist if p.status == "pending"),
+                "loss_pct": loss_pct,
+                "rtt_ms_median": rtt_median,
+                "last_probe_status": last.status if last else None,
+                "last_probe_at": _ts_iso(last.sent_at) if last else None,
+                "last_probe_route": last.route_kind if last else None,
+            }
+        )
+
+    items.sort(
+        key=lambda r: (
+            not r["favorite"],
+            -(_iso_to_epoch(r["last_seen_at"]) or 0.0),
+        )
+    )
+
+    return {
+        "window_hours": hours,
+        "generated_at": _ts_iso(datetime.now(UTC)),
+        "contacts": items,
+    }
+
+
+def _iso_to_epoch(s: str | None) -> float | None:
+    if not s:
+        return None
+    try:
+        return datetime.fromisoformat(s).timestamp()
+    except ValueError:
+        return None
+
+
 @router.get("/identities/{identity_id}/map")
 async def list_identity_map_pins(
     identity_id: UUID,

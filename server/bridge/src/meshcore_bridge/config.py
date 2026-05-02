@@ -79,6 +79,11 @@ class CompanionConfig(BaseModel):
     # 3600s (1 h) wird Antonias Reverse-Path zwischendurch verdrängt und
     # Replies bleiben aus.
     advert_interval_s: int = 600
+    # Auto-Probe-Loop: schickt eine "[probe]"-DM an jeden Favoriten-Kontakt
+    # alle N Sekunden, persistiert ACK/Loss in companion_link_probes. 0 = aus.
+    # Vorsicht: jede Probe ist eine echte LoRa-DM mit ACK — Default lieber
+    # konservativ, der User kann es per app.yaml hochziehen.
+    probe_interval_s: int = 0
 
 
 class StorageConfig(BaseModel):
