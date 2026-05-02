@@ -366,6 +366,21 @@ async def send_channel_message(
 # ---------- Conversations (per identity) ----------
 
 
+def _sort_dm_threads(dms: list[dict[str, Any]]) -> None:
+    """Stable in-place Sort der DM-Sidebar.
+
+    Reihenfolge (innen → außen, jeder Pass stable):
+      1. last_ts DESC
+      2. Kontakte mit echter DM-Historie (last_text != None) zuerst —
+         sonst werden reine Advert-Kontakte mit aktuellerem last_seen vor
+         Kontakte mit älteren, aber echten DMs gemischt.
+      3. Favoriten ganz oben (über beide Gruppen hinweg).
+    """
+    dms.sort(key=lambda t: t["last_ts"] or "", reverse=True)
+    dms.sort(key=lambda t: t["last_text"] is None)  # False (hat DM) zuerst
+    dms.sort(key=lambda t: not t["favorite"])  # False (Favorit) zuerst
+
+
 def _hop_count(raw: bytes | None) -> int | None:
     """Liest die Hop-Anzahl aus dem rohen MeshCore-Paket (path_len // hash_size).
     Eigene Out-Messages, Pakete ohne raw oder dekodier-Fehler → None."""
@@ -499,10 +514,7 @@ async def list_identity_threads(
                 "last_direction": last.direction if last else None,
             }
         )
-    # Reihenfolge: Favoriten zuerst, innerhalb sortiert nach last_ts DESC.
-    # Python sort() ist stable, daher zwei Pässe.
-    dms.sort(key=lambda t: t["last_ts"] or "", reverse=True)
-    dms.sort(key=lambda t: not t["favorite"])  # False sortiert vor True
+    _sort_dm_threads(dms)
 
     chan_rows = []
     for ch in channels:

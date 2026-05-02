@@ -156,6 +156,119 @@ async def test_inbound_grp_txt_dedups_across_hops(service_env) -> None:
 
 
 @pytest.mark.asyncio
+async def test_inbound_grp_txt_fans_out_to_all_identities_with_channel(
+    service_env,
+) -> None:
+    """Zwei Identities im selben Scope mit demselben Channel-Secret
+    (z.B. zwei Companions im Public-Channel): jede Identity muss ihre
+    eigene Inbox-Kopie bekommen, sonst sieht nur die zuerst geladene
+    Identity die Nachricht."""
+    svc, sessionmaker, user_id, _sent = service_env
+
+    a = await svc.add_identity(user_id=user_id, name="Antonia", scope="public")
+    b = await svc.add_identity(user_id=user_id, name="Echobot", scope="public")
+    # add_identity ruft _ensure_public_channel — beide haben jetzt den
+    # echten MeshCore-Public-Channel mit identischem Secret/Hash.
+
+    import base64
+    import hashlib
+
+    real = base64.b64decode("izOH6cXN6mrJ5e26oRXNcg==")
+    secret_padded = real.ljust(32, b"\x00")
+    chash = hashlib.sha256(real).digest()[:1]
+
+    sender = CompanionNode(LocalIdentity.generate())
+    pkt = sender.make_channel_message(
+        channel_secret=secret_padded,
+        channel_hash=chash,
+        text="hello both",
+        sender_name="external",
+        timestamp=7777,
+    )
+    await svc.on_inbound_packet(raw=pkt.encode(), scope="public")
+
+    async with sessionmaker() as db:
+        rows_a = list(
+            (
+                await db.execute(
+                    select(CompanionMessage).where(
+                        CompanionMessage.identity_id == a.id,
+                        CompanionMessage.channel_name == "public",
+                    )
+                )
+            ).scalars()
+        )
+        rows_b = list(
+            (
+                await db.execute(
+                    select(CompanionMessage).where(
+                        CompanionMessage.identity_id == b.id,
+                        CompanionMessage.channel_name == "public",
+                    )
+                )
+            ).scalars()
+        )
+    assert len(rows_a) == 1
+    assert len(rows_b) == 1
+    assert rows_a[0].text == "hello both"
+    assert rows_b[0].text == "hello both"
+
+
+@pytest.mark.asyncio
+async def test_inbound_grp_txt_echo_suppression_per_identity(
+    service_env,
+) -> None:
+    """Bei zwei Identities mit gleichem Public-Channel: ein Post mit
+    sender_name='Antonia' ist Echo aus Antonias Sicht (skip), aber
+    eine *fremde* Nachricht aus Echobots Sicht (persistieren)."""
+    svc, sessionmaker, user_id, _sent = service_env
+
+    a = await svc.add_identity(user_id=user_id, name="Antonia", scope="public")
+    b = await svc.add_identity(user_id=user_id, name="Echobot", scope="public")
+
+    import base64
+    import hashlib
+
+    real = base64.b64decode("izOH6cXN6mrJ5e26oRXNcg==")
+    secret_padded = real.ljust(32, b"\x00")
+    chash = hashlib.sha256(real).digest()[:1]
+
+    sender = CompanionNode(LocalIdentity.generate())
+    pkt = sender.make_channel_message(
+        channel_secret=secret_padded,
+        channel_hash=chash,
+        text="from antonia",
+        sender_name="Antonia",
+        timestamp=8888,
+    )
+    await svc.on_inbound_packet(raw=pkt.encode(), scope="public")
+
+    async with sessionmaker() as db:
+        rows_a = list(
+            (
+                await db.execute(
+                    select(CompanionMessage).where(
+                        CompanionMessage.identity_id == a.id,
+                        CompanionMessage.channel_name == "public",
+                    )
+                )
+            ).scalars()
+        )
+        rows_b = list(
+            (
+                await db.execute(
+                    select(CompanionMessage).where(
+                        CompanionMessage.identity_id == b.id,
+                        CompanionMessage.channel_name == "public",
+                    )
+                )
+            ).scalars()
+        )
+    assert rows_a == []
+    assert len(rows_b) == 1
+
+
+@pytest.mark.asyncio
 async def test_inbound_grp_txt_suppresses_own_echo(service_env) -> None:
     svc, sessionmaker, user_id, _sent = service_env
 

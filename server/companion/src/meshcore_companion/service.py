@@ -1683,45 +1683,51 @@ class CompanionService:
         decoded: IncomingChannelMessage | None = try_decrypt_grp_txt(packet=pkt, channels=pairs)
         if decoded is None:
             return
-        target = next((ch for ch in channels if ch.secret == decoded.channel_secret), None)
-        if target is None:
-            return
-        loaded = self._by_id.get(target.identity_id)
-        if loaded is None:
-            return
-        # Eigene Outbox-Echos best-effort filtern: gleiche Identity, gleicher
-        # sender_name. Channels haben keine kryptographische Sender-Auth.
-        if decoded.sender_name and decoded.sender_name == loaded.name:
+        # Mehrere Identities können denselben Channel (gleiches Secret)
+        # abonniert haben — z.B. zwei Companions im Public-Channel.
+        # Jede Identity bekommt ihre eigene Inbox-Kopie, sonst sieht nur
+        # der erste in der Liste die Nachricht.
+        targets = [ch for ch in channels if ch.secret == decoded.channel_secret]
+        if not targets:
             return
         ts = datetime.fromtimestamp(decoded.timestamp, UTC)
-        async with self.sessionmaker() as db:
-            new_msg = CompanionMessage(
-                identity_id=target.identity_id,
-                direction="in",
-                payload_type=int(PayloadType.GRP_TXT),
-                peer_pubkey=None,
-                peer_name=decoded.sender_name or None,
-                channel_name=target.name,
-                text=decoded.text,
-                raw=raw,
-                ts=ts,
-            )
-            db.add(new_msg)
-            await db.commit()
-            await self._emit(
-                target.identity_id,
-                {
-                    "type": "channel",
-                    "id": str(new_msg.id),
-                    "ts": ts.isoformat(),
-                    "channel_id": str(target.id),
-                    "channel_name": target.name,
-                    "peer_name": decoded.sender_name or None,
-                    "text": decoded.text,
-                    "direction": "in",
-                    "hops": pkt.hop_count,
-                },
-            )
+        for target in targets:
+            loaded = self._by_id.get(target.identity_id)
+            if loaded is None:
+                continue
+            # Eigene Outbox-Echos best-effort filtern: per Identity, da
+            # nur der eigene sender_name als Echo zählt. Channels haben
+            # keine kryptographische Sender-Auth.
+            if decoded.sender_name and decoded.sender_name == loaded.name:
+                continue
+            async with self.sessionmaker() as db:
+                new_msg = CompanionMessage(
+                    identity_id=target.identity_id,
+                    direction="in",
+                    payload_type=int(PayloadType.GRP_TXT),
+                    peer_pubkey=None,
+                    peer_name=decoded.sender_name or None,
+                    channel_name=target.name,
+                    text=decoded.text,
+                    raw=raw,
+                    ts=ts,
+                )
+                db.add(new_msg)
+                await db.commit()
+                await self._emit(
+                    target.identity_id,
+                    {
+                        "type": "channel",
+                        "id": str(new_msg.id),
+                        "ts": ts.isoformat(),
+                        "channel_id": str(target.id),
+                        "channel_name": target.name,
+                        "peer_name": decoded.sender_name or None,
+                        "text": decoded.text,
+                        "direction": "in",
+                        "hops": pkt.hop_count,
+                    },
+                )
 
     async def _handle_inbound_response(self, *, pkt: Packet, scope: str) -> None:
         """RESPONSE auf einen unserer REQs (DIRECT-Variante)."""
