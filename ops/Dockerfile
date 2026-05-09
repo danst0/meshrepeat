@@ -31,7 +31,8 @@ RUN pip install \
     "PyYAML>=6.0" \
     "jinja2>=3.1" \
     "python-multipart>=0.0.9" \
-    "itsdangerous>=2.2"
+    "itsdangerous>=2.2" \
+    "httpx>=0.27"
 
 COPY server/bridge /app/server/bridge
 COPY server/companion /app/server/companion
