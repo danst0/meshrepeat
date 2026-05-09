@@ -86,6 +86,30 @@ class CompanionConfig(BaseModel):
     probe_interval_s: int = 0
 
 
+class TranslationConfig(BaseModel):
+    """Optionale Auto-Übersetzung eingehender Companion-Nachrichten.
+
+    Engine ist ein lokales Ollama (default ``http://localhost:11434``).
+    Bei ``enabled=True`` ruft der CompanionService nach jedem persistierten
+    eingehenden Text einen Hintergrund-Task, der das Result als
+    ``translated_text``/``language`` in companion_messages schreibt und
+    per SSE-Event ``message_translated`` nachreicht. Die clientseitige
+    Anzeige wird im Browser per Checkbox an-/ausgeschaltet.
+    """
+
+    enabled: bool = False
+    base_url: str = "http://localhost:11434"
+    model: str = "llama3.1:8b"
+    target_lang: str = "de"
+    target_lang_label: str = "Deutsch"
+    timeout_s: float = 20.0
+    # Texte unterhalb dieser Länge (z.B. "Thx", "👍") werden nicht übersetzt.
+    min_chars: int = 3
+    # Schutz gegen lange Posts — wir kappen Übersetzung statt das LLM zu
+    # belasten. Mesh-Texte sind eh ≤ ~200 Bytes.
+    max_chars: int = 800
+
+
 class StorageConfig(BaseModel):
     sqlite_path: Path = Path("/data/meshcore.sqlite")
 
@@ -112,6 +136,7 @@ class AppConfig(BaseSettings):
     bridge: BridgeConfig = BridgeConfig()
     web: WebConfig = WebConfig()
     companion: CompanionConfig = CompanionConfig()
+    translation: TranslationConfig = TranslationConfig()
     storage: StorageConfig = StorageConfig()
     logging: LoggingConfig = LoggingConfig()
     metrics: MetricsConfig = MetricsConfig()

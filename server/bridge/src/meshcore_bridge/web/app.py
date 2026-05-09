@@ -47,6 +47,7 @@ from meshcore_bridge.web import (
 from meshcore_bridge.wire import Packet as WirePacket
 from meshcore_companion.packet import Packet as MCPacket
 from meshcore_companion.service import CompanionService
+from meshcore_companion.translator import TranslatorConfig
 
 # Server-rendered Templates zeigen Timestamps in dieser Zeitzone an.
 # UTC-Werte aus der DB werden mit Berlin-Lokalzeit ausgegeben — dezent
@@ -163,6 +164,17 @@ def build_app(cfg: AppConfig) -> FastAPI:
                     except Exception:
                         log.exception("companion_inject_send_failed", site=str(conn.site_id))
 
+            translation_cfg: TranslatorConfig | None = None
+            if cfg.translation.enabled:
+                translation_cfg = TranslatorConfig(
+                    base_url=cfg.translation.base_url,
+                    model=cfg.translation.model,
+                    target_lang=cfg.translation.target_lang,
+                    target_lang_label=cfg.translation.target_lang_label,
+                    timeout_s=cfg.translation.timeout_s,
+                    min_chars=cfg.translation.min_chars,
+                    max_chars=cfg.translation.max_chars,
+                )
             companion_service = CompanionService(
                 master_key=cfg.db_key,
                 sessionmaker=get_session,
@@ -170,6 +182,7 @@ def build_app(cfg: AppConfig) -> FastAPI:
                 notify=companion_events.publish,
                 advert_interval_s=cfg.companion.advert_interval_s,
                 probe_interval_s=cfg.companion.probe_interval_s,
+                translation=translation_cfg,
             )
             await companion_service.start()
             app.state.companion_service = companion_service

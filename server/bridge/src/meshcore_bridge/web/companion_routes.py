@@ -407,6 +407,8 @@ def _message_dict(m: CompanionMessage, *, room_sender_name: str | None = None) -
         "hops": _hop_count(m.raw),
         "room_sender_prefix_hex": (m.room_sender_pubkey.hex() if m.room_sender_pubkey else None),
         "room_sender_name": room_sender_name,
+        "language": m.language,
+        "translated_text": m.translated_text,
     }
 
 
@@ -823,9 +825,7 @@ async def request_contact_status(
     return {"ok": True, "ts": datetime.now(UTC).isoformat()}
 
 
-@router.post(
-    "/identities/{identity_id}/contacts/{peer_pubkey_hex}/probe", response_model=None
-)
+@router.post("/identities/{identity_id}/contacts/{peer_pubkey_hex}/probe", response_model=None)
 async def trigger_link_probe(
     request: Request,
     identity_id: UUID,
@@ -903,9 +903,7 @@ async def list_link_probes(
     ]
     finalized = [p for p in probes if p["status"] in ("ack", "timeout")]
     ack_rtts = sorted(
-        p["rtt_ms"]
-        for p in finalized
-        if p["status"] == "ack" and p["rtt_ms"] is not None
+        p["rtt_ms"] for p in finalized if p["status"] == "ack" and p["rtt_ms"] is not None
     )
     summary: dict[str, Any] = {
         "count": len(finalized),
@@ -971,9 +969,7 @@ async def identity_reachability(
     for c in contacts:
         plist = by_peer.get(c.peer_pubkey, [])
         finalized = [p for p in plist if p.status in ("ack", "timeout")]
-        ack_rtts = sorted(
-            p.rtt_ms for p in finalized if p.status == "ack" and p.rtt_ms is not None
-        )
+        ack_rtts = sorted(p.rtt_ms for p in finalized if p.status == "ack" and p.rtt_ms is not None)
         last = plist[0] if plist else None
         loss_pct: float | None = None
         if finalized:

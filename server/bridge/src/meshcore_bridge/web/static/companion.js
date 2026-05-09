@@ -19,6 +19,10 @@
   const LS_KEY = `meshcore.companion.${IDENTITY_ID}.lastConv`;
   const LS_TAB = `meshcore.companion.${IDENTITY_ID}.lastTab`;
   const LS_UNREAD = `meshcore.companion.${IDENTITY_ID}.unread`;
+  // Globaler Translate-Toggle (alle Identities einer Browser-Session).
+  // Server übersetzt eingehende Nachrichten unabhängig vom Browser; die
+  // Checkbox blendet die deutsche Variante nur ein/aus.
+  const LS_TRANSLATE = "meshcore.companion.translateView";
   const MQ_MOBILE = window.matchMedia("(max-width: 640px)");
 
   // ---------- Hash + LocalStorage state ----------
@@ -138,6 +142,30 @@
   }
   function shortHex(hex, n=8) { return hex ? hex.slice(0,n)+"…" : ""; }
   function escText(s) { const d = document.createElement("div"); d.textContent = s ?? ""; return d.innerHTML; }
+
+  // ISO-639-1 → deutscher Anzeigename. Für unbekannte Codes geben wir den
+  // Code in Großbuchstaben zurück (z.B. "PT-BR" → "PT-BR").
+  const _LANG_LABELS = {
+    nl: "Niederländisch", en: "Englisch", fr: "Französisch", es: "Spanisch",
+    it: "Italienisch", pt: "Portugiesisch", pl: "Polnisch", cs: "Tschechisch",
+    da: "Dänisch", sv: "Schwedisch", no: "Norwegisch", fi: "Finnisch",
+    ru: "Russisch", uk: "Ukrainisch", tr: "Türkisch", el: "Griechisch",
+    ar: "Arabisch", ja: "Japanisch", zh: "Chinesisch", ko: "Koreanisch",
+    de: "Deutsch",
+  };
+  function langLabel(iso) {
+    if (!iso) return "";
+    const k = iso.toLowerCase();
+    return _LANG_LABELS[k] || iso.toUpperCase();
+  }
+
+  // ---------- Translate-Toggle ----------
+  function isTranslateOn() {
+    try { return localStorage.getItem(LS_TRANSLATE) === "1"; } catch (e) { return false; }
+  }
+  function setTranslateOn(on) {
+    try { localStorage.setItem(LS_TRANSLATE, on ? "1" : "0"); } catch (e) {}
+  }
 
   // ADV_TYPE → Icon-Prefix für Sidebar-Einträge.
   // 1=Chat (kein Icon), 2=Repeater, 3=Room, 4=Sensor.
@@ -561,13 +589,51 @@
     const div = document.createElement("div");
     div.className = "message " + cls;
     div.dataset.msgId = m.id;
+    // Original- und Übersetzungs-Text als Datenattribute mitführen, damit
+    // der Translate-Toggle ohne Reload zwischen beiden Varianten wechseln
+    // kann. NULL bleibt leer.
+    if (m.text != null) div.dataset.originalText = m.text;
+    if (m.translated_text) div.dataset.translatedText = m.translated_text;
+    if (m.language) div.dataset.language = m.language;
     if (cls === "system") {
       div.innerHTML = `<div class="msg-text">${escText(m.text || "")} · ${fmtTime(m.ts)}</div>`;
     } else {
       div.innerHTML = `<div class="msg-meta">${escText(who)} · ${fmtDate(m.ts)}${hopsTxt}</div>
                        <div class="msg-text">${escText(m.text || "")}</div>`;
+      _applyTranslationView(div);
     }
     return div;
+  }
+
+  // Wendet den aktuellen Translate-Toggle auf eine einzelne Bubble an.
+  // Wenn Toggle an + Übersetzung vorhanden + Quellsprache != "de", zeigt
+  // sie den deutschen Text und hängt eine Subline "Übersetzt aus X" an.
+  // Sonst Original-Text und keine Subline.
+  function _applyTranslationView(div) {
+    const txt = div.querySelector(".msg-text");
+    if (!txt) return;
+    const original = div.dataset.originalText || "";
+    const translated = div.dataset.translatedText || "";
+    const lang = (div.dataset.language || "").toLowerCase();
+    const want = isTranslateOn() && translated && lang && lang !== "de";
+    txt.innerHTML = escText(want ? translated : original);
+    let sub = div.querySelector(".msg-translation-meta");
+    if (want) {
+      if (!sub) {
+        sub = document.createElement("div");
+        sub.className = "msg-translation-meta";
+        div.appendChild(sub);
+      }
+      sub.textContent = "Übersetzt aus " + langLabel(lang);
+    } else if (sub) {
+      sub.remove();
+    }
+  }
+
+  function applyTranslateToggleAll() {
+    const box = document.getElementById("conv-messages");
+    if (!box) return;
+    box.querySelectorAll(".message").forEach(_applyTranslationView);
   }
 
   function renderMessagesReplace(list) {
@@ -1244,6 +1310,13 @@
       loadThreads();
     } else if (t === "contact_update") {
       loadThreads();
+    } else if (t === "message_translated") {
+      const div = document.querySelector(`[data-msg-id="${evt.id}"]`);
+      if (div) {
+        if (evt.translated_text) div.dataset.translatedText = evt.translated_text;
+        if (evt.language) div.dataset.language = evt.language;
+        _applyTranslationView(div);
+      }
     }
   }
 
@@ -1480,6 +1553,17 @@
     } else if (tab === "reach") {
       ensureReach();
     }
+  }
+
+  // Translate-Toggle initialisieren — Checkbox-State aus LocalStorage,
+  // Change-Listener swappt alle bereits gerenderten Bubbles in-place.
+  const _translateCb = document.getElementById("translate-toggle");
+  if (_translateCb) {
+    _translateCb.checked = isTranslateOn();
+    _translateCb.addEventListener("change", () => {
+      setTranslateOn(_translateCb.checked);
+      applyTranslateToggleAll();
+    });
   }
 
   setInterval(loadThreads, POLL_THREADS_FALLBACK_MS);

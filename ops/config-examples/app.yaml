@@ -47,6 +47,21 @@ companion:
   enabled: true
   advert_interval_s: 3600            # wie oft eine Identity ihren Advert flutet
 
+# Auto-Übersetzung eingehender Companion-Nachrichten (Ollama lokal).
+# Im Browser per Checkbox in der Chat-View an-/ausschaltbar; serverseitig
+# wird übersetzt sobald enabled=true und der Ollama-Endpoint erreichbar
+# ist. Override per Env: MESHCORE_TRANSLATION__ENABLED=true,
+# MESHCORE_TRANSLATION__MODEL=qwen2.5:7b, …
+# translation:
+#   enabled: false
+#   base_url: "http://host.docker.internal:11434"  # cassius: ollama lokal
+#   model: "llama3.1:8b"
+#   target_lang: "de"
+#   target_lang_label: "Deutsch"
+#   timeout_s: 20.0
+#   min_chars: 3
+#   max_chars: 800
+
 storage:
   sqlite_path: "/data/meshcore.sqlite"
   # MESHCORE_DB_KEY_FILE wird via Env-Var aus Docker-Secret geladen

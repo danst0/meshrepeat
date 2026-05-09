@@ -187,6 +187,13 @@ class CompanionMessage(Base):
     ts: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
+    # Auto-Übersetzung (siehe meshcore_companion.translator). Werden lazy
+    # nach Empfang gesetzt; NULL = nie übersetzt (Feature aus oder Skip-
+    # Heuristik). language ist ISO-639-1 (z.B. "nl"), translated_text der
+    # Zieltext (Default: deutsch).
+    language: Mapped[str | None] = mapped_column(String(8))
+    translated_text: Mapped[str | None] = mapped_column(String)
+    translated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     __table_args__ = (Index("ix_companion_messages_identity_ts", "identity_id", "ts"),)
 
@@ -312,9 +319,7 @@ class CompanionLinkProbe(Base):
     # 'pending' beim Anlegen, später 'ack' oder 'timeout'.
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending")
     rtt_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    answered_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    answered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     __table_args__ = (
         Index("ix_companion_link_probes_pair_time", "identity_id", "peer_pubkey", "sent_at"),

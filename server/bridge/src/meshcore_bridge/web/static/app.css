@@ -338,6 +338,25 @@ code, pre {
 }
 .msg-meta { font-size: .75rem; color: var(--muted); margin-bottom: .15rem; }
 .msg-text { white-space: pre-wrap; word-break: break-word; }
+.msg-translation-meta {
+  font-size: .7rem;
+  color: var(--muted);
+  margin-top: .25rem;
+  font-style: italic;
+}
+.translate-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: .25rem;
+  font-size: 1rem;
+  cursor: pointer;
+  user-select: none;
+  padding: 0 .35rem;
+}
+.translate-toggle input {
+  margin: 0;
+  vertical-align: middle;
+}
 .compose-row {
   display: flex;
   gap: .5rem;

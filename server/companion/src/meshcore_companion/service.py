@@ -57,6 +57,7 @@ from meshcore_companion.node import (
 )
 from meshcore_companion.packet import Packet, PayloadType, RouteType
 from meshcore_companion.storage import decrypt_seed, encrypt_seed
+from meshcore_companion.translator import Translation, TranslatorConfig, translate
 
 if TYPE_CHECKING:
     from meshcore_bridge.db import CompanionChannel, CompanionContact
@@ -172,6 +173,10 @@ class CompanionService:
     notify: EventNotifier | None = None
     advert_interval_s: int = 600
     probe_interval_s: int = 0
+    # Wenn gesetzt, werden eingehende Texte (DM, Room-Push, Channel) im
+    # Hintergrund per Ollama übersetzt und per ``message_translated``-SSE
+    # nachgereicht. Persistierung in companion_messages.translated_text.
+    translation: TranslatorConfig | None = None
 
     _by_id: dict[UUID, LoadedIdentity] = field(default_factory=dict)
     _by_pubkey: dict[bytes, LoadedIdentity] = field(default_factory=dict)
@@ -210,6 +215,9 @@ class CompanionService:
     # Kein Retry — Loss soll messbar sein, nicht maskiert.
     _pending_probes: dict[bytes, tuple[float, UUID, UUID, bytes]] = field(default_factory=dict)
     _probe_timeout_tasks: set[asyncio.Task[None]] = field(default_factory=set)
+    # Hintergrund-Tasks für Auto-Übersetzungen. Refs damit GC sie nicht
+    # killt; werden self-removing per Callback nach Abschluss.
+    _translation_tasks: set[asyncio.Task[None]] = field(default_factory=set)
 
     # Echo-Rate-Limit-Parameter. Reply 1 → Cooldown 5 s,
     # 2 → 10, 3 → 20 … gedeckelt bei 300 s. Nach 600 s ohne Reply
@@ -235,6 +243,49 @@ class CompanionService:
             await self.notify(identity_id, event)
         except Exception:
             _log.exception("notify_failed", type=event.get("type"))
+
+    def _schedule_translation(self, *, identity_id: UUID, msg_id: UUID, text: str | None) -> None:
+        """Kickt einen Hintergrund-Task an, der den Text übersetzt, das DB-Row
+        updated und ein ``message_translated``-Event emittiert. No-op, wenn
+        keine Translation-Config oder kein Text vorhanden ist."""
+        if self.translation is None or not text:
+            return
+        task = asyncio.create_task(self._translate_and_publish(identity_id, msg_id, text))
+        self._translation_tasks.add(task)
+        task.add_done_callback(self._translation_tasks.discard)
+
+    async def _translate_and_publish(self, identity_id: UUID, msg_id: UUID, text: str) -> None:
+        """Translator anstoßen, Ergebnis persistieren, SSE-Event schicken."""
+        from meshcore_bridge.db import CompanionMessage
+
+        cfg = self.translation
+        if cfg is None:
+            return
+        try:
+            result: Translation | None = await translate(text, cfg)
+        except Exception:
+            _log.exception("translate_unhandled", msg_id=str(msg_id))
+            return
+        if result is None:
+            return
+        async with self.sessionmaker() as db:
+            row = await db.get(CompanionMessage, msg_id)
+            if row is None:
+                _log.warning("translate_missing_row", msg_id=str(msg_id))
+                return
+            row.language = result.language
+            row.translated_text = result.translated_text
+            row.translated_at = datetime.now(UTC)
+            await db.commit()
+        await self._emit(
+            identity_id,
+            {
+                "type": "message_translated",
+                "id": str(msg_id),
+                "language": result.language,
+                "translated_text": result.translated_text,
+            },
+        )
 
     async def start(self) -> None:
         """DB → Identitäten laden, Advert-Loop starten."""
@@ -280,6 +331,13 @@ class CompanionService:
                     await t
                 except asyncio.CancelledError:
                     pass
+        for ttask in list(self._translation_tasks):
+            ttask.cancel()
+        for ttask in list(self._translation_tasks):
+            try:
+                await ttask
+            except (asyncio.CancelledError, Exception):
+                pass
 
     def __len__(self) -> int:
         return len(self._by_id)
@@ -1462,6 +1520,9 @@ class CompanionService:
                             "hops": pkt.hop_count,
                         },
                     )
+                    self._schedule_translation(
+                        identity_id=loaded.id, msg_id=new_msg.id, text=decoded.text
+                    )
                 else:
                     _log.info(
                         "dm_retry_dedup",
@@ -1630,6 +1691,9 @@ class CompanionService:
                         "hops": pkt.hop_count,
                     },
                 )
+                self._schedule_translation(
+                    identity_id=loaded.id, msg_id=new_msg.id, text=room_post.text
+                )
             else:
                 _log.info(
                     "room_post_retry_dedup",
@@ -1736,6 +1800,11 @@ class CompanionService:
                         "direction": "in",
                         "hops": pkt.hop_count,
                     },
+                )
+                self._schedule_translation(
+                    identity_id=target.identity_id,
+                    msg_id=new_msg.id,
+                    text=decoded.text,
                 )
 
     async def _handle_inbound_response(self, *, pkt: Packet, scope: str) -> None:
