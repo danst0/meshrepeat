@@ -71,18 +71,45 @@ def _should_skip(text: str, *, min_chars: int, max_chars: int) -> bool:
 
 
 def _build_prompt(text: str, target_label: str) -> list[dict[str, str]]:
+    """System-Prompt + Few-Shot-Beispiele.
+
+    Wichtige Erkenntnisse aus Praxis:
+    - Modelle (llama3.1, gemma4:e4b) verschlucken gerne ``@[Name]``-Mentions.
+    - Bei gemischten oder kurzen Texten wird die Quellsprache oft falsch
+      als Zielsprache erkannt → keine Übersetzung trotz NL-Inhalt.
+    Few-Shot-Beispiele heilen beides zuverlässig.
+    """
     system = (
-        "You translate short LoRa mesh chat messages. "
-        f"Target language: {target_label}. "
-        'Reply ONLY as JSON with two fields: {"lang":"<ISO 639-1 of the source>",'
-        '"translated":"<the message in the target language>"}. '
-        "If the source is already in the target language, return "
-        '"translated":"". Do NOT add explanations or quotes.'
+        f"You translate short LoRa mesh chat messages into {target_label}.\n"
+        'Reply ONLY as compact JSON: {"lang":"<ISO 639-1 of source>",'
+        '"translated":"<full translation>"}.\n'
+        "Rules:\n"
+        f"- Translate the WHOLE message into {target_label}, even if part of it "
+        f"already looks like {target_label}.\n"
+        "- Preserve verbatim: @-mentions like '@[Name]', URLs, hex IDs, "
+        "callsigns, numbers, brackets, units (km, Hops, MHz, dB), emoji, "
+        "punctuation around them.\n"
+        f"- If the source is already entirely in {target_label}, set "
+        '"translated":"" (empty string).\n'
+        "- Do NOT add explanations, greetings, prefixes, or quotes around "
+        "the translation."
     )
-    return [
-        {"role": "system", "content": system},
-        {"role": "user", "content": text},
+    examples = [
+        ("Ja Rijssen hier ontvangen met 4 hops",
+         {"lang": "nl", "translated": "Ja, Rijssen hier empfangen mit 4 Hops"}),
+        ("@[CJWinty] afternoon",
+         {"lang": "en", "translated": "@[CJWinty] Nachmittag"}),
+        ("Hoi Jos uit Essen met 3 bzw. 12 Hops",
+         {"lang": "nl", "translated": "Hallo Jos aus Essen mit 3 bzw. 12 Hops"}),
+        ("Guten Morgen!",
+         {"lang": "de", "translated": ""}),
     ]
+    msgs: list[dict[str, str]] = [{"role": "system", "content": system}]
+    for src, out in examples:
+        msgs.append({"role": "user", "content": src})
+        msgs.append({"role": "assistant", "content": json.dumps(out, ensure_ascii=False)})
+    msgs.append({"role": "user", "content": text})
+    return msgs
 
 
 async def translate(text: str, cfg: TranslatorConfig) -> Translation | None:  # noqa: PLR0911
