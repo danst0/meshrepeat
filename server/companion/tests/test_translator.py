@@ -147,3 +147,85 @@ def test_module_logger_present() -> None:
     # _log soll ein structlog-Logger sein, kein None — wird in
     # _parse_ollama_response() bei Fehlern verwendet.
     assert trmod._log is not None
+
+
+# ---- Retry-Pfad: Modell kopiert Quelle als „Übersetzung" ----
+
+
+def _ollama_response(lang: str, translated: str) -> dict:
+    return {
+        "message": {
+            "role": "assistant",
+            "content": json.dumps({"lang": lang, "translated": translated}),
+        }
+    }
+
+
+async def test_first_try_succeeds_does_not_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """V1 echte Übersetzung → kein zweiter HTTP-Call."""
+    calls: list[httpx.Request] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        calls.append(req)
+        return httpx.Response(200, json=_ollama_response("nl", "Wie ist der Chef?"))
+
+    _patch_httpx(monkeypatch, handler)
+
+    res = await translate("Wie is de baas?", _cfg())
+    assert isinstance(res, Translation)
+    assert res.translated_text == "Wie ist der Chef?"
+    assert len(calls) == 1
+
+
+async def test_retry_kicks_in_when_model_echoes_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """V1 spiegelt Quelle → V2 wird gerufen, dessen Ergebnis gewinnt."""
+    calls: list[httpx.Request] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        calls.append(req)
+        if len(calls) == 1:
+            # Modell-Bug: Source als Translation zurückgeben (nur durch
+            # andere Whitespace-Normalisierung, damit der Vergleich noch
+            # zuschlägt).
+            return httpx.Response(200, json=_ollama_response("nl", "Wie  is de baas?"))
+        # V2 mit schlankem Prompt liefert das echte Ergebnis.
+        return httpx.Response(200, json=_ollama_response("nl", "Wie ist der Chef?"))
+
+    _patch_httpx(monkeypatch, handler)
+
+    res = await translate("Wie is de baas?", _cfg())
+    assert isinstance(res, Translation)
+    assert res.language == "nl"
+    assert res.translated_text == "Wie ist der Chef?"
+    assert len(calls) == 2
+
+    # V2 ist Single-Turn (nur 2 Messages: system + user) im Gegensatz zu
+    # V1, das mit Few-Shots viel länger ist.
+    v2_body = json.loads(calls[1].content)
+    assert len(v2_body["messages"]) == 2
+    assert v2_body["messages"][0]["role"] == "system"
+    assert v2_body["messages"][1]["role"] == "user"
+    assert v2_body["messages"][1]["content"] == "Wie is de baas?"
+    # System-Prompt soll Quellsprache als Klartext enthalten.
+    assert "Dutch" in v2_body["messages"][0]["content"]
+
+
+async def test_retry_also_echoes_returns_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Beide Versuche spiegeln die Quelle → keine Übersetzung."""
+    calls: list[httpx.Request] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        calls.append(req)
+        return httpx.Response(200, json=_ollama_response("nl", "Wie is de baas?"))
+
+    _patch_httpx(monkeypatch, handler)
+
+    res = await translate("Wie is de baas?", _cfg())
+    assert res is None
+    assert len(calls) == 2  # genau 1 Retry, kein dritter Versuch

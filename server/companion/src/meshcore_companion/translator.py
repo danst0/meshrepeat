@@ -14,6 +14,11 @@ Design:
   ``lang`` (ISO-639-1) und ``translated``. Wenn das Modell die Sprache
   als Ziel erkennt, gibt es ``translated=""`` zurück → wir behandeln das
   als „keine Übersetzung nötig".
+- Selbstheilung: kleine LLMs (gemma4:e4b o.ä.) kopieren bei
+  Multi-Turn-Few-Shot manchmal die Quelle als „Übersetzung" zurück.
+  Bei Erkennung (translated == source) machen wir genau **einen**
+  zweiten Versuch mit einem schlankeren Single-Turn-Prompt, der die
+  Quellsprache aus V1 nutzt.
 - Jeder unerwartete Fehler (Timeout, 5xx, ungültiges JSON, fehlende
   Felder) führt zu ``None`` und einer Warning. Der Empfangspfad darf
   nie wegen Übersetzung scheitern.
@@ -56,6 +61,28 @@ class TranslatorConfig:
     max_chars: int
 
 
+# Kleine ISO-639-1 → Klartext-Map für den Re-Versuch-Prompt. gemma4 und
+# llama3.1 verstehen den Klartext (Dutch/English/…) deutlich zuverlässiger
+# als nur den Code, gleichzeitig schadet die Code-Erwähnung nicht.
+_LANG_NAMES: dict[str, str] = {
+    "nl": "Dutch",
+    "en": "English",
+    "fr": "French",
+    "es": "Spanish",
+    "it": "Italian",
+    "pt": "Portuguese",
+    "pl": "Polish",
+    "uk": "Ukrainian",
+    "ru": "Russian",
+    "tr": "Turkish",
+}
+
+
+def _normalize(s: str) -> str:
+    """Lowercase + Whitespace-Collapse für robusten Gleichheits-Vergleich."""
+    return " ".join(s.lower().split())
+
+
 def _should_skip(text: str, *, min_chars: int, max_chars: int) -> bool:
     """Heuristische Skip-Liste — bevor wir Ollama anrufen."""
     stripped = text.strip()
@@ -71,13 +98,14 @@ def _should_skip(text: str, *, min_chars: int, max_chars: int) -> bool:
 
 
 def _build_prompt(text: str, target_label: str) -> list[dict[str, str]]:
-    """System-Prompt + Few-Shot-Beispiele.
+    """System-Prompt + Few-Shot-Beispiele (V1-Versuch).
 
     Wichtige Erkenntnisse aus Praxis:
     - Modelle (llama3.1, gemma4:e4b) verschlucken gerne ``@[Name]``-Mentions.
     - Bei gemischten oder kurzen Texten wird die Quellsprache oft falsch
       als Zielsprache erkannt → keine Übersetzung trotz NL-Inhalt.
-    Few-Shot-Beispiele heilen beides zuverlässig.
+    Few-Shot-Beispiele heilen beides zuverlässig — wenn das Modell sie
+    versteht. Wenn nicht, fängt der V2-Pfad in :func:`translate` das ab.
     """
     system = (
         f"You translate short LoRa mesh chat messages into {target_label}.\n"
@@ -95,14 +123,19 @@ def _build_prompt(text: str, target_label: str) -> list[dict[str, str]]:
         "the translation."
     )
     examples = [
-        ("Ja Rijssen hier ontvangen met 4 hops",
-         {"lang": "nl", "translated": "Ja, Rijssen hier empfangen mit 4 Hops"}),
-        ("@[CJWinty] afternoon",
-         {"lang": "en", "translated": "@[CJWinty] Nachmittag"}),
-        ("Hoi Jos uit Essen met 3 bzw. 12 Hops",
-         {"lang": "nl", "translated": "Hallo Jos aus Essen mit 3 bzw. 12 Hops"}),
-        ("Guten Morgen!",
-         {"lang": "de", "translated": ""}),
+        (
+            "Ja Rijssen hier ontvangen met 4 hops",
+            {"lang": "nl", "translated": "Ja, Rijssen hier empfangen mit 4 Hops"},
+        ),
+        (
+            "@[CJWinty] afternoon",
+            {"lang": "en", "translated": "@[CJWinty] Nachmittag"},
+        ),
+        (
+            "Hoi Jos uit Essen met 3 bzw. 12 Hops",
+            {"lang": "nl", "translated": "Hallo Jos aus Essen mit 3 bzw. 12 Hops"},
+        ),
+        ("Guten Morgen!", {"lang": "de", "translated": ""}),
     ]
     msgs: list[dict[str, str]] = [{"role": "system", "content": system}]
     for src, out in examples:
@@ -112,20 +145,38 @@ def _build_prompt(text: str, target_label: str) -> list[dict[str, str]]:
     return msgs
 
 
-async def translate(text: str, cfg: TranslatorConfig) -> Translation | None:  # noqa: PLR0911
-    """Übersetze ``text`` per Ollama. Liefert ``None`` bei Skip oder Fehler.
+def _build_retry_prompt(text: str, *, source_lang: str, target_label: str) -> list[dict[str, str]]:
+    """Schlanker Single-Turn-Prompt für den V2-Versuch.
 
-    Eine Rückgabe ``Translation(language=cfg.target_lang, ...)`` mit
-    *leerem* ``translated_text`` heißt: Quelltext war bereits in der
-    Zielsprache. Das Modul gibt in diesem Fall ``None`` zurück, damit
-    der Aufrufer keinen Subline-Hinweis "Übersetzt aus Deutsch" anzeigt.
+    Kein Few-Shot — manche Modelle (gemma4:e4b) interpretieren das
+    Few-Shot-Schema bei ``format=json`` so, dass sie den letzten
+    User-Turn einfach als „Assistant-Echo" behandeln und die Quelle
+    zurückkopieren. Mit nur System+User klappt's dann oft.
     """
-    if _should_skip(text, min_chars=cfg.min_chars, max_chars=cfg.max_chars):
-        return None
+    name = _LANG_NAMES.get(source_lang.lower(), source_lang.upper())
+    system = (
+        f"Translate the following {name} ({source_lang}) message into "
+        f"{target_label}. Preserve verbatim: @-mentions like '@[Name]', "
+        "URLs, hex IDs, callsigns, numbers, brackets, units, emoji. "
+        "Do NOT echo the source. "
+        'Reply ONLY as JSON: {"lang":"<ISO 639-1>","translated":'
+        f'"<full translation in {target_label}>"}}.'
+    )
+    return [
+        {"role": "system", "content": system},
+        {"role": "user", "content": text},
+    ]
 
+
+async def _translate_once(
+    text: str, cfg: TranslatorConfig, messages: list[dict[str, str]]
+) -> tuple[str, str] | None:
+    """Genau ein Ollama-/api/chat-Roundtrip. Liefert ``(lang, translated)``
+    oder ``None`` bei Fehler. Der Aufrufer entscheidet, ob ein
+    Folge-Versuch sinnvoll ist."""
     payload = {
         "model": cfg.model,
-        "messages": _build_prompt(text, cfg.target_lang_label),
+        "messages": messages,
         "format": "json",
         "stream": False,
         "options": {"temperature": 0.0},
@@ -146,10 +197,27 @@ async def translate(text: str, cfg: TranslatorConfig) -> Translation | None:  # 
         _log.warning("translate_bad_response", url=url, error=str(exc))
         return None
 
-    parsed = _parse_ollama_response(data)
-    if parsed is None:
+    return _parse_ollama_response(data)
+
+
+async def translate(text: str, cfg: TranslatorConfig) -> Translation | None:  # noqa: PLR0911
+    """Übersetze ``text`` per Ollama. Liefert ``None`` bei Skip oder Fehler.
+
+    Macht bis zu **zwei** Ollama-Aufrufe:
+
+    1. Few-Shot-Prompt (gut für Edge-Cases wie @-Mentions in NL/EN-Texten).
+    2. Falls V1 den Source als „Übersetzung" zurückkopiert: Single-Turn-
+       Prompt mit der erkannten Quellsprache. Wenn auch das nicht hilft,
+       gibt's keine Übersetzung — die UI zeigt dann den Originaltext und
+       keine Subline.
+    """
+    if _should_skip(text, min_chars=cfg.min_chars, max_chars=cfg.max_chars):
         return None
-    lang, translated = parsed
+
+    first = await _translate_once(text, cfg, _build_prompt(text, cfg.target_lang_label))
+    if first is None:
+        return None
+    lang, translated = first
     if not translated.strip():
         # Modell sagt: schon in Zielsprache.
         return None
@@ -158,7 +226,40 @@ async def translate(text: str, cfg: TranslatorConfig) -> Translation | None:  # 
         # markiert, aber trotzdem etwas zurückgibt, ist das vermutlich
         # nur eine Wiederholung — wir blenden die "Übersetzung" aus.
         return None
-    return Translation(language=lang.lower(), translated_text=translated.strip())
+    if _normalize(translated) != _normalize(text):
+        return Translation(language=lang.lower(), translated_text=translated.strip())
+
+    # V1 hat die Quelle als Übersetzung gespiegelt — V2 mit schlankem
+    # Single-Turn-Prompt nachschießen.
+    _log.warning(
+        "translate_returned_source",
+        lang=lang,
+        model=cfg.model,
+        preview=text[:80],
+    )
+    second = await _translate_once(
+        text,
+        cfg,
+        _build_retry_prompt(text, source_lang=lang, target_label=cfg.target_lang_label),
+    )
+    if second is None:
+        return None
+    lang2, translated2 = second
+    if not translated2.strip():
+        return None
+    if _normalize(translated2) == _normalize(text):
+        _log.warning(
+            "translate_retry_returned_source",
+            lang=lang,
+            model=cfg.model,
+            preview=text[:80],
+        )
+        return None
+    final_lang = (lang2 or lang).lower()
+    if final_lang == cfg.target_lang.lower():
+        # V2 sagt „schon Zielsprache", widerspricht V1 — vertraue V1.
+        final_lang = lang.lower()
+    return Translation(language=final_lang, translated_text=translated2.strip())
 
 
 def _parse_ollama_response(data: object) -> tuple[str, str] | None:  # noqa: PLR0911
