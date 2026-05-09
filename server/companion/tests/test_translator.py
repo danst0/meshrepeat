@@ -214,6 +214,78 @@ async def test_retry_kicks_in_when_model_echoes_source(
     assert "Dutch" in v2_body["messages"][0]["content"]
 
 
+async def test_translate_strips_mentions_before_llm(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Das LLM bekommt die `@[...]`-Mention gar nicht erst zu sehen — der
+    Translator strippt sie deterministisch und prependet sie hinterher."""
+    seen_inputs: list[str] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        body = json.loads(req.content)
+        seen_inputs.append(body["messages"][-1]["content"])
+        return httpx.Response(
+            200, json=_ollama_response("en", "Guten Abend aus Ost-NL")
+        )
+
+    _patch_httpx(monkeypatch, handler)
+
+    res = await translate("@[Sausage🇬🇧] Good evening from eastern NL", _cfg())
+    assert isinstance(res, Translation)
+    # LLM-Eingabe enthält keine Mention.
+    assert seen_inputs == ["Good evening from eastern NL"]
+    # Ergebnis hat sie wieder vorne.
+    assert res.translated_text == "@[Sausage🇬🇧] Guten Abend aus Ost-NL"
+
+
+async def test_translate_only_mentions_returns_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Nachricht besteht nur aus Mentions → kein LLM-Call, kein Ergebnis."""
+    calls: list[httpx.Request] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        calls.append(req)
+        return httpx.Response(200, json=_ollama_response("en", "..."))
+
+    _patch_httpx(monkeypatch, handler)
+
+    assert await translate("@[Alice] @[Bob]", _cfg()) is None
+    assert calls == []
+
+
+async def test_translate_does_not_duplicate_mention(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Mention bereits in Übersetzung enthalten → keine Doppelung."""
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, json=_ollama_response("en", "@[CJWinty] Nachmittag")
+        )
+
+    _patch_httpx(monkeypatch, handler)
+
+    res = await translate("@[CJWinty] afternoon", _cfg())
+    assert isinstance(res, Translation)
+    assert res.translated_text.count("@[CJWinty]") == 1
+
+
+async def test_translate_restores_multiple_mentions_in_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Mehrere verschluckte Mentions → in Quell-Reihenfolge prepended."""
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=_ollama_response("en", "Hallo zusammen"))
+
+    _patch_httpx(monkeypatch, handler)
+
+    res = await translate("@[Alice] @[Bob] hello all", _cfg())
+    assert isinstance(res, Translation)
+    assert res.translated_text == "@[Alice] @[Bob] Hallo zusammen"
+
+
 async def test_retry_also_echoes_returns_none(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

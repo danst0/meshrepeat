@@ -27,6 +27,7 @@ Design:
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 
 import httpx
@@ -83,6 +84,39 @@ def _normalize(s: str) -> str:
     return " ".join(s.lower().split())
 
 
+_MENTION_RE = re.compile(r"@\[[^\]]+\]")
+
+
+def _strip_mentions(text: str) -> str:
+    """Entferne alle `@[...]`-Mentions und collapse Whitespace.
+
+    Wird vor jedem LLM-Call angewandt: Das Modell sieht die Mentions nie
+    und kann sie folglich nicht verschlucken, umbenennen, oder die Emojis
+    in den Brackets verändern. :func:`_restore_mentions` setzt sie am Ende
+    deterministisch wieder ein.
+    """
+    cleaned = _MENTION_RE.sub("", text)
+    return " ".join(cleaned.split())
+
+
+def _restore_mentions(source: str, translated: str) -> str:
+    """Setze die in :func:`_strip_mentions` entfernten `@[...]`-Mentions
+    in Quell-Reihenfolge wieder vor die Übersetzung.
+
+    In Mesh-Chat stehen Mentions fast immer am Satzanfang ("@[Foo] hi"),
+    daher ist Voranstellen die natürliche Rekonstruktion. Sollte das LLM
+    eine Mention halluzinieren (es sieht sie nie, aber Sicherheitsnetz),
+    werden bereits enthaltene Mentions nicht doppelt prepended.
+    """
+    src_mentions = _MENTION_RE.findall(source)
+    if not src_mentions:
+        return translated
+    missing = [m for m in src_mentions if m not in translated]
+    if not missing:
+        return translated
+    return " ".join(missing) + " " + translated.lstrip()
+
+
 def _should_skip(text: str, *, min_chars: int, max_chars: int) -> bool:
     """Heuristische Skip-Liste — bevor wir Ollama anrufen."""
     stripped = text.strip()
@@ -100,12 +134,11 @@ def _should_skip(text: str, *, min_chars: int, max_chars: int) -> bool:
 def _build_prompt(text: str, target_label: str) -> list[dict[str, str]]:
     """System-Prompt + Few-Shot-Beispiele (V1-Versuch).
 
-    Wichtige Erkenntnisse aus Praxis:
-    - Modelle (llama3.1, gemma4:e4b) verschlucken gerne ``@[Name]``-Mentions.
-    - Bei gemischten oder kurzen Texten wird die Quellsprache oft falsch
-      als Zielsprache erkannt → keine Übersetzung trotz NL-Inhalt.
-    Few-Shot-Beispiele heilen beides zuverlässig — wenn das Modell sie
-    versteht. Wenn nicht, fängt der V2-Pfad in :func:`translate` das ab.
+    `@[Name]`-Mentions werden vor dem Aufruf via :func:`_strip_mentions`
+    entfernt — das LLM sieht sie nie. Der Prompt muss also keine
+    Mention-Regel enthalten und die Few-Shots zeigen die zentralen
+    bisherigen Stolperfallen: niederländische Compound-Ortsnamen,
+    Provinz-Abkürzungen, Sprachidentifikation kurzer Texte.
     """
     system = (
         f"You translate short LoRa mesh chat messages into {target_label}.\n"
@@ -114,9 +147,16 @@ def _build_prompt(text: str, target_label: str) -> list[dict[str, str]]:
         "Rules:\n"
         f"- Translate the WHOLE message into {target_label}, even if part of it "
         f"already looks like {target_label}.\n"
-        "- Preserve verbatim: @-mentions like '@[Name]', URLs, hex IDs, "
-        "callsigns, numbers, brackets, units (km, Hops, MHz, dB), emoji, "
-        "punctuation around them.\n"
+        "- Preserve verbatim: URLs, hex IDs, callsigns, numbers, brackets, "
+        "units (km, Hops, MHz, dB), emoji, punctuation around them.\n"
+        "- Keep Dutch compound place names together (e.g. 'Noordwijk Binnen', "
+        "'Noordwijk aan Zee', 'Bergen aan Zee', 'Alphen aan den Rijn', "
+        "'Den Haag'). Words like 'binnen', 'buiten', 'aan Zee', 'aan den Rijn' "
+        "next to a town name are PART of the name, NOT prepositions. "
+        "Capitalize them properly even if the source is lowercase.\n"
+        "- Dutch province abbreviations after a place name (NH, ZH, NB, GLD, "
+        "UT, OV, FR, GR, DR, FL, LB, ZL) stay uppercase and get a comma "
+        "before them: 'noordwijk binnen zh' → 'Noordwijk-Binnen, ZH'.\n"
         f"- If the source is already entirely in {target_label}, set "
         '"translated":"" (empty string).\n'
         "- Do NOT add explanations, greetings, prefixes, or quotes around "
@@ -128,12 +168,15 @@ def _build_prompt(text: str, target_label: str) -> list[dict[str, str]]:
             {"lang": "nl", "translated": "Ja, Rijssen hier empfangen mit 4 Hops"},
         ),
         (
-            "@[CJWinty] afternoon",
-            {"lang": "en", "translated": "@[CJWinty] Nachmittag"},
-        ),
-        (
             "Hoi Jos uit Essen met 3 bzw. 12 Hops",
             {"lang": "nl", "translated": "Hallo Jos aus Essen mit 3 bzw. 12 Hops"},
+        ),
+        (
+            "Goedenavond allemaal vanuit noordwijk binnen zh",
+            {
+                "lang": "nl",
+                "translated": "Guten Abend zusammen aus Noordwijk-Binnen, ZH",
+            },
         ),
         ("Guten Morgen!", {"lang": "de", "translated": ""}),
     ]
@@ -203,18 +246,34 @@ async def _translate_once(
 async def translate(text: str, cfg: TranslatorConfig) -> Translation | None:  # noqa: PLR0911
     """Übersetze ``text`` per Ollama. Liefert ``None`` bei Skip oder Fehler.
 
-    Macht bis zu **zwei** Ollama-Aufrufe:
+    Ablauf:
 
-    1. Few-Shot-Prompt (gut für Edge-Cases wie @-Mentions in NL/EN-Texten).
-    2. Falls V1 den Source als „Übersetzung" zurückkopiert: Single-Turn-
-       Prompt mit der erkannten Quellsprache. Wenn auch das nicht hilft,
+    1. ``@[...]``-Mentions deterministisch via :func:`_strip_mentions`
+       entfernen — das LLM sieht sie nie und kann sie folglich nicht
+       verschlucken oder beschädigen (kleine Modelle wie llama3.1:8b oder
+       gemma4:e4b haben das trotz expliziter Prompt-Regel zuverlässig
+       unzuverlässig getan, gerade bei Mentions mit Emoji/Flags wie
+       ``@[Sausage🇬🇧]``).
+    2. Few-Shot-Prompt auf dem bereinigten Text.
+    3. Falls V1 den Source als „Übersetzung" zurückkopiert: Single-Turn-
+       Retry mit der erkannten Quellsprache. Wenn auch das nicht hilft,
        gibt's keine Übersetzung — die UI zeigt dann den Originaltext und
        keine Subline.
+    4. :func:`_restore_mentions` setzt die in Schritt 1 entfernten
+       Mentions in Quell-Reihenfolge wieder vor die Übersetzung.
     """
     if _should_skip(text, min_chars=cfg.min_chars, max_chars=cfg.max_chars):
         return None
 
-    first = await _translate_once(text, cfg, _build_prompt(text, cfg.target_lang_label))
+    payload = _strip_mentions(text)
+    # Wenn nach dem Strippen nichts Übersetzbares mehr da ist (z. B. eine
+    # Nachricht, die nur aus einer Mention bestand), kein LLM-Call.
+    if _should_skip(payload, min_chars=cfg.min_chars, max_chars=cfg.max_chars):
+        return None
+
+    first = await _translate_once(
+        payload, cfg, _build_prompt(payload, cfg.target_lang_label)
+    )
     if first is None:
         return None
     lang, translated = first
@@ -226,8 +285,11 @@ async def translate(text: str, cfg: TranslatorConfig) -> Translation | None:  # 
         # markiert, aber trotzdem etwas zurückgibt, ist das vermutlich
         # nur eine Wiederholung — wir blenden die "Übersetzung" aus.
         return None
-    if _normalize(translated) != _normalize(text):
-        return Translation(language=lang.lower(), translated_text=translated.strip())
+    if _normalize(translated) != _normalize(payload):
+        return Translation(
+            language=lang.lower(),
+            translated_text=_restore_mentions(text, translated.strip()),
+        )
 
     # V1 hat die Quelle als Übersetzung gespiegelt — V2 mit schlankem
     # Single-Turn-Prompt nachschießen.
@@ -235,31 +297,34 @@ async def translate(text: str, cfg: TranslatorConfig) -> Translation | None:  # 
         "translate_returned_source",
         lang=lang,
         model=cfg.model,
-        preview=text[:80],
+        preview=payload[:80],
     )
     second = await _translate_once(
-        text,
+        payload,
         cfg,
-        _build_retry_prompt(text, source_lang=lang, target_label=cfg.target_lang_label),
+        _build_retry_prompt(payload, source_lang=lang, target_label=cfg.target_lang_label),
     )
     if second is None:
         return None
     lang2, translated2 = second
     if not translated2.strip():
         return None
-    if _normalize(translated2) == _normalize(text):
+    if _normalize(translated2) == _normalize(payload):
         _log.warning(
             "translate_retry_returned_source",
             lang=lang,
             model=cfg.model,
-            preview=text[:80],
+            preview=payload[:80],
         )
         return None
     final_lang = (lang2 or lang).lower()
     if final_lang == cfg.target_lang.lower():
         # V2 sagt „schon Zielsprache", widerspricht V1 — vertraue V1.
         final_lang = lang.lower()
-    return Translation(language=final_lang, translated_text=translated2.strip())
+    return Translation(
+        language=final_lang,
+        translated_text=_restore_mentions(text, translated2.strip()),
+    )
 
 
 def _parse_ollama_response(data: object) -> tuple[str, str] | None:  # noqa: PLR0911
