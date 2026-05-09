@@ -624,7 +624,7 @@
         sub.className = "msg-translation-meta";
         div.appendChild(sub);
       }
-      sub.textContent = "Übersetzt aus " + langLabel(lang);
+      sub.textContent = original;
     } else if (sub) {
       sub.remove();
     }

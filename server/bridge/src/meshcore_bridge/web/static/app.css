@@ -342,7 +342,8 @@ code, pre {
   font-size: .7rem;
   color: var(--muted);
   margin-top: .25rem;
-  font-style: italic;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 .translate-toggle {
   display: inline-flex;
