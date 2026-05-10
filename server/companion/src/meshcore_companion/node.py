@@ -192,8 +192,15 @@ class CompanionNode:
         timestamp: int | None = None,
         app_data: bytes = b"",
         flood: bool = True,
+        hash_size: int = 1,
     ) -> Packet:
-        """Erzeugt einen ADVERT-Packet, signiert mit unserer Identity."""
+        """Erzeugt einen ADVERT-Packet, signiert mit unserer Identity.
+
+        ``hash_size`` (1..3, default 1) bestimmt das hash_size-Feld im
+        ``path_len``-Byte. Repeater >= v1.14 hängen ihre Path-IDs in
+        dieser Größe an; v1.13 droppt 2-/3-Byte-Adverts (siehe
+        firmware faq.md §3.9).
+        """
         ts = timestamp if timestamp is not None else int(time.time())
         adv = Advert(pubkey=self.pub_key, timestamp=ts, app_data=app_data)
         adv.signature = self.local.sign(adv.signed_message)
@@ -201,6 +208,7 @@ class CompanionNode:
             route_type=RouteType.FLOOD if flood else RouteType.DIRECT,
             payload_type=PayloadType.ADVERT,
             payload=adv.encode(),
+            hash_size=hash_size,
         )
 
     # ---------- DM (TXT_MSG) ----------
@@ -213,6 +221,7 @@ class CompanionNode:
         timestamp: int | None = None,
         flood: bool = True,
         path: bytes = b"",
+        hash_size: int = 1,
     ) -> Packet:
         """Verschlüsselte Direktnachricht an ``peer_pubkey``.
 
@@ -226,6 +235,12 @@ class CompanionNode:
         wie sie aus einem zuvor empfangenen PATH-Return gelernt wurden.
         Sonst wird FLOOD verwendet (``flood`` steuert, ob bei leerem
         path FLOOD oder DIRECT ohne Pfad geschickt wird).
+
+        ``hash_size`` (1..3, default 1) bestimmt das hash_size-Feld im
+        ``path_len``-Byte für FLOOD-DMs — Repeater >= v1.14 hängen ihre
+        Path-IDs in dieser Größe an. Bei DIRECT mit nicht-leerem
+        ``path`` muss die Größe zur Pfad-Bytelänge passen; das ist
+        Sache des Aufrufers (heute: gelernte Out-Paths sind 1-Byte).
         """
         ts = timestamp if timestamp is not None else int(time.time())
         secret = self.local.calc_shared_secret(peer_pubkey)
@@ -243,11 +258,13 @@ class CompanionNode:
                 payload_type=PayloadType.TXT_MSG,
                 payload=body,
                 path=path,
+                hash_size=hash_size,
             )
         return Packet(
             route_type=RouteType.FLOOD if flood else RouteType.DIRECT,
             payload_type=PayloadType.TXT_MSG,
             payload=body,
+            hash_size=hash_size,
         )
 
     def try_decrypt_dm(
@@ -572,12 +589,18 @@ class CompanionNode:
         sender_name: str | None = None,
         timestamp: int | None = None,
         flood: bool = True,
+        hash_size: int = 1,
     ) -> Packet:
         """Erzeugt einen verschlüsselten GRP_TXT-Channel-Post.
 
         ``channel_secret`` ist das 32-Byte-Symmetric-Secret des Channels,
         ``channel_hash`` das 1-Byte-Routing-Prefix (üblicherweise
         ``sha256(secret)[:1]``).
+
+        ``hash_size`` (1..3, default 1) bestimmt das hash_size-Feld im
+        ``path_len``-Byte — Repeater >= v1.14 hängen ihre Path-IDs in
+        dieser Größe an. Der ``channel_hash``-Prefix in der Payload bleibt
+        immer 1 Byte (Wire-Spec v1).
         """
         if len(channel_hash) < PATH_HASH_SIZE:
             raise ValueError("channel_hash must be at least 1 byte")
@@ -595,6 +618,7 @@ class CompanionNode:
             route_type=RouteType.FLOOD if flood else RouteType.DIRECT,
             payload_type=PayloadType.GRP_TXT,
             payload=payload,
+            hash_size=hash_size,
         )
 
     # ---------- ACK (PAYLOAD_TYPE_ACK = 0x03) ----------

@@ -44,6 +44,31 @@ def test_make_channel_message_wire_format() -> None:
     assert (len(rest) - 2) % 16 == 0
 
 
+def test_make_channel_message_propagates_hash_size() -> None:
+    """hash_size=2 setzt nur das path_len_byte; channel_hash in der Payload
+    bleibt 1-Byte (Wire-Spec v1)."""
+    secret = derive_channel_secret("public", "public")
+    chash = _channel_hash(secret)
+    alice = CompanionNode(LocalIdentity.generate())
+    pkt = alice.make_channel_message(
+        channel_secret=secret,
+        channel_hash=chash,
+        text="hi",
+        sender_name="alice",
+        timestamp=1,
+        hash_size=2,
+    )
+    assert pkt.hash_size == 2
+    assert pkt.payload[:1] == chash  # weiterhin 1-Byte
+    raw = pkt.encode()
+    assert raw[1] == 0x40  # (2-1)<<6 | 0
+    # Decode + Decrypt funktioniert weiterhin (Payload-Layout unverändert).
+    decoded_pkt = Packet.decode(raw)
+    assert decoded_pkt.hash_size == 2
+    msg = try_decrypt_grp_txt(packet=decoded_pkt, channels=[(chash, secret)])
+    assert msg is not None and msg.text == "hi"
+
+
 def test_channel_message_roundtrip_decrypt() -> None:
     secret = derive_channel_secret("alpha", "secret")
     chash = _channel_hash(secret)

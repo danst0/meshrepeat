@@ -148,10 +148,19 @@ class LoadedIdentity:
     scope: str
     node: CompanionNode
     is_echo: bool = False
+    # 0/1/2 → 1-/2-/3-Byte path-hash für FLOOD-Pakete dieser Identity
+    # (DM, GRP_TXT, eigene Adverts). Konvention identisch zu firmware
+    # ``set path.hash.mode``.
+    path_hash_mode: int = 0
 
     @property
     def pubkey(self) -> bytes:
         return self.node.pub_key
+
+    @property
+    def hash_size(self) -> int:
+        """``hash_size``-Wert (1..3) für ausgehende FLOOD-Pakete."""
+        return self.path_hash_mode + 1
 
 
 @dataclass
@@ -365,6 +374,7 @@ class CompanionService:
                     scope=row.scope,
                     node=CompanionNode(local),
                     is_echo=row.is_echo,
+                    path_hash_mode=row.path_hash_mode,
                 )
                 self._by_id[row.id] = loaded
                 self._by_pubkey[loaded.pubkey] = loaded
@@ -414,10 +424,13 @@ class CompanionService:
         name: str,
         scope: str,
         is_echo: bool = False,
+        path_hash_mode: int = 0,
     ) -> LoadedIdentity:
         """Erzeugt eine neue Identity, persistiert sie verschlüsselt."""
         from meshcore_bridge.db import CompanionIdentity
 
+        if path_hash_mode not in (0, 1, 2):
+            raise ValueError(f"path_hash_mode must be 0, 1, or 2, got {path_hash_mode}")
         local = LocalIdentity.generate()
         async with self.sessionmaker() as db:
             row = CompanionIdentity(
@@ -427,6 +440,7 @@ class CompanionService:
                 privkey_enc=b"",  # placeholder, replaced below
                 scope=scope,
                 is_echo=is_echo,
+                path_hash_mode=path_hash_mode,
             )
             db.add(row)
             await db.flush()
@@ -441,6 +455,7 @@ class CompanionService:
             scope=scope,
             node=CompanionNode(local),
             is_echo=is_echo,
+            path_hash_mode=path_hash_mode,
         )
         self._by_id[row_id] = loaded
         self._by_pubkey[loaded.pubkey] = loaded
@@ -496,6 +511,31 @@ class CompanionService:
         if loaded is not None:
             loaded.is_echo = enabled
         _log.info("is_echo_toggled", identity_id=str(identity_id), enabled=enabled)
+        return True
+
+    async def set_path_hash_mode(self, identity_id: UUID, mode: int) -> bool:
+        """Setzt ``path_hash_mode`` (0/1/2) für eine Identity in DB +
+        In-Memory. Wirkt sofort auf neue ausgehende Pakete (FLOOD-DM,
+        GRP_TXT, Adverts).
+        """
+        if mode not in (0, 1, 2):
+            raise ValueError(f"path_hash_mode must be 0, 1, or 2, got {mode}")
+        from meshcore_bridge.db import CompanionIdentity
+
+        async with self.sessionmaker() as db:
+            row = await db.get(CompanionIdentity, identity_id)
+            if row is None or row.archived_at is not None:
+                return False
+            row.path_hash_mode = mode
+            await db.commit()
+        loaded = self._by_id.get(identity_id)
+        if loaded is not None:
+            loaded.path_hash_mode = mode
+        _log.info(
+            "path_hash_mode_set",
+            identity_id=str(identity_id),
+            mode=mode,
+        )
         return True
 
     async def delete_channel(self, channel_id: UUID) -> bool:
@@ -1175,7 +1215,16 @@ class CompanionService:
 
         ts = int(time.time())
         text_bytes = text.encode("utf-8")
-        pkt = loaded.node.make_dm(peer_pubkey=peer_pubkey, text=text, timestamp=ts, path=out_path)
+        # FLOOD nutzt das Identity-Setting; DIRECT muss zur Bytelänge des
+        # gelernten Pfades passen — Out-Paths sind heute 1-Byte/Hop.
+        dm_hash_size = 1 if out_path else loaded.hash_size
+        pkt = loaded.node.make_dm(
+            peer_pubkey=peer_pubkey,
+            text=text,
+            timestamp=ts,
+            path=out_path,
+            hash_size=dm_hash_size,
+        )
         await self._persist_outgoing(loaded, peer_pubkey=peer_pubkey, text=text, raw=pkt.encode())
 
         if out_path:
@@ -1364,6 +1413,7 @@ class CompanionService:
             channel_hash=chan_hash,
             text=text,
             sender_name=loaded.name,
+            hash_size=loaded.hash_size,
         )
         raw = pkt.encode()
 
@@ -2455,6 +2505,7 @@ class CompanionService:
         pkt = loaded.node.make_advert(
             timestamp=int(time.time()),
             app_data=app_data,
+            hash_size=loaded.hash_size,
         )
         raw = pkt.encode()
         _log.info(

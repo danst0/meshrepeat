@@ -65,6 +65,57 @@ def test_packet_decode_rejects_reserved_hash_size() -> None:
         Packet.decode(raw)
 
 
+def test_packet_2byte_hash_roundtrip() -> None:
+    """hash_size=2: path_len_byte oberen 2 Bits = 0b01."""
+    p = Packet(
+        route_type=RouteType.FLOOD,
+        payload_type=PayloadType.TXT_MSG,
+        hash_size=2,
+        path=bytes([0x11, 0x22, 0x33, 0x44]),
+        payload=b"\xff",
+    )
+    raw = p.encode()
+    # path_len-Byte ist Index 1 (kein transport_codes bei FLOOD)
+    assert raw[1] == 0b01_000010, f"expected 0x42, got {raw[1]:#04x}"
+    decoded = Packet.decode(raw)
+    assert decoded.hash_size == 2
+    assert decoded.hop_count == 2
+    assert decoded.path == bytes([0x11, 0x22, 0x33, 0x44])
+
+
+def test_packet_3byte_hash_roundtrip() -> None:
+    p = Packet(
+        route_type=RouteType.FLOOD,
+        payload_type=PayloadType.GRP_TXT,
+        hash_size=3,
+        path=bytes(range(9)),  # 3 Hops à 3 Byte
+        payload=b"X",
+    )
+    raw = p.encode()
+    assert raw[1] == 0b10_000011, f"expected 0x83, got {raw[1]:#04x}"
+    decoded = Packet.decode(raw)
+    assert decoded.hash_size == 3
+    assert decoded.hop_count == 3
+    assert decoded.path == bytes(range(9))
+
+
+def test_packet_hash_size_signal_with_empty_path() -> None:
+    """Häufigster Companion-Fall: leerer Path, aber Multi-Byte-Signal an
+    Repeater. path_len_byte = (hash_size-1) << 6, hop_count=0."""
+    for hash_size, expected in ((1, 0x00), (2, 0x40), (3, 0x80)):
+        p = Packet(
+            route_type=RouteType.FLOOD,
+            payload_type=PayloadType.ADVERT,
+            hash_size=hash_size,
+            payload=b"data",
+        )
+        raw = p.encode()
+        assert raw[1] == expected
+        decoded = Packet.decode(raw)
+        assert decoded.hash_size == hash_size
+        assert decoded.path == b""
+
+
 def test_packet_add_path_hash_grows_path() -> None:
     p = Packet(hash_size=1)
     p.add_path_hash(b"\xab")

@@ -27,7 +27,7 @@ async def test_fresh_db_creates_tables_and_stamps_head(tmp_path: Path) -> None:
         assert "companion_messages" in tables
         assert "alembic_version" in tables
         head = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
-        assert head == "e4b8d5c2f1a9"
+        assert head == "f5c1d8a3b2e7"
         cols = {r[1] for r in conn.execute("PRAGMA table_info(companion_contacts)")}
         assert "node_type" in cols
         msg_cols = {r[1] for r in conn.execute("PRAGMA table_info(companion_messages)")}
@@ -66,7 +66,7 @@ async def test_legacy_db_gets_patched_and_stamped(tmp_path: Path) -> None:
         msg_cols = {r[1] for r in conn.execute("PRAGMA table_info(companion_messages)")}
         assert "room_sender_pubkey" in msg_cols
         head = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
-        assert head == "e4b8d5c2f1a9"
+        assert head == "f5c1d8a3b2e7"
 
 
 @pytest.mark.asyncio
@@ -78,10 +78,10 @@ async def test_alembic_managed_db_runs_upgrade(tmp_path: Path) -> None:
     from meshcore_bridge.db.session import _alembic_config
 
     db = tmp_path / "managed.sqlite"
-    # Wir erzeugen die DB sauber per alembic upgrade bis zur
-    # vor-letzten Revision.
+    # Wir erzeugen die DB sauber per alembic upgrade bis zu einer
+    # älteren Revision (vor diversen Spalten-Migrationen).
     cfg = _alembic_config(db)
-    command.upgrade(cfg, "d7e2a9c1f4b8")  # eine Revision vor head
+    command.upgrade(cfg, "d7e2a9c1f4b8")  # mehrere Revisions vor head
     with sqlite3.connect(db) as conn:
         cols = {r[1] for r in conn.execute("PRAGMA table_info(companion_contacts)")}
         assert "node_type" not in cols  # Vorbedingung: noch nicht da
@@ -93,7 +93,37 @@ async def test_alembic_managed_db_runs_upgrade(tmp_path: Path) -> None:
         cols = {r[1] for r in conn.execute("PRAGMA table_info(companion_contacts)")}
         assert "node_type" in cols  # nach upgrade: da
         head = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
-        assert head == "e4b8d5c2f1a9"
+        assert head == "f5c1d8a3b2e7"
+
+
+@pytest.mark.asyncio
+async def test_legacy_db_gets_path_hash_mode_column(tmp_path: Path) -> None:
+    """f5c1d8a3b2e7 fügt ``path_hash_mode`` zu ``companion_identities`` hinzu.
+    Bei einer Legacy-DB (ohne alembic_version) muss der _COLUMN_PATCHES-
+    Pfad das Feld nachziehen, damit der Service nicht beim Laden bestehender
+    Identities scheitert."""
+    from alembic import command
+
+    from meshcore_bridge.db.session import _alembic_config
+
+    db = tmp_path / "legacy_phm.sqlite"
+    cfg = _alembic_config(db)
+    # Eine Revision *vor* der path_hash_mode-Migration: Sigil-Strip ist
+    # die direkte Vorgängerin.
+    command.upgrade(cfg, "e4b8d5c2f1a9")
+    with sqlite3.connect(db) as conn:
+        conn.execute("DROP TABLE alembic_version")
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(companion_identities)")}
+        assert "path_hash_mode" not in cols
+
+    await init_engine(db)
+    await close_engine()
+
+    with sqlite3.connect(db) as conn:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(companion_identities)")}
+        assert "path_hash_mode" in cols
+        head = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
+        assert head == "f5c1d8a3b2e7"
 
 
 @pytest.mark.asyncio
@@ -153,7 +183,7 @@ async def test_sigil_strip_migration_renames_existing_channels(tmp_path: Path) -
         head = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
     assert ch_name == "bonn"
     assert msg_name == "bonn"
-    assert head == "e4b8d5c2f1a9"
+    assert head == "f5c1d8a3b2e7"
 
 
 @pytest.mark.asyncio

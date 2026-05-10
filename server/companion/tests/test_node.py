@@ -392,6 +392,34 @@ def test_telemetry_req_uses_random_tag_per_call() -> None:
     assert t1 != t2
 
 
+def test_make_dm_propagates_hash_size_to_path_len_byte() -> None:
+    """make_dm(hash_size=2) signalisiert v1.14-Repeatern, dass sie sich mit
+    2-Byte-Hashes in den Pfad eintragen sollen — Path bleibt dabei leer."""
+    alice = CompanionNode(LocalIdentity.generate())
+    bob = CompanionNode(LocalIdentity.generate())
+    pkt = alice.make_dm(peer_pubkey=bob.pub_key, text="hi", timestamp=1, hash_size=2)
+    assert pkt.hash_size == 2
+    assert pkt.path == b""
+    raw = pkt.encode()
+    # FLOOD ohne transport_codes → path_len_byte ist Index 1.
+    assert raw[1] == 0x40
+    # Empfänger kann trotzdem entschlüsseln (Payload-Layout ist hash-size-invariant).
+    decoded = bob.try_decrypt_dm(packet=pkt, peer_candidates=[Identity(alice.pub_key)])
+    assert decoded is not None
+    assert decoded.text == "hi"
+
+
+def test_make_advert_propagates_hash_size() -> None:
+    node = CompanionNode(LocalIdentity.generate())
+    pkt = node.make_advert(timestamp=1, app_data=b"x", hash_size=3)
+    assert pkt.hash_size == 3
+    raw = pkt.encode()
+    assert raw[1] == 0x80  # (3-1)<<6 | 0
+    # Roundtrip: Advert ist signiert und parsebar.
+    parsed = node.parse_inbound_advert(Packet.decode(raw))
+    assert parsed is not None and parsed.app_data == b"x"
+
+
 def test_room_ack_hash_matches_firmware_formula() -> None:
     """ack_hash = sha256(reply_data || receiver_pubkey)[:4] mit
     reply_data = ts(4) || flags(1) || author_prefix(4) || text."""

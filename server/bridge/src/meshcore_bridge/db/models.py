@@ -122,10 +122,24 @@ class CompanionIdentity(Base):
     is_echo: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default="0", default=False
     )
+    # 0 = 1-Byte path-hash (default, vor v1.14-kompatibel),
+    # 1 = 2-Byte, 2 = 3-Byte. Konvention identisch zum firmware-CLI
+    # ``set path.hash.mode``. Beeinflusst nur ausgehende Pakete dieser
+    # Identity (DM, GRP_TXT, eigene Adverts) — Forwarding/Empfang sind
+    # immer multi-byte-fähig.
+    path_hash_mode: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="0", default=0
+    )
 
     owner: Mapped[User] = relationship(back_populates="identities")
 
-    __table_args__ = (Index("ix_companion_owner", "user_id"),)
+    __table_args__ = (
+        Index("ix_companion_owner", "user_id"),
+        CheckConstraint(
+            "path_hash_mode IN (0, 1, 2)",
+            name="ck_companion_identity_path_hash_mode",
+        ),
+    )
 
 
 class Session(Base):

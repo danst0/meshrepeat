@@ -784,6 +784,95 @@ async def test_admin_cleanup_coords_dry_run_and_apply(app_and_outbox) -> None:
 
 
 @pytest.mark.asyncio
+async def test_create_identity_with_path_hash_mode(app_and_outbox) -> None:
+    """create_identity nimmt path_hash_mode als Form-Param und persistiert
+    es; das Identity-Dict gibt es zurück."""
+    app, sender = app_and_outbox
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://t") as client:
+        await client.post("/signup", data={"email": "phm@example.com", "password": PASSWORD})
+        verify_tok = sender.outbox[-1]["body"].split("token=")[1].strip()
+        await client.get(f"/verify-email?token={verify_tok}")
+        await client.post(
+            "/login",
+            data={"email": "phm@example.com", "password": PASSWORD},
+            follow_redirects=False,
+        )
+        resp = await client.post(
+            "/api/v1/companion/identities",
+            data={"name": "Multi", "scope": "public", "path_hash_mode": "2"},
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["path_hash_mode"] == 2
+
+        listing = await client.get("/api/v1/companion/identities")
+        assert listing.status_code == 200
+        ids = [i for i in listing.json() if i["name"] == "Multi"]
+        assert ids and ids[0]["path_hash_mode"] == 2
+
+
+@pytest.mark.asyncio
+async def test_create_identity_rejects_invalid_path_hash_mode(app_and_outbox) -> None:
+    app, sender = app_and_outbox
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://t") as client:
+        await client.post("/signup", data={"email": "bad@example.com", "password": PASSWORD})
+        verify_tok = sender.outbox[-1]["body"].split("token=")[1].strip()
+        await client.get(f"/verify-email?token={verify_tok}")
+        await client.post(
+            "/login",
+            data={"email": "bad@example.com", "password": PASSWORD},
+            follow_redirects=False,
+        )
+        resp = await client.post(
+            "/api/v1/companion/identities",
+            data={"name": "X", "scope": "public", "path_hash_mode": "3"},
+        )
+        assert resp.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_set_identity_path_hash_mode_route(app_and_outbox) -> None:
+    """POST .../path-hash-mode aktualisiert den Modus, listing reflektiert
+    den neuen Wert, und der Service-In-Memory-State zieht nach (Hot-Reload)."""
+    app, sender = app_and_outbox
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://t") as client:
+        ident_id = await _login_and_create_identity(
+            client, sender, email="set@example.com"
+        )
+        # Default ist 0
+        listing = await client.get("/api/v1/companion/identities")
+        me = next(i for i in listing.json() if i["id"] == ident_id)
+        assert me["path_hash_mode"] == 0
+
+        # Auf 2 setzen
+        resp = await client.post(
+            f"/api/v1/companion/identities/{ident_id}/path-hash-mode",
+            data={"mode": "2"},
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {"ok": True, "path_hash_mode": 2}
+
+        # Persistiert + im Service angekommen
+        listing = await client.get("/api/v1/companion/identities")
+        me = next(i for i in listing.json() if i["id"] == ident_id)
+        assert me["path_hash_mode"] == 2
+        svc = app.state.companion_service
+        loaded = svc.get(UUID(ident_id))
+        assert loaded is not None and loaded.path_hash_mode == 2
+        assert loaded.hash_size == 3
+
+        # Ungültiger Wert wird geblockt, Zustand bleibt unverändert
+        bad = await client.post(
+            f"/api/v1/companion/identities/{ident_id}/path-hash-mode",
+            data={"mode": "5"},
+        )
+        assert bad.status_code == 422
+        assert svc.get(UUID(ident_id)).path_hash_mode == 2
+
+
+@pytest.mark.asyncio
 async def test_sse_endpoint_requires_auth(app_and_outbox) -> None:
     """Ohne Login redirected /stream auf /login (current_user_required).
     Den 200-Pfad testen wir nicht über ASGITransport — der puffert

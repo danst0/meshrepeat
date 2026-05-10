@@ -77,6 +77,7 @@ def _identity_dict(row: CompanionIdentity) -> dict[str, Any]:
         "created_at": _ts_iso(row.created_at),
         "archived_at": _ts_iso(row.archived_at),
         "is_echo": row.is_echo,
+        "path_hash_mode": row.path_hash_mode,
     }
 
 
@@ -107,15 +108,22 @@ async def create_identity(
     name: Annotated[str, Form()],
     scope: Annotated[str, Form()],
     is_echo: Annotated[bool, Form()] = False,
+    path_hash_mode: Annotated[int, Form()] = 0,
     user: User = Depends(current_user_required),
 ) -> dict[str, Any]:
     svc = _service(request)
     if svc is None:
         raise HTTPException(status_code=503, detail="companion-service not running")
+    if path_hash_mode not in (0, 1, 2):
+        raise HTTPException(status_code=422, detail="path_hash_mode must be 0, 1, or 2")
     if scope == "pool:new":
         scope = f"pool:{uuid4()}"
     loaded = await svc.add_identity(
-        user_id=user.id, name=name.strip(), scope=scope, is_echo=is_echo
+        user_id=user.id,
+        name=name.strip(),
+        scope=scope,
+        is_echo=is_echo,
+        path_hash_mode=path_hash_mode,
     )
     return {
         "id": str(loaded.id),
@@ -123,6 +131,7 @@ async def create_identity(
         "scope": loaded.scope,
         "pubkey_hex": loaded.pubkey.hex(),
         "is_echo": loaded.is_echo,
+        "path_hash_mode": loaded.path_hash_mode,
     }
 
 
@@ -180,6 +189,26 @@ async def set_identity_echo(
         raise HTTPException(status_code=503)
     ok = await svc.set_echo(identity_id, enabled)
     return {"ok": ok, "is_echo": enabled if ok else row.is_echo}
+
+
+@router.post("/identities/{identity_id}/path-hash-mode", response_model=None)
+async def set_identity_path_hash_mode(
+    request: Request,
+    identity_id: UUID,
+    mode: Annotated[int, Form()],
+    user: User = Depends(current_user_required),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    row = await db.get(CompanionIdentity, identity_id)
+    if row is None or row.user_id != user.id:
+        raise HTTPException(status_code=404)
+    if mode not in (0, 1, 2):
+        raise HTTPException(status_code=422, detail="mode must be 0, 1, or 2")
+    svc = _service(request)
+    if svc is None:
+        raise HTTPException(status_code=503)
+    ok = await svc.set_path_hash_mode(identity_id, mode)
+    return {"ok": ok, "path_hash_mode": mode if ok else row.path_hash_mode}
 
 
 @router.get("/messages")
