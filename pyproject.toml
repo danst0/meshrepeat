@@ -87,7 +87,10 @@ markers = [
 filterwarnings = [
     "error",
     # aiosqlite + multiple-event-loop interactions in TestClient/AsyncClient
-    # tests emit unraisable ResourceWarnings on connection __del__ — benign.
+    # tests emit benign teardown noise: ResourceWarnings on connection __del__,
+    # plus gelegentlich ein Worker-Thread, der nach Loop-Close noch
+    # call_soon_threadsafe versucht (-> PytestUnhandledThreadExceptionWarning).
     "ignore::ResourceWarning",
     "ignore::pytest.PytestUnraisableExceptionWarning",
+    "ignore::pytest.PytestUnhandledThreadExceptionWarning",
 ]
