@@ -1,6 +1,10 @@
 {% extends "base.html.j2" %}
 {% block title %}Repeater-Wichtigkeit — MeshCore Spiegel{% endblock %}
 {% block head_extra %}
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+      integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+        integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
 <style>
   /* Toolbar: Filter, Sort, Reload */
   .rep-toolbar {
@@ -36,7 +40,6 @@
   }
   .rep-card { padding: 0; }
   .rep-card-btn {
-    /* Button auf Card-Oberfläche → 100% Hitbox, A11Y, kein <tr>-Click */
     display: grid;
     grid-template-columns: 1fr;
     gap: .55rem;
@@ -121,8 +124,27 @@
     font-size: .9rem;
   }
 
-  /* Spalten-Header (nur Desktop) — visuell wie eine Tabellen-Headerzeile */
   .rep-list-head { display: none; }
+
+  /* Map-Toolbar (eigenes Panel) */
+  .map-toolbar {
+    display: flex; flex-wrap: wrap; align-items: center;
+    gap: .8rem; margin-bottom: .6rem;
+  }
+  .map-toolbar label {
+    margin: 0; display: inline-flex; align-items: center;
+    gap: .35rem; font-size: .9rem; color: var(--fg);
+  }
+  .map-toolbar select {
+    width: auto; padding: .35rem .5rem;
+    min-height: 36px;
+  }
+  .map-empty {
+    color: var(--muted); padding: 1rem; text-align: center;
+    font-size: .9rem;
+    border: 1px dashed var(--border);
+    border-radius: 6px; margin-top: .5rem;
+  }
 
   /* Modal */
   .rep-modal-bg {
@@ -163,15 +185,35 @@
     color: var(--fg); border-color: var(--border);
   }
 
+  /* Popup-Inhalt der Map */
+  .leaflet-popup-content .map-pop {
+    min-width: 180px; line-height: 1.35;
+  }
+  .leaflet-popup-content .map-pop strong { font-size: 1rem; }
+  .leaflet-popup-content .map-pop .pkkey {
+    font-family: ui-monospace, monospace;
+    font-size: .72rem; color: var(--muted);
+    word-break: break-all;
+  }
+  .leaflet-popup-content .map-pop .score {
+    margin-top: .35rem; font-size: 1.1rem; color: var(--accent); font-weight: bold;
+  }
+  .leaflet-popup-content .map-pop .subs {
+    margin-top: .15rem; font-size: .8rem;
+  }
+  .leaflet-popup-content .map-pop .seen {
+    margin-top: .25rem; font-size: .72rem; color: var(--muted);
+  }
+
   /* ---------- Desktop ab 760px ---------- */
   @media (min-width: 760px) {
     .rep-list { gap: .35rem; }
     .rep-card-btn {
       grid-template-columns:
-        minmax(180px, 1.5fr)   /* Name */
-        minmax(140px, .9fr)    /* Score + Bar */
-        minmax(320px, 2.4fr)   /* 4 Sub-Scores */
-        minmax(140px, .9fr);   /* Adverts + Last seen */
+        minmax(180px, 1.5fr)
+        minmax(140px, .9fr)
+        minmax(320px, 2.4fr)
+        minmax(140px, .9fr);
       align-items: center;
       gap: 1rem;
       padding: .65rem 1rem;
@@ -189,7 +231,6 @@
     }
     .rep-foot .sep { display: none; }
 
-    /* Header-Zeile in Tabellen-Optik */
     .rep-list-head {
       display: grid;
       grid-template-columns:
@@ -207,8 +248,6 @@
       display: grid; grid-template-columns: repeat(4, 1fr); gap: 0 .8rem;
     }
     .rep-list-head .head-foot { text-align: right; }
-    /* Auf Desktop sind die Sub-Labels in der Header-Zeile, in den Cards
-       weg → ruhigere Optik */
     .rep-card-btn .rep-sub dt { display: none; }
     .rep-card-btn .rep-sub dd { padding-top: .15rem; }
   }
@@ -223,6 +262,8 @@
     .rep-toolbar { gap: .55rem; }
     .rep-toolbar > div { flex: 1 1 8rem; }
     .rep-card-btn { padding: .8rem .85rem; }
+    #rep-map { height: clamp(280px, 55vh, 400px); }
+    .map-toolbar { gap: .5rem; }
   }
 </style>
 {% endblock %}
@@ -277,21 +318,53 @@
     </div>
   </div>
 
-  <div class="rep-list-head" aria-hidden="true">
-    <div>Name</div>
-    <div>Score</div>
-    <div class="head-subs">
-      <div>Forwarding</div>
-      <div>Bottleneck</div>
-      <div>Reach</div>
-      <div>Liveness</div>
-    </div>
-    <div class="head-foot">Adverts · Last seen</div>
-  </div>
+  <nav class="tabs" role="tablist" aria-label="Ansicht">
+    <button type="button" class="tab-btn active" data-tab="list" role="tab" aria-selected="true">Liste</button>
+    <button type="button" class="tab-btn"        data-tab="map"  role="tab" aria-selected="false">Karte</button>
+  </nav>
 
-  <ul class="rep-list" id="rep-rows">
-    <li class="rep-empty">—</li>
-  </ul>
+  <section class="tab-panel active" data-panel="list" role="tabpanel">
+    <div class="rep-list-head" aria-hidden="true">
+      <div>Name</div>
+      <div>Score</div>
+      <div class="head-subs">
+        <div>Forwarding</div>
+        <div>Bottleneck</div>
+        <div>Reach</div>
+        <div>Liveness</div>
+      </div>
+      <div class="head-foot">Adverts · Last seen</div>
+    </div>
+    <ul class="rep-list" id="rep-rows">
+      <li class="rep-empty">—</li>
+    </ul>
+  </section>
+
+  <section class="tab-panel" data-panel="map" role="tabpanel">
+    <div class="map-toolbar">
+      <label for="map-topn">
+        Top
+        <select id="map-topn">
+          <option value="10">10</option>
+          <option value="25" selected>25</option>
+          <option value="50">50</option>
+          <option value="100">100</option>
+        </select>
+        Repeater nach Score
+      </label>
+      <span id="map-stat" class="rep-stat"></span>
+    </div>
+    <div id="rep-map" class="node-map"></div>
+    <div class="map-legend">
+      <span><span class="legend-dot legend-dot--fresh"></span>&lt;15 min</span>
+      <span><span class="legend-dot legend-dot--recent"></span>&lt;1 h</span>
+      <span><span class="legend-dot legend-dot--stale"></span>&lt;24 h</span>
+      <span><span class="legend-dot legend-dot--gone"></span>älter</span>
+    </div>
+    <div id="map-empty" class="map-empty" style="display:none">
+      Keine Repeater mit Position im aktuellen Fenster.
+    </div>
+  </section>
 
   <div class="rep-modal-bg" id="modal-bg" role="dialog" aria-modal="true" aria-labelledby="modal-name">
     <div class="rep-modal" id="modal">
@@ -310,13 +383,19 @@ const elSummary = document.getElementById('summary');
 const elBanner = document.getElementById('banner-trunc');
 const elRows   = document.getElementById('rep-rows');
 const elModalBg   = document.getElementById('modal-bg');
-const elModal     = document.getElementById('modal');
 const elModalName = document.getElementById('modal-name');
 const elModalBody = document.getElementById('modal-body');
+const elMapTopN   = document.getElementById('map-topn');
+const elMapStat   = document.getElementById('map-stat');
+const elMapEmpty  = document.getElementById('map-empty');
 
 let lastData = null;
 let sortKey = 'total';
 let sortDir = 'desc';
+
+let map = null;
+let markersLayer = null;
+let mapInitialized = false;
 
 function fmtNum(n) { return Number(n).toLocaleString('de-DE'); }
 function fmtPct(n) { return (n * 100).toFixed(1) + '%'; }
@@ -332,6 +411,21 @@ function fmtRel(iso) {
   if (dh < 24) return dh.toFixed(1) + ' h';
   return (dh / 24).toFixed(1) + ' d';
 }
+
+function liveTier(iso) {
+  if (!iso) return 'gone';
+  const age = Date.now() - new Date(iso).getTime();
+  if (age <  15 * 60_000)      return 'fresh';
+  if (age <  60 * 60_000)      return 'recent';
+  if (age < 24 * 60 * 60_000)  return 'stale';
+  return 'gone';
+}
+const TIER_COLORS = {
+  fresh:  '#addb67',
+  recent: '#ffd866',
+  stale:  '#82aaff',
+  gone:   '#5f7e97',
+};
 
 function bar(value, cls) {
   const pct = Math.max(0, Math.min(1, Number(value) || 0));
@@ -353,9 +447,9 @@ const SORT_ACCESSORS = {
   last:   r => r.last_seen_at || '',
 };
 
-function sortRows(rows) {
-  const acc = SORT_ACCESSORS[sortKey] || SORT_ACCESSORS.total;
-  const sign = sortDir === 'asc' ? 1 : -1;
+function sortRowsBy(rows, key, dir) {
+  const acc = SORT_ACCESSORS[key] || SORT_ACCESSORS.total;
+  const sign = dir === 'asc' ? 1 : -1;
   return rows.slice().sort((a, b) => {
     const va = acc(a), vb = acc(b);
     if (va < vb) return -1 * sign;
@@ -363,6 +457,7 @@ function sortRows(rows) {
     return 0;
   });
 }
+function sortRows(rows) { return sortRowsBy(rows, sortKey, sortDir); }
 
 function subCell(label, barCls, value, valueText) {
   return '<div class="rep-sub">'
@@ -372,7 +467,7 @@ function subCell(label, barCls, value, valueText) {
     + '</dd></div>';
 }
 
-function render() {
+function renderList() {
   if (!lastData) return;
   const rows = sortRows(lastData.repeaters);
   if (!rows.length) {
@@ -408,6 +503,72 @@ function render() {
   elRows.querySelectorAll('.rep-card-btn').forEach(btn => {
     btn.addEventListener('click', () => openModal(parseInt(btn.dataset.idx, 10)));
   });
+}
+
+function popupHtml(r) {
+  const short = (r.pubkey_hex || '').slice(0, 16);
+  return '<div class="map-pop">'
+    + '<strong>' + escape(r.name || '?') + '</strong>'
+    + '<div class="pkkey">' + escape(short) + '…</div>'
+    + '<div class="score">Score ' + fmtScore(r.total_score) + '</div>'
+    + '<div class="subs">'
+    +   'Fwd ' + fmtPct(r.forward_share)
+    + ' · Btl ' + fmtNum(r.bottleneck_origins)
+    + ' · Reach ' + fmtNum(r.reach_endpoints)
+    + '</div>'
+    + '<div class="seen">last seen ' + fmtRel(r.last_seen_at) + '</div>'
+    + '</div>';
+}
+
+function ensureMap() {
+  if (mapInitialized) return;
+  map = L.map('rep-map', {
+    zoomControl: true,
+    worldCopyJump: true,
+  }).setView([52.0, 10.0], 5);
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    maxZoom: 19,
+    attribution: '© OpenStreetMap-Mitwirkende',
+  }).addTo(map);
+  markersLayer = L.layerGroup().addTo(map);
+  mapInitialized = true;
+}
+
+function renderMap() {
+  if (!lastData || !mapInitialized) return;
+  const n = parseInt(elMapTopN.value, 10) || 25;
+  // Top-N immer nach total_score desc, unabhängig vom Listen-Sort
+  const top = sortRowsBy(lastData.repeaters, 'total', 'desc');
+  const withPos = top.filter(r => r.last_lat != null && r.last_lon != null);
+  const shown = withPos.slice(0, n);
+  markersLayer.clearLayers();
+  const bounds = [];
+  shown.forEach(r => {
+    const tier = liveTier(r.last_seen_at);
+    const color = TIER_COLORS[tier];
+    const radius = 5 + Math.round(Math.max(0, Math.min(1, r.total_score)) * 10);
+    const m = L.circleMarker([r.last_lat, r.last_lon], {
+      radius,
+      color,
+      weight: 2,
+      fillColor: color,
+      fillOpacity: .55,
+    }).bindPopup(popupHtml(r));
+    markersLayer.addLayer(m);
+    bounds.push([r.last_lat, r.last_lon]);
+  });
+  elMapStat.textContent = shown.length + ' / ' + withPos.length + ' mit Position angezeigt';
+  elMapEmpty.style.display = withPos.length === 0 ? '' : 'none';
+  if (bounds.length === 1) {
+    map.setView(bounds[0], 11);
+  } else if (bounds.length > 1) {
+    map.fitBounds(bounds, {padding: [40, 40], maxZoom: 11});
+  }
+}
+
+function render() {
+  renderList();
+  if (mapInitialized) renderMap();
 }
 
 function openModal(idx) {
@@ -454,12 +615,38 @@ elSort.addEventListener('change', () => {
     sortDir = (k === 'name' || k === 'last') ? 'asc' : 'desc';
     updateDirBtn();
   }
-  render();
+  renderList();
 });
 elDir.addEventListener('click', () => {
   sortDir = (sortDir === 'asc' ? 'desc' : 'asc');
   updateDirBtn();
-  render();
+  renderList();
+});
+elMapTopN.addEventListener('change', () => {
+  if (mapInitialized) renderMap();
+});
+
+// Tab-Logik
+document.querySelectorAll('.tabs .tab-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const tab = btn.dataset.tab;
+    document.querySelectorAll('.tabs .tab-btn').forEach(b => {
+      const active = b.dataset.tab === tab;
+      b.classList.toggle('active', active);
+      b.setAttribute('aria-selected', active ? 'true' : 'false');
+    });
+    document.querySelectorAll('.tab-panel').forEach(p => {
+      p.classList.toggle('active', p.dataset.panel === tab);
+    });
+    if (tab === 'map') {
+      ensureMap();
+      // Container-Größe mag sich geändert haben → invalidateSize, danach rendern
+      setTimeout(() => {
+        if (map) map.invalidateSize();
+        renderMap();
+      }, 0);
+    }
+  });
 });
 
 async function refresh() {
