@@ -31,8 +31,10 @@ class CompanionEventBus:
         self._subs: dict[UUID, set[asyncio.Queue[dict[str, Any]]]] = defaultdict(set)
         self._lock = asyncio.Lock()
         # monotonic()-Timestamp der letzten Subscriber-Aktivität (subscribe,
-        # unsubscribe oder erfolgreiche Zustellung). 0.0 = noch nie aktiv.
-        self._last_active_monotonic: float = 0.0
+        # unsubscribe oder erfolgreiche Zustellung). None = noch nie aktiv.
+        # Kein 0.0-Sentinel: time.monotonic() kann auf frischen CI-Runnern
+        # klein sein, Tests subtrahieren davon → negativ.
+        self._last_active_monotonic: float | None = None
 
     def _touch(self) -> None:
         self._last_active_monotonic = time.monotonic()
@@ -76,6 +78,6 @@ class CompanionEventBus:
         SSE-Stream im Companion-UI zählt."""
         if any(self._subs.values()):
             return True
-        if self._last_active_monotonic <= 0.0:
+        if self._last_active_monotonic is None:
             return False
         return (time.monotonic() - self._last_active_monotonic) <= grace_s

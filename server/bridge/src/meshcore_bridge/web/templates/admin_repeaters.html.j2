@@ -2,53 +2,228 @@
 {% block title %}Repeater-Wichtigkeit — MeshCore Spiegel{% endblock %}
 {% block head_extra %}
 <style>
-  .rep-toolbar { display: flex; flex-wrap: wrap; gap: .8rem; align-items: end; }
+  /* Toolbar: Filter, Sort, Reload */
+  .rep-toolbar {
+    display: flex; flex-wrap: wrap; gap: .8rem; align-items: end;
+  }
   .rep-toolbar > div { display: flex; flex-direction: column; gap: .2rem; }
   .rep-toolbar label { margin: 0; font-size: .8rem; }
-  .rep-toolbar select, .rep-toolbar button { padding: .35rem .5rem; }
-  .rep-summary { font-size: 1.05rem; margin: .8rem 0; }
-  .rep-summary strong { color: var(--accent); }
-  .rep-summary .muted { color: var(--muted); margin-left: .6rem; font-size: .85rem; }
-  .rep-banner {
-    background: rgba(255,200,90,.10); border-left: 3px solid rgba(255,200,90,.6);
-    padding: .5rem .8rem; margin: .8rem 0; font-size: .85rem; color: var(--muted);
+  .rep-toolbar select, .rep-toolbar button {
+    padding: .45rem .6rem; min-height: 40px;
   }
-  .rep-table { width: 100%; font-size: .9rem; border-collapse: collapse; }
-  .rep-table th {
-    text-align: left; color: var(--muted); font-weight: 500;
-    cursor: pointer; user-select: none; padding: .35rem .5rem;
-    border-bottom: 1px solid rgba(130,170,255,.10);
+  .rep-toolbar .btn-dir {
+    width: 40px; padding: 0; min-width: 40px;
   }
-  .rep-table th.num, .rep-table td.num { text-align: right; font-variant-numeric: tabular-nums; }
-  .rep-table th.sort-asc::after { content: " ▲"; color: var(--accent); }
-  .rep-table th.sort-desc::after { content: " ▼"; color: var(--accent); }
-  .rep-table td { padding: .35rem .5rem; border-bottom: 1px solid rgba(130,170,255,.05); }
-  .rep-table tr:hover { background: rgba(130,170,255,.05); cursor: pointer; }
-  .rep-table .pkkey { font-family: ui-monospace, monospace; color: var(--muted); font-size: .8rem; }
-  .rep-bar-svg rect.b-track { fill: rgba(130,170,255,.06); }
-  .rep-bar-svg rect.b-total  { fill: rgba(255,200,90,.55); }
-  .rep-bar-svg rect.b-fwd    { fill: rgba(120,210,140,.55); }
-  .rep-bar-svg rect.b-bottle { fill: rgba(255,88,116,.55); }
-  .rep-bar-svg rect.b-reach  { fill: rgba(130,170,255,.55); }
-  .rep-bar-svg rect.b-life   { fill: rgba(200,160,255,.55); }
-  .rep-empty { color: var(--muted); padding: 1.5rem; text-align: center; }
 
+  .rep-summary { font-size: 1.05rem; margin: .8rem 0 0; }
+  .rep-summary strong { color: var(--accent); }
+  .rep-summary .muted {
+    color: var(--muted); margin-left: .6rem; font-size: .85rem;
+  }
+  .rep-banner {
+    background: rgba(255,200,90,.10);
+    border-left: 3px solid rgba(255,200,90,.6);
+    padding: .55rem .8rem; margin: .8rem 0 0;
+    font-size: .85rem; color: var(--muted);
+    border-radius: 3px;
+  }
+  .rep-stat { color: var(--muted); font-size: .85rem; }
+
+  /* Liste der Karten */
+  .rep-list {
+    list-style: none; padding: 0; margin: 0;
+    display: grid; grid-template-columns: 1fr; gap: .55rem;
+  }
+  .rep-card { padding: 0; }
+  .rep-card-btn {
+    /* Button auf Card-Oberfläche → 100% Hitbox, A11Y, kein <tr>-Click */
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: .55rem;
+    width: 100%;
+    margin: 0; padding: .85rem 1rem;
+    background: var(--card);
+    color: var(--fg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    text-align: left;
+    font-family: inherit; font-weight: normal; font-size: 1rem;
+    cursor: pointer;
+    min-height: 44px;
+    transition: border-color .12s, background .12s;
+  }
+  .rep-card-btn:hover,
+  .rep-card-btn:focus-visible {
+    border-color: rgba(130,170,255,.45);
+    background: rgba(130,170,255,.04);
+    outline: none;
+  }
+
+  .rep-name {
+    display: flex; flex-wrap: wrap; align-items: baseline;
+    gap: .15rem .6rem; min-width: 0;
+  }
+  .rep-name strong { font-size: 1rem; color: var(--fg); }
+  .rep-name .pkkey {
+    font-family: ui-monospace, monospace; color: var(--muted);
+    font-size: .78rem;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    max-width: 100%;
+  }
+
+  .rep-score {
+    display: flex; align-items: center; gap: .6rem;
+  }
+  .rep-score-val {
+    font-size: 1.35rem; font-weight: bold; color: var(--accent);
+    font-variant-numeric: tabular-nums;
+    min-width: 3.2rem;
+  }
+  .rep-score .rep-bar-svg { flex: 1; min-width: 80px; max-width: 220px; }
+
+  .rep-subs {
+    display: grid; grid-template-columns: 1fr 1fr;
+    gap: .5rem .9rem;
+    margin: 0;
+  }
+  .rep-sub { margin: 0; min-width: 0; }
+  .rep-sub dt {
+    font-size: .68rem; text-transform: uppercase; letter-spacing: .06em;
+    color: var(--muted); margin: 0 0 .15rem;
+  }
+  .rep-sub dd {
+    margin: 0; display: flex; align-items: center; gap: .4rem;
+    font-size: .82rem; color: var(--fg);
+    font-variant-numeric: tabular-nums;
+  }
+  .rep-sub dd .rep-bar-svg { flex: 1; min-width: 0; max-width: 110px; }
+  .rep-sub-val { white-space: nowrap; }
+
+  .rep-foot {
+    display: flex; flex-wrap: wrap; gap: .15rem .6rem;
+    color: var(--muted); font-size: .8rem;
+    border-top: 1px dashed rgba(130,170,255,.10);
+    padding-top: .45rem;
+  }
+  .rep-foot .sep { opacity: .5; }
+  .rep-foot strong { color: var(--fg); font-weight: normal; }
+
+  .rep-bar-svg { display: block; width: 100%; height: 8px; }
+  .rep-bar-svg rect.b-track { fill: rgba(130,170,255,.08); }
+  .rep-bar-svg rect.b-total  { fill: rgba(255,200,90,.65); }
+  .rep-bar-svg rect.b-fwd    { fill: rgba(120,210,140,.65); }
+  .rep-bar-svg rect.b-bottle { fill: rgba(255,88,116,.65); }
+  .rep-bar-svg rect.b-reach  { fill: rgba(130,170,255,.70); }
+  .rep-bar-svg rect.b-life   { fill: rgba(200,160,255,.65); }
+
+  .rep-empty {
+    color: var(--muted); padding: 2rem 1rem; text-align: center;
+    font-size: .9rem;
+  }
+
+  /* Spalten-Header (nur Desktop) — visuell wie eine Tabellen-Headerzeile */
+  .rep-list-head { display: none; }
+
+  /* Modal */
   .rep-modal-bg {
     position: fixed; inset: 0; background: rgba(0,0,0,.6);
     display: none; align-items: center; justify-content: center; z-index: 100;
+    padding: 1rem;
   }
   .rep-modal-bg.open { display: flex; }
   .rep-modal {
-    background: var(--bg, #1a1c20); border: 1px solid rgba(130,170,255,.15);
-    border-radius: 6px; padding: 1.2rem; max-width: 640px; max-height: 80vh;
-    overflow-y: auto; box-shadow: 0 8px 32px rgba(0,0,0,.5);
+    background: var(--card);
+    border: 1px solid rgba(130,170,255,.25);
+    border-radius: 6px; padding: 1.2rem;
+    max-width: 640px; width: 100%;
+    max-height: 90vh; overflow-y: auto;
+    box-shadow: 0 8px 32px rgba(0,0,0,.5);
+    position: relative;
   }
-  .rep-modal h3 { margin-top: 0; }
-  .rep-modal dl { display: grid; grid-template-columns: max-content 1fr; gap: .25rem .8rem; font-size: .9rem; }
+  .rep-modal h3 { margin: 0 2rem .8rem 0; color: var(--accent); font-size: 1.1rem; }
+  .rep-modal dl {
+    display: grid; grid-template-columns: max-content 1fr;
+    gap: .35rem .9rem; font-size: .9rem; margin: 0;
+  }
   .rep-modal dt { color: var(--muted); }
-  .rep-modal dd { margin: 0; }
-  .rep-modal .pkkey { font-family: ui-monospace, monospace; font-size: .8rem; }
-  .rep-modal .close { float: right; cursor: pointer; color: var(--muted); }
+  .rep-modal dd { margin: 0; word-break: break-word; }
+  .rep-modal .pkkey {
+    font-family: ui-monospace, monospace; font-size: .8rem;
+    word-break: break-all;
+  }
+  .rep-modal .close {
+    position: absolute; top: .5rem; right: .6rem;
+    width: 40px; height: 40px;
+    display: flex; align-items: center; justify-content: center;
+    cursor: pointer; color: var(--muted);
+    background: transparent; border: 1px solid transparent;
+    border-radius: 4px; font-size: 1.1rem;
+  }
+  .rep-modal .close:hover {
+    color: var(--fg); border-color: var(--border);
+  }
+
+  /* ---------- Desktop ab 760px ---------- */
+  @media (min-width: 760px) {
+    .rep-list { gap: .35rem; }
+    .rep-card-btn {
+      grid-template-columns:
+        minmax(180px, 1.5fr)   /* Name */
+        minmax(140px, .9fr)    /* Score + Bar */
+        minmax(320px, 2.4fr)   /* 4 Sub-Scores */
+        minmax(140px, .9fr);   /* Adverts + Last seen */
+      align-items: center;
+      gap: 1rem;
+      padding: .65rem 1rem;
+    }
+    .rep-name { flex-direction: column; align-items: flex-start; gap: .1rem; }
+    .rep-name .pkkey { font-size: .72rem; }
+    .rep-subs {
+      grid-template-columns: repeat(4, 1fr);
+      gap: 0 .8rem;
+    }
+    .rep-foot {
+      flex-direction: column; gap: .1rem;
+      border-top: none; padding-top: 0; align-items: flex-end;
+      text-align: right;
+    }
+    .rep-foot .sep { display: none; }
+
+    /* Header-Zeile in Tabellen-Optik */
+    .rep-list-head {
+      display: grid;
+      grid-template-columns:
+        minmax(180px, 1.5fr)
+        minmax(140px, .9fr)
+        minmax(320px, 2.4fr)
+        minmax(140px, .9fr);
+      gap: 1rem;
+      padding: .25rem 1rem;
+      font-size: .72rem;
+      text-transform: uppercase; letter-spacing: .06em;
+      color: var(--muted);
+    }
+    .rep-list-head .head-subs {
+      display: grid; grid-template-columns: repeat(4, 1fr); gap: 0 .8rem;
+    }
+    .rep-list-head .head-foot { text-align: right; }
+    /* Auf Desktop sind die Sub-Labels in der Header-Zeile, in den Cards
+       weg → ruhigere Optik */
+    .rep-card-btn .rep-sub dt { display: none; }
+    .rep-card-btn .rep-sub dd { padding-top: .15rem; }
+  }
+
+  /* ---------- Phone ≤460px ---------- */
+  @media (max-width: 460px) {
+    .rep-modal-bg { padding: 0; align-items: stretch; }
+    .rep-modal {
+      max-height: 100vh; max-width: 100%;
+      border-radius: 0; border: none;
+    }
+    .rep-toolbar { gap: .55rem; }
+    .rep-toolbar > div { flex: 1 1 8rem; }
+    .rep-card-btn { padding: .8rem .85rem; }
+  }
 </style>
 {% endblock %}
 {% block content %}
@@ -70,12 +245,29 @@
         </select>
       </div>
       <div>
+        <label for="f-sort">Sortieren nach</label>
+        <select id="f-sort">
+          <option value="total" selected>Score (gesamt)</option>
+          <option value="fwd">Forwarding</option>
+          <option value="bottle">Bottleneck</option>
+          <option value="reach">Reach</option>
+          <option value="life">Liveness</option>
+          <option value="adv">Adverts</option>
+          <option value="last">Last seen</option>
+          <option value="name">Name</option>
+        </select>
+      </div>
+      <div>
+        <label for="btn-dir">Reihenfolge</label>
+        <button type="button" id="btn-dir" class="btn-dir" title="Sortier-Richtung">▼</button>
+      </div>
+      <div>
         <label>&nbsp;</label>
         <button type="button" id="btn-reload">Neu laden</button>
       </div>
       <div>
         <label>&nbsp;</label>
-        <span id="stat" style="color:var(--muted)"></span>
+        <span id="stat" class="rep-stat"></span>
       </div>
     </form>
     <div class="rep-summary" id="summary">—</div>
@@ -85,28 +277,25 @@
     </div>
   </div>
 
-  <div class="card" style="margin-top:1rem">
-    <table class="rep-table" id="rep-tbl">
-      <thead>
-        <tr>
-          <th data-sort="name">Name</th>
-          <th data-sort="total" class="num sort-desc">Score</th>
-          <th class="num">Score-Bar</th>
-          <th data-sort="fwd" class="num">Forwarding</th>
-          <th data-sort="bottle" class="num">Bottleneck</th>
-          <th data-sort="reach" class="num">Reach</th>
-          <th data-sort="life" class="num">Liveness</th>
-          <th data-sort="adv" class="num">Adverts</th>
-          <th data-sort="last">Last seen</th>
-        </tr>
-      </thead>
-      <tbody id="rep-rows"><tr><td colspan="9" class="rep-empty">—</td></tr></tbody>
-    </table>
+  <div class="rep-list-head" aria-hidden="true">
+    <div>Name</div>
+    <div>Score</div>
+    <div class="head-subs">
+      <div>Forwarding</div>
+      <div>Bottleneck</div>
+      <div>Reach</div>
+      <div>Liveness</div>
+    </div>
+    <div class="head-foot">Adverts · Last seen</div>
   </div>
 
-  <div class="rep-modal-bg" id="modal-bg">
+  <ul class="rep-list" id="rep-rows">
+    <li class="rep-empty">—</li>
+  </ul>
+
+  <div class="rep-modal-bg" id="modal-bg" role="dialog" aria-modal="true" aria-labelledby="modal-name">
     <div class="rep-modal" id="modal">
-      <span class="close" id="modal-close">✕</span>
+      <button type="button" class="close" id="modal-close" aria-label="Schließen">✕</button>
       <h3 id="modal-name">—</h3>
       <dl id="modal-body"></dl>
     </div>
@@ -114,12 +303,14 @@
 
 <script>
 const elWindow = document.getElementById('f-window');
-const elStat = document.getElementById('stat');
+const elSort   = document.getElementById('f-sort');
+const elDir    = document.getElementById('btn-dir');
+const elStat   = document.getElementById('stat');
 const elSummary = document.getElementById('summary');
 const elBanner = document.getElementById('banner-trunc');
-const elRows = document.getElementById('rep-rows');
-const elTable = document.getElementById('rep-tbl');
-const elModalBg = document.getElementById('modal-bg');
+const elRows   = document.getElementById('rep-rows');
+const elModalBg   = document.getElementById('modal-bg');
+const elModal     = document.getElementById('modal');
 const elModalName = document.getElementById('modal-name');
 const elModalBody = document.getElementById('modal-body');
 
@@ -143,10 +334,11 @@ function fmtRel(iso) {
 }
 
 function bar(value, cls) {
-  const w = Math.max(0, Math.min(110, Math.round(value * 110)));
-  return '<svg class="rep-bar-svg" width="120" height="10">'
-    + '<rect class="b-track" x="0" y="2" width="120" height="6" rx="2"></rect>'
-    + (w ? '<rect class="' + cls + '" x="0" y="2" width="' + w + '" height="6" rx="2"></rect>' : '')
+  const pct = Math.max(0, Math.min(1, Number(value) || 0));
+  const w = (pct * 100).toFixed(1);
+  return '<svg class="rep-bar-svg" viewBox="0 0 100 8" preserveAspectRatio="none" aria-hidden="true">'
+    + '<rect class="b-track" x="0" y="1" width="100" height="6" rx="2"></rect>'
+    + (pct > 0 ? '<rect class="' + cls + '" x="0" y="1" width="' + w + '" height="6" rx="2"></rect>' : '')
     + '</svg>';
 }
 
@@ -172,41 +364,49 @@ function sortRows(rows) {
   });
 }
 
+function subCell(label, barCls, value, valueText) {
+  return '<div class="rep-sub">'
+    + '<dt>' + label + '</dt>'
+    + '<dd>' + bar(value, barCls)
+    + (valueText != null ? '<span class="rep-sub-val">' + valueText + '</span>' : '')
+    + '</dd></div>';
+}
+
 function render() {
   if (!lastData) return;
   const rows = sortRows(lastData.repeaters);
   if (!rows.length) {
-    elRows.innerHTML = '<tr><td colspan="9" class="rep-empty">keine Repeater bekannt</td></tr>';
+    elRows.innerHTML = '<li class="rep-empty">keine Repeater bekannt</li>';
     return;
   }
   elRows.innerHTML = rows.map((r, i) => {
     const short = r.pubkey_short || (r.pubkey_hex || '').slice(0, 12);
-    return '<tr data-idx="' + i + '">'
-      + '<td><strong>' + escape(r.name || '?') + '</strong>'
-      + ' <span class="pkkey">' + escape(short) + '…</span></td>'
-      + '<td class="num">' + fmtScore(r.total_score) + '</td>'
-      + '<td class="num">' + bar(r.total_score, 'b-total') + '</td>'
-      + '<td class="num">' + bar(r.forwarding_score, 'b-fwd')
-        + '<div style="font-size:.75rem;color:var(--muted)">' + fmtPct(r.forward_share) + '</div></td>'
-      + '<td class="num">' + bar(r.bottleneck_score, 'b-bottle')
-        + '<div style="font-size:.75rem;color:var(--muted)">' + fmtNum(r.bottleneck_origins) + '</div></td>'
-      + '<td class="num">' + bar(r.reach_score, 'b-reach')
-        + '<div style="font-size:.75rem;color:var(--muted)">' + fmtNum(r.reach_endpoints) + '</div></td>'
-      + '<td class="num">' + bar(r.liveness_score, 'b-life') + '</td>'
-      + '<td class="num">' + fmtNum(r.advert_count) + '</td>'
-      + '<td>' + fmtRel(r.last_seen_at) + '</td>'
-      + '</tr>';
+    return '<li class="rep-card">'
+      + '<button type="button" class="rep-card-btn" data-idx="' + i + '">'
+      +   '<header class="rep-name">'
+      +     '<strong>' + escape(r.name || '?') + '</strong>'
+      +     '<span class="pkkey">' + escape(short) + '…</span>'
+      +   '</header>'
+      +   '<div class="rep-score">'
+      +     '<span class="rep-score-val">' + fmtScore(r.total_score) + '</span>'
+      +     bar(r.total_score, 'b-total')
+      +   '</div>'
+      +   '<dl class="rep-subs">'
+      +     subCell('Forwarding', 'b-fwd',    r.forwarding_score, fmtPct(r.forward_share))
+      +     subCell('Bottleneck', 'b-bottle', r.bottleneck_score, fmtNum(r.bottleneck_origins))
+      +     subCell('Reach',      'b-reach',  r.reach_score,      fmtNum(r.reach_endpoints))
+      +     subCell('Liveness',   'b-life',   r.liveness_score,   null)
+      +   '</dl>'
+      +   '<footer class="rep-foot">'
+      +     '<span><strong>' + fmtNum(r.advert_count) + '</strong> Adverts</span>'
+      +     '<span class="sep">·</span>'
+      +     '<span>' + fmtRel(r.last_seen_at) + '</span>'
+      +   '</footer>'
+      + '</button>'
+      + '</li>';
   }).join('');
-  // re-attach handlers
-  elRows.querySelectorAll('tr').forEach(tr => {
-    tr.addEventListener('click', () => openModal(parseInt(tr.dataset.idx, 10)));
-  });
-  // header sort indicators
-  elTable.querySelectorAll('th[data-sort]').forEach(th => {
-    th.classList.remove('sort-asc', 'sort-desc');
-    if (th.dataset.sort === sortKey) {
-      th.classList.add(sortDir === 'asc' ? 'sort-asc' : 'sort-desc');
-    }
+  elRows.querySelectorAll('.rep-card-btn').forEach(btn => {
+    btn.addEventListener('click', () => openModal(parseInt(btn.dataset.idx, 10)));
   });
 }
 
@@ -232,23 +432,34 @@ function openModal(idx) {
         ? '<dt>Position</dt><dd>' + r.last_lat.toFixed(5) + ', ' + r.last_lon.toFixed(5) + '</dd>' : '');
   elModalBg.classList.add('open');
 }
+
+function closeModal() { elModalBg.classList.remove('open'); }
 elModalBg.addEventListener('click', e => {
-  if (e.target === elModalBg || e.target.id === 'modal-close') {
-    elModalBg.classList.remove('open');
-  }
+  if (e.target === elModalBg) closeModal();
+});
+document.getElementById('modal-close').addEventListener('click', closeModal);
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && elModalBg.classList.contains('open')) closeModal();
 });
 
-elTable.querySelectorAll('th[data-sort]').forEach(th => {
-  th.addEventListener('click', () => {
-    const k = th.dataset.sort;
-    if (sortKey === k) {
-      sortDir = (sortDir === 'asc' ? 'desc' : 'asc');
-    } else {
-      sortKey = k;
-      sortDir = (k === 'name' || k === 'last') ? 'asc' : 'desc';
-    }
-    render();
-  });
+function updateDirBtn() {
+  elDir.textContent = sortDir === 'asc' ? '▲' : '▼';
+  elDir.title = sortDir === 'asc' ? 'aufsteigend' : 'absteigend';
+}
+
+elSort.addEventListener('change', () => {
+  const k = elSort.value;
+  if (k !== sortKey) {
+    sortKey = k;
+    sortDir = (k === 'name' || k === 'last') ? 'asc' : 'desc';
+    updateDirBtn();
+  }
+  render();
+});
+elDir.addEventListener('click', () => {
+  sortDir = (sortDir === 'asc' ? 'desc' : 'asc');
+  updateDirBtn();
+  render();
 });
 
 async function refresh() {
@@ -271,6 +482,7 @@ async function refresh() {
 
 elWindow.addEventListener('change', refresh);
 document.getElementById('btn-reload').addEventListener('click', refresh);
+updateDirBtn();
 refresh();
 </script>
 {% endblock %}
