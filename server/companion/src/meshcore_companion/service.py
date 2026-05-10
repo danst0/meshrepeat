@@ -89,24 +89,28 @@ PUBLIC_CHANNEL_PSK_B64 = "izOH6cXN6mrJ5e26oRXNcg=="
 """Default-Channel, der für jede Identity automatisch angelegt wird."""
 
 # Voreingestellte Hashtag-Channels der Mesh-Rheinland-Community
-# (https://www.meshrheinland.de/meshcore/channels). PSK = sha256(name)[:16];
+# (https://www.meshrheinland.de/meshcore/channels). Namen werden ohne
+# führendes ``#`` gespeichert (Anzeige-Sigil, kein Identifier-Bestandteil);
+# die PSK-Ableitung in ``_hash_channel_secret_and_hash`` setzt es vor der
+# Hash-Berechnung wieder voran, damit der Wire-Hash mit den anderen
+# MeshCore-Apps kompatibel bleibt.
 # Channel-Hash = sha256(PSK_real16)[:1] — gleiche Konvention wie Public.
 # Werden pro Identity automatisch angelegt, sind aber per Default *nicht*
 # favorisiert; der User kann sie in der UI manuell als Favorit markieren.
 DEFAULT_HASH_CHANNELS: tuple[str, ...] = (
-    "#bonn",
-    "#bot",
-    "#de",
-    "#eifel",
-    "#emergency",
-    "#koeln",
-    "#mc-radar",
-    "#nrw",
-    "#ping",
-    "#rheinland",
-    "#test",
-    "#testkanal",
-    "#wetter",
+    "bonn",
+    "bot",
+    "de",
+    "eifel",
+    "emergency",
+    "koeln",
+    "mc-radar",
+    "nrw",
+    "ping",
+    "rheinland",
+    "test",
+    "testkanal",
+    "wetter",
 )
 
 
@@ -122,10 +126,15 @@ def _public_channel_secret_and_hash() -> tuple[bytes, bytes]:
 
 
 def _hash_channel_secret_and_hash(name: str) -> tuple[bytes, bytes]:
-    """Hash-Channel à la MeshCore: PSK = sha256(name)[:16] (z.B. ``#test``);
-    auf 32 Byte gepaddet abgelegt, Channel-Hash = sha256(PSK_real16)[:1].
+    """Hash-Channel à la MeshCore: PSK = sha256("#" + name)[:16]
+    (Mesh-Rheinland-Doku: ``sha256("#test")``); auf 32 Byte gepaddet
+    abgelegt, Channel-Hash = sha256(PSK_real16)[:1].
+
+    ``name`` wird ohne Sigil übergeben und in der DB ohne Sigil gespeichert
+    (siehe ``DEFAULT_HASH_CHANNELS``). Das ``#`` ist eine Anzeige-Konvention
+    der UI, gehört aber laut Firmware in den PSK-Hash-Input.
     """
-    real = hashlib.sha256(name.encode("utf-8")).digest()[:16]
+    real = hashlib.sha256(f"#{name}".encode()).digest()[:16]
     secret = real.ljust(32, b"\x00")
     chash = hashlib.sha256(real).digest()[:PATH_HASH_SIZE]
     return secret, chash

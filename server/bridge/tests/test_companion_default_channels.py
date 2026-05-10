@@ -48,8 +48,10 @@ async def test_add_identity_seeds_default_channels(service_env) -> None:
 
 @pytest.mark.asyncio
 async def test_hash_channel_psk_matches_meshcore_convention(service_env) -> None:
-    """Hash-Channel-PSK = sha256(name)[:16], gepaddet auf 32 Byte;
-    Channel-Hash = sha256(PSK_real16)[:1]."""
+    """Hash-Channel-PSK = sha256("#" + name)[:16], gepaddet auf 32 Byte;
+    Channel-Hash = sha256(PSK_real16)[:1]. ``name`` ist ohne Sigil
+    in der DB; das ``#`` ist Anzeige-Konvention, gehört aber laut
+    Mesh-Rheinland-Doku in den Hash-Input."""
     svc, sessionmaker, user_id, _sent = service_env
     loaded = await svc.add_identity(user_id=user_id, name="Antonia", scope="public")
 
@@ -58,7 +60,7 @@ async def test_hash_channel_psk_matches_meshcore_convention(service_env) -> None
             await db.execute(
                 select(CompanionChannel).where(
                     CompanionChannel.identity_id == loaded.id,
-                    CompanionChannel.name == "#test",
+                    CompanionChannel.name == "test",
                 )
             )
         ).scalar_one()
@@ -68,8 +70,8 @@ async def test_hash_channel_psk_matches_meshcore_convention(service_env) -> None
     expected_hash = hashlib.sha256(real).digest()[:1]
     assert ch.secret == expected_secret
     assert ch.channel_hash == expected_hash
-    # Helper liefert dasselbe Tupel
-    assert _hash_channel_secret_and_hash("#test") == (expected_secret, expected_hash)
+    # Helper kriegt den nackten Namen, präfixt selbst.
+    assert _hash_channel_secret_and_hash("test") == (expected_secret, expected_hash)
 
 
 @pytest.mark.asyncio
@@ -84,7 +86,7 @@ async def test_ensure_hash_channels_preserves_user_favorite(service_env) -> None
             await db.execute(
                 select(CompanionChannel).where(
                     CompanionChannel.identity_id == loaded.id,
-                    CompanionChannel.name == "#nrw",
+                    CompanionChannel.name == "nrw",
                 )
             )
         ).scalar_one()
