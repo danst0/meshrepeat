@@ -220,3 +220,94 @@ async def test_dm_timeout_invalidates_out_path(service_env, monkeypatch) -> None
     contact_after = await _get_contact(sessionmaker, me.id, peer.pub_key)
     assert contact_after.out_path is None
     assert svc._pending_dms == {}
+
+
+@pytest.mark.asyncio
+async def test_send_dm_uses_identity_hash_size_for_direct(service_env) -> None:
+    """Bei path_hash_mode=1 muss DIRECT-DM mit hash_size=2 encoden — der
+    gelernte out_path wurde im selben Mode aufgenommen (2 Bytes/Hop) und
+    muss entsprechend interpretiert werden, sonst kollidiert die im
+    path_len_byte signalisierte hash_size mit der tatsächlichen Pfad-
+    Bytelänge."""
+    svc, sessionmaker, user_id, sent = service_env
+
+    me = await svc.add_identity(
+        user_id=user_id, name="Me2B", scope="public", path_hash_mode=1
+    )
+    peer = CompanionNode(LocalIdentity.generate())
+    await _add_peer_contact(sessionmaker, me.id, peer.pub_key)
+
+    # 2 Hops a 2 Byte = 4 Bytes; passt zu hash_size=2.
+    fake_path_2b = b"\xa1\xa2\xb1\xb2"
+    async with sessionmaker() as db:
+        contact = (
+            await db.execute(
+                select(CompanionContact).where(
+                    CompanionContact.identity_id == me.id,
+                    CompanionContact.peer_pubkey == peer.pub_key,
+                )
+            )
+        ).scalar_one()
+        contact.out_path = fake_path_2b
+        contact.out_path_updated_at = datetime.now(UTC)
+        await db.commit()
+
+    sent.clear()
+    ok = await svc.send_dm(identity_id=me.id, peer_pubkey=peer.pub_key, text="hi2b")
+    assert ok
+
+    txt = [
+        Packet.decode(r)
+        for r, _ in sent
+        if Packet.decode(r).payload_type == PayloadType.TXT_MSG
+    ]
+    assert len(txt) == 1
+    pkt = txt[0]
+    assert pkt.route_type == RouteType.DIRECT
+    assert pkt.hash_size == 2
+    assert pkt.path == fake_path_2b
+    assert pkt.hop_count == 2
+    # Wire-Roundtrip-Check: der raw soll exakt mit path_len_byte=0x42 starten
+    # (hash_size=2, hop_count=2). Das wäre vor dem Fix 0x04 (1B-Schema, 4 Hops).
+    raw = pkt.encode()
+    assert raw[1] == 0x42, f"expected path_len 0x42, got {raw[1]:#04x}"
+
+
+@pytest.mark.asyncio
+async def test_set_path_hash_mode_invalidates_out_paths(service_env) -> None:
+    """Mode-Wechsel macht alle gelernten out_paths stale — sie wurden im
+    alten Hash-Schema gelernt und müssen verworfen werden."""
+    svc, sessionmaker, user_id, _sent = service_env
+
+    me = await svc.add_identity(user_id=user_id, name="MeMW", scope="public")
+    peer = CompanionNode(LocalIdentity.generate())
+    await _add_peer_contact(sessionmaker, me.id, peer.pub_key)
+
+    async with sessionmaker() as db:
+        contact = (
+            await db.execute(
+                select(CompanionContact).where(
+                    CompanionContact.identity_id == me.id,
+                    CompanionContact.peer_pubkey == peer.pub_key,
+                )
+            )
+        ).scalar_one()
+        contact.out_path = b"\xa1\xa2\xa3"
+        contact.out_path_updated_at = datetime.now(UTC)
+        await db.commit()
+
+    # Idempotenter Aufruf (gleicher Mode) lässt alles stehen.
+    ok = await svc.set_path_hash_mode(me.id, 0)
+    assert ok
+    contact_same = await _get_contact(sessionmaker, me.id, peer.pub_key)
+    assert contact_same.out_path == b"\xa1\xa2\xa3"
+
+    # Tatsächlicher Wechsel invalidiert.
+    ok = await svc.set_path_hash_mode(me.id, 1)
+    assert ok
+    contact_after = await _get_contact(sessionmaker, me.id, peer.pub_key)
+    assert contact_after.out_path is None
+    assert contact_after.out_path_updated_at is not None
+    # In-Memory-Loaded ist konsistent.
+    assert svc.get(me.id).path_hash_mode == 1
+    assert svc.get(me.id).hash_size == 2

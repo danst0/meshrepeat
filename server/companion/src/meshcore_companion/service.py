@@ -517,16 +517,36 @@ class CompanionService:
         """Setzt ``path_hash_mode`` (0/1/2) für eine Identity in DB +
         In-Memory. Wirkt sofort auf neue ausgehende Pakete (FLOOD-DM,
         GRP_TXT, Adverts).
+
+        Bei tatsächlicher Mode-Änderung werden alle gelernten ``out_path``
+        dieser Identity invalidiert (auf NULL gesetzt). Sie wurden im
+        alten Hash-Schema gelernt und passen nicht mehr zur neuen
+        ``hash_size`` — der nächste DM würde sonst ein Wire-Layout mit
+        falscher Hop/Size-Kombination erzeugen.
         """
         if mode not in (0, 1, 2):
             raise ValueError(f"path_hash_mode must be 0, 1, or 2, got {mode}")
-        from meshcore_bridge.db import CompanionIdentity
+        from meshcore_bridge.db import CompanionContact, CompanionIdentity
 
+        invalidated = 0
         async with self.sessionmaker() as db:
             row = await db.get(CompanionIdentity, identity_id)
             if row is None or row.archived_at is not None:
                 return False
+            old_mode = row.path_hash_mode
             row.path_hash_mode = mode
+            if old_mode != mode:
+                result = await db.execute(
+                    select(CompanionContact).where(
+                        CompanionContact.identity_id == identity_id,
+                        CompanionContact.out_path.is_not(None),
+                    )
+                )
+                contacts = list(result.scalars())
+                for contact in contacts:
+                    contact.out_path = None
+                    contact.out_path_updated_at = datetime.now(UTC)
+                invalidated = len(contacts)
             await db.commit()
         loaded = self._by_id.get(identity_id)
         if loaded is not None:
@@ -535,6 +555,7 @@ class CompanionService:
             "path_hash_mode_set",
             identity_id=str(identity_id),
             mode=mode,
+            invalidated_out_paths=invalidated,
         )
         return True
 
@@ -1089,6 +1110,7 @@ class CompanionService:
             text=self._PROBE_DM_TEXT,
             timestamp=ts,
             path=out_path,
+            hash_size=loaded.hash_size,
         )
         ack_hash = compute_dm_ack_hash(
             timestamp=ts,
@@ -1215,15 +1237,18 @@ class CompanionService:
 
         ts = int(time.time())
         text_bytes = text.encode("utf-8")
-        # FLOOD nutzt das Identity-Setting; DIRECT muss zur Bytelänge des
-        # gelernten Pfades passen — Out-Paths sind heute 1-Byte/Hop.
-        dm_hash_size = 1 if out_path else loaded.hash_size
+        # hash_size gilt für FLOOD und DIRECT gleich: Repeater hängen bei
+        # FLOOD ihre Hashes in dieser Größe an, und ein gelernter out_path
+        # wurde im selben Mode aufgenommen (try_decrypt_path liest die
+        # hash_size aus dem PATH-Plaintext des Senders, das ist genau
+        # unser Identity-Setting). Stale Pfade aus einem früheren Mode
+        # werden beim Mode-Wechsel in set_path_hash_mode invalidiert.
         pkt = loaded.node.make_dm(
             peer_pubkey=peer_pubkey,
             text=text,
             timestamp=ts,
             path=out_path,
-            hash_size=dm_hash_size,
+            hash_size=loaded.hash_size,
         )
         await self._persist_outgoing(loaded, peer_pubkey=peer_pubkey, text=text, raw=pkt.encode())
 
