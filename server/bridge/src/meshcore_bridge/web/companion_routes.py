@@ -1693,6 +1693,25 @@ async def companion_identity_echo(
     return RedirectResponse(url=f"/companion/{identity_id}/#tab=settings", status_code=303)
 
 
+@ui_router.post("/{identity_id}/path-hash-mode", response_model=None)
+async def companion_identity_path_hash_mode(
+    request: Request,
+    identity_id: UUID,
+    mode: Annotated[int, Form()],
+    user: User = Depends(current_user_required),
+    db: AsyncSession = Depends(get_db),
+) -> RedirectResponse:
+    if not await _user_owns_identity(db, user.id, identity_id):
+        raise HTTPException(status_code=404)
+    if mode not in (0, 1, 2):
+        raise HTTPException(status_code=422, detail="mode must be 0, 1, or 2")
+    svc = _service(request)
+    if svc is None:
+        raise HTTPException(status_code=503)
+    await svc.set_path_hash_mode(identity_id, mode)
+    return RedirectResponse(url=f"/companion/{identity_id}/#tab=settings", status_code=303)
+
+
 @ui_router.post("/{identity_id}/channels", response_model=None)
 async def companion_identity_channel_create(
     request: Request,

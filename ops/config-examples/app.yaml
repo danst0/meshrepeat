@@ -45,7 +45,7 @@ web:
 
 companion:
   enabled: true
-  advert_interval_s: 3600            # wie oft eine Identity ihren Advert flutet
+  advert_interval_s: 180000          # 50 h — Community-Etiquette (mc-radar)
 
 # Auto-Übersetzung eingehender Companion-Nachrichten (Ollama lokal).
 # Im Browser per Checkbox in der Chat-View an-/ausschaltbar; serverseitig

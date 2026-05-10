@@ -220,7 +220,7 @@ class CompanionService:
     sessionmaker: Callable[[], AbstractAsyncContextManager[AsyncSession]]
     inject: PacketInjector | None = None
     notify: EventNotifier | None = None
-    advert_interval_s: int = 600
+    advert_interval_s: int = 180_000
     probe_interval_s: int = 0
     # Wenn gesetzt, werden eingehende Texte (DM, Room-Push, Channel) im
     # Hintergrund per Ollama übersetzt und per ``message_translated``-SSE

@@ -75,10 +75,10 @@ class WebConfig(BaseModel):
 
 class CompanionConfig(BaseModel):
     enabled: bool = True
-    # 600s (10 Min) hält die Path-Caches der Repeater im Mesh frisch — bei
-    # 3600s (1 h) wird Antonias Reverse-Path zwischendurch verdrängt und
-    # Replies bleiben aus.
-    advert_interval_s: int = 600
+    # 50 h Default folgt der Community-Etiquette (mc-radar: max. 1 Flood-Advert
+    # pro 50 h). Kürzere Intervalle helfen zwar Path-Caches, fluten aber das
+    # ganze Mesh und werden öffentlich als Misconfiguration gelistet.
+    advert_interval_s: int = 180_000
     # Auto-Probe-Loop: schickt eine "[probe]"-DM an jeden Favoriten-Kontakt
     # alle N Sekunden, persistiert ACK/Loss in companion_link_probes. 0 = aus.
     # Vorsicht: jede Probe ist eine echte LoRa-DM mit ACK — Default lieber

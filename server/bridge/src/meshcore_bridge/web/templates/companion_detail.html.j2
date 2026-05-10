@@ -182,6 +182,23 @@
         Echo-Bot: <strong>{{ 'an' if identity.is_echo else 'aus' }}</strong>
         — beantwortet eingehende DMs automatisch mit Text + Metadaten (hops, route, age, len).
       </p>
+      <form method="post" action="/companion/{{ identity.id }}/path-hash-mode"
+            style="margin-top:1rem;display:flex;gap:.5rem;align-items:center;flex-wrap:wrap">
+        <label style="margin:0">Path-Hash-Größe
+          <select name="mode">
+            <option value="0" {% if identity.path_hash_mode == 0 %}selected{% endif %}>1 Byte (default, kompatibel)</option>
+            <option value="1" {% if identity.path_hash_mode == 1 %}selected{% endif %}>2 Byte (Repeater ≥ v1.14)</option>
+            <option value="2" {% if identity.path_hash_mode == 2 %}selected{% endif %}>3 Byte (Repeater ≥ v1.14)</option>
+          </select>
+        </label>
+        <button type="submit" style="margin:0">Übernehmen</button>
+      </form>
+      <p style="font-size:.85em;color:var(--muted);margin:.25rem 0 0">
+        Gilt für alle ausgehenden Pakete dieser Identität (DM via FLOOD,
+        Channel-Posts, eigene Adverts). Repeater &lt; v1.14 droppen
+        2-/3-Byte-Pakete still — vor dem Umstellen sicherstellen, dass
+        die Repeater im Pfad aktuell sind.
+      </p>
       <div style="display:flex;gap:.5rem;flex-wrap:wrap;margin-top:1rem">
         <form method="post" action="/companion/{{ identity.id }}/advert" style="margin:0">
           <button type="submit" style="margin:0">Advert jetzt senden</button>

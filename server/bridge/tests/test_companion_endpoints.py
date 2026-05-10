@@ -832,6 +832,37 @@ async def test_create_identity_rejects_invalid_path_hash_mode(app_and_outbox) ->
 
 
 @pytest.mark.asyncio
+async def test_ui_form_path_hash_mode_redirects_and_persists(app_and_outbox) -> None:
+    """Das HTML-Form im Settings-Tab postet auf /companion/{id}/path-hash-mode
+    (nicht /api/v1/...) und erwartet einen 303-Redirect zurück auf den
+    Settings-Tab."""
+    app, sender = app_and_outbox
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://t") as client:
+        ident_id = await _login_and_create_identity(
+            client, sender, email="ui@example.com"
+        )
+        resp = await client.post(
+            f"/companion/{ident_id}/path-hash-mode",
+            data={"mode": "1"},
+            follow_redirects=False,
+        )
+        assert resp.status_code == 303, resp.text
+        assert resp.headers["location"].endswith(f"/companion/{ident_id}/#tab=settings")
+
+        listing = await client.get("/api/v1/companion/identities")
+        me = next(i for i in listing.json() if i["id"] == ident_id)
+        assert me["path_hash_mode"] == 1
+
+        bad = await client.post(
+            f"/companion/{ident_id}/path-hash-mode",
+            data={"mode": "9"},
+            follow_redirects=False,
+        )
+        assert bad.status_code == 422
+
+
+@pytest.mark.asyncio
 async def test_set_identity_path_hash_mode_route(app_and_outbox) -> None:
     """POST .../path-hash-mode aktualisiert den Modus, listing reflektiert
     den neuen Wert, und der Service-In-Memory-State zieht nach (Hot-Reload)."""
