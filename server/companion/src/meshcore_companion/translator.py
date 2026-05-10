@@ -60,6 +60,9 @@ class TranslatorConfig:
     timeout_s: float
     min_chars: int
     max_chars: int
+    # Tickrate des Batch-Loops in Sekunden, der noch nicht übersetzte Rows
+    # nachholt. ``0`` = Batch aus (nur live übersetzen).
+    batch_interval_s: int = 3600
 
 
 # Kleine ISO-639-1 → Klartext-Map für den Re-Versuch-Prompt. gemma4 und

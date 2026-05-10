@@ -61,6 +61,15 @@ companion:
 #   timeout_s: 20.0
 #   min_chars: 3
 #   max_chars: 800
+#   # Live übersetzen, wenn ein Browser-Tab das Companion-UI offen hat
+#   # (oder kürzlich hatte). Sonst holt der Batch-Loop alle X Sekunden
+#   # alle noch nicht übersetzten Nachrichten nach. ``0`` deaktiviert
+#   # den Batch (reiner Live-Modus, Backlog bleibt liegen).
+#   batch_interval_s: 3600
+#   # Grace-Period in Sekunden nach dem letzten SSE-Disconnect, in der
+#   # Live-Übersetzung weiterhin aktiv bleibt — verhindert Flackern bei
+#   # Reload/Tab-Wechsel.
+#   live_grace_s: 120.0
 
 storage:
   sqlite_path: "/data/meshcore.sqlite"

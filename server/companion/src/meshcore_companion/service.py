@@ -177,11 +177,18 @@ class CompanionService:
     # Hintergrund per Ollama übersetzt und per ``message_translated``-SSE
     # nachgereicht. Persistierung in companion_messages.translated_text.
     translation: TranslatorConfig | None = None
+    # Optionaler Callback, der ``True`` liefert, wenn aktuell mindestens
+    # ein Browser-Tab das Companion-UI offen hat (oder gerade hatte —
+    # Grace-Period im Bus). Steuert, ob neue Inbound-Texte sofort live
+    # übersetzt werden oder dem ``_translation_batch_loop`` überlassen
+    # bleiben. ``None`` = wie bisher immer live (Backwards-kompatibel).
+    is_listener_active: Callable[[], bool] | None = None
 
     _by_id: dict[UUID, LoadedIdentity] = field(default_factory=dict)
     _by_pubkey: dict[bytes, LoadedIdentity] = field(default_factory=dict)
     _advert_task: asyncio.Task[None] | None = None
     _probe_task: asyncio.Task[None] | None = None
+    _translation_batch_task: asyncio.Task[None] | None = None
     _stop: asyncio.Event = field(default_factory=asyncio.Event)
     # Inbound-Dedup: gleiches raw-Paket kommt pro verbundenem Repeater einmal
     # rein. Ohne dedup persistieren wir GRP_TXT/TXT_MSG mehrfach.
@@ -247,8 +254,17 @@ class CompanionService:
     def _schedule_translation(self, *, identity_id: UUID, msg_id: UUID, text: str | None) -> None:
         """Kickt einen Hintergrund-Task an, der den Text übersetzt, das DB-Row
         updated und ein ``message_translated``-Event emittiert. No-op, wenn
-        keine Translation-Config oder kein Text vorhanden ist."""
+        keine Translation-Config oder kein Text vorhanden ist.
+
+        Live-Gate: Wenn ``is_listener_active`` gesetzt ist und gerade ``False``
+        liefert (kein Browser-Tab offen, Grace-Period abgelaufen), wird die
+        Übersetzung übersprungen — ``_translation_batch_loop`` holt sie später
+        nach. So bleibt Ollama im Idle-Betrieb ruhig.
+        """
         if self.translation is None or not text:
+            return
+        if self.is_listener_active is not None and not self.is_listener_active():
+            _log.debug("translate_skip_no_listener", msg_id=str(msg_id))
             return
         task = asyncio.create_task(self._translate_and_publish(identity_id, msg_id, text))
         self._translation_tasks.add(task)
@@ -321,10 +337,12 @@ class CompanionService:
         self._advert_task = asyncio.create_task(self._advert_loop())
         if self.probe_interval_s > 0:
             self._probe_task = asyncio.create_task(self._probe_loop())
+        if self.translation is not None and self.translation.batch_interval_s > 0:
+            self._translation_batch_task = asyncio.create_task(self._translation_batch_loop())
 
     async def stop(self) -> None:
         self._stop.set()
-        for t in (self._advert_task, self._probe_task):
+        for t in (self._advert_task, self._probe_task, self._translation_batch_task):
             if t is not None:
                 t.cancel()
                 try:
@@ -2263,6 +2281,68 @@ class CompanionService:
                             pass
                 try:
                     await asyncio.wait_for(self._stop.wait(), timeout=self.probe_interval_s)
+                except TimeoutError:
+                    pass
+        except asyncio.CancelledError:
+            return
+
+    async def _translation_batch_loop(self) -> None:
+        """Holt periodisch alle ``companion_messages``-Rows nach, die
+        ``translated_text IS NULL`` haben und deren ``text`` non-leer ist.
+
+        Tickrate kommt aus ``translation.batch_interval_s`` (in
+        :func:`start` schon auf ``> 0`` geprüft). Initial-Pause wie
+        beim ``_probe_loop`` — beim Boot soll erst Live-Verkehr Vorrang
+        haben, der Batch fängt den Backlog ein Intervall später ab.
+
+        Läuft strikt sequentiell durch die Rows, damit Ollama nicht mit
+        N parallelen Anfragen geflutet wird. ``_translate_and_publish``
+        kümmert sich um Persistierung und SSE.
+        """
+        from meshcore_bridge.db import CompanionMessage
+
+        if self.translation is None:
+            return
+        interval = self.translation.batch_interval_s
+        try:
+            # Initial-Pause: nicht direkt beim Start feuern.
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=interval)
+            except TimeoutError:
+                pass
+            while not self._stop.is_set():
+                async with self.sessionmaker() as db:
+                    rows = list(
+                        (
+                            await db.execute(
+                                select(
+                                    CompanionMessage.id,
+                                    CompanionMessage.identity_id,
+                                    CompanionMessage.text,
+                                )
+                                .where(
+                                    CompanionMessage.translated_text.is_(None),
+                                    CompanionMessage.text.is_not(None),
+                                )
+                                .order_by(CompanionMessage.ts.asc())
+                            )
+                        ).all()
+                    )
+                if rows:
+                    _log.info("translate_batch_start", pending=len(rows))
+                for msg_id, identity_id, text in rows:
+                    if self._stop.is_set():
+                        return
+                    if not text:
+                        continue
+                    try:
+                        await self._translate_and_publish(identity_id, msg_id, text)
+                    except Exception:
+                        _log.exception("translate_batch_row_failed", msg_id=str(msg_id))
+                if rows:
+                    _log.info("translate_batch_done", processed=len(rows))
+                try:
+                    await asyncio.wait_for(self._stop.wait(), timeout=interval)
                 except TimeoutError:
                     pass
         except asyncio.CancelledError:

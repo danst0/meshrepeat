@@ -108,6 +108,14 @@ class TranslationConfig(BaseModel):
     # Schutz gegen lange Posts — wir kappen Übersetzung statt das LLM zu
     # belasten. Mesh-Texte sind eh ≤ ~200 Bytes.
     max_chars: int = 800
+    # Wie oft der Batch-Loop alle noch nicht übersetzten Nachrichten
+    # nachholt. Default 1 h. ``0`` deaktiviert den Batch — dann läuft
+    # ausschließlich der Live-Pfad und Backlog bleibt liegen.
+    batch_interval_s: int = 3600
+    # Live-Übersetzung läuft auch noch N Sekunden nach dem letzten
+    # SSE-Disconnect, damit Reload/Tab-Wechsel die Übersetzung nicht
+    # in den Batch-Modus kippt.
+    live_grace_s: float = 120.0
 
 
 class StorageConfig(BaseModel):

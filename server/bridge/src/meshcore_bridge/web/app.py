@@ -174,7 +174,12 @@ def build_app(cfg: AppConfig) -> FastAPI:
                     timeout_s=cfg.translation.timeout_s,
                     min_chars=cfg.translation.min_chars,
                     max_chars=cfg.translation.max_chars,
+                    batch_interval_s=cfg.translation.batch_interval_s,
                 )
+            # Live-Gate: Übersetzung läuft sofort, wenn ein Browser-Tab das
+            # Companion-UI offen hat (oder gerade hatte — Grace-Period).
+            # Sonst holt der Batch-Loop sie alle ``batch_interval_s`` nach.
+            grace_s = cfg.translation.live_grace_s
             companion_service = CompanionService(
                 master_key=cfg.db_key,
                 sessionmaker=get_session,
@@ -183,6 +188,7 @@ def build_app(cfg: AppConfig) -> FastAPI:
                 advert_interval_s=cfg.companion.advert_interval_s,
                 probe_interval_s=cfg.companion.probe_interval_s,
                 translation=translation_cfg,
+                is_listener_active=lambda: companion_events.has_active_listener(grace_s),
             )
             await companion_service.start()
             app.state.companion_service = companion_service
