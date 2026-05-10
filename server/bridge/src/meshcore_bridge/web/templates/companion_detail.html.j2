@@ -203,10 +203,14 @@
       <h2>Kanäle ({{ channels | length }})</h2>
       {% if channels %}
         <table>
-          <thead><tr><th>Name</th><th>Hash</th><th></th></tr></thead>
+          <thead><tr><th></th><th>Name</th><th>Hash</th><th></th></tr></thead>
           <tbody>
           {% for ch in channels %}
             <tr>
+              <td title="{{ 'Favorit' if ch.favorite else 'Kein Favorit' }}"
+                  style="color:{{ 'gold' if ch.favorite else 'var(--muted)' }};font-size:1.1em">
+                {{ '★' if ch.favorite else '☆' }}
+              </td>
               <td>{{ ch.name }}</td>
               <td><code>{{ ch.channel_hash.hex() }}</code></td>
               <td>

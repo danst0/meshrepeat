@@ -88,6 +88,27 @@ PUBLIC_CHANNEL_NAME = "public"
 PUBLIC_CHANNEL_PSK_B64 = "izOH6cXN6mrJ5e26oRXNcg=="
 """Default-Channel, der für jede Identity automatisch angelegt wird."""
 
+# Voreingestellte Hashtag-Channels der Mesh-Rheinland-Community
+# (https://www.meshrheinland.de/meshcore/channels). PSK = sha256(name)[:16];
+# Channel-Hash = sha256(PSK_real16)[:1] — gleiche Konvention wie Public.
+# Werden pro Identity automatisch angelegt, sind aber per Default *nicht*
+# favorisiert; der User kann sie in der UI manuell als Favorit markieren.
+DEFAULT_HASH_CHANNELS: tuple[str, ...] = (
+    "#bonn",
+    "#bot",
+    "#de",
+    "#eifel",
+    "#emergency",
+    "#koeln",
+    "#mc-radar",
+    "#nrw",
+    "#ping",
+    "#rheinland",
+    "#test",
+    "#testkanal",
+    "#wetter",
+)
+
 
 def _public_channel_secret_and_hash() -> tuple[bytes, bytes]:
     """Liefert (secret_32, channel_hash_1) für den MeshCore-Public-Channel.
@@ -95,6 +116,16 @@ def _public_channel_secret_and_hash() -> tuple[bytes, bytes]:
     Konvention), nicht über das mit Nullen gepaddete 32-Byte-Secret.
     """
     real = base64.b64decode(PUBLIC_CHANNEL_PSK_B64)
+    secret = real.ljust(32, b"\x00")
+    chash = hashlib.sha256(real).digest()[:PATH_HASH_SIZE]
+    return secret, chash
+
+
+def _hash_channel_secret_and_hash(name: str) -> tuple[bytes, bytes]:
+    """Hash-Channel à la MeshCore: PSK = sha256(name)[:16] (z.B. ``#test``);
+    auf 32 Byte gepaddet abgelegt, Channel-Hash = sha256(PSK_real16)[:1].
+    """
+    real = hashlib.sha256(name.encode("utf-8")).digest()[:16]
     secret = real.ljust(32, b"\x00")
     chash = hashlib.sha256(real).digest()[:PATH_HASH_SIZE]
     return secret, chash
@@ -329,9 +360,10 @@ class CompanionService:
                 self._by_id[row.id] = loaded
                 self._by_pubkey[loaded.pubkey] = loaded
 
-        # Default-Public-Channel pro Identity sicherstellen
+        # Default-Public-Channel + voreingestellte Hash-Channels pro Identity
         for identity_id in list(self._by_id.keys()):
             await self._ensure_public_channel(identity_id)
+            await self._ensure_hash_channels(identity_id)
 
         self._stop.clear()
         self._advert_task = asyncio.create_task(self._advert_loop())
@@ -403,8 +435,9 @@ class CompanionService:
         )
         self._by_id[row_id] = loaded
         self._by_pubkey[loaded.pubkey] = loaded
-        # Default-Public-Channel mit anlegen
+        # Default-Public-Channel + Hash-Channels mit anlegen
         await self._ensure_public_channel(row_id)
+        await self._ensure_hash_channels(row_id)
         # Erst-Advert sofort
         await self._send_advert(loaded)
         return loaded
@@ -1204,7 +1237,7 @@ class CompanionService:
     async def _ensure_public_channel(self, identity_id: UUID) -> None:
         """Idempotent: legt den MeshCore-Public-Channel an oder migriert
         ein bestehendes ``public`` mit falschem (legacy) Secret auf den
-        offiziellen PSK."""
+        offiziellen PSK. Public ist immer favorisiert."""
         from meshcore_bridge.db import CompanionChannel
 
         secret, chash = _public_channel_secret_and_hash()
@@ -1225,10 +1258,12 @@ class CompanionService:
                             name=PUBLIC_CHANNEL_NAME,
                             secret=secret,
                             channel_hash=chash,
+                            favorite=True,
                         )
                     )
                     await db.commit()
                     return
+                changed = False
                 if existing.secret != secret or existing.channel_hash != chash:
                     _log.info(
                         "public_channel_secret_migrated",
@@ -1236,9 +1271,63 @@ class CompanionService:
                     )
                     existing.secret = secret
                     existing.channel_hash = chash
+                    changed = True
+                if not existing.favorite:
+                    existing.favorite = True
+                    changed = True
+                if changed:
                     await db.commit()
         except Exception:
             _log.exception("ensure_public_channel_failed", identity_id=str(identity_id))
+
+    async def _ensure_hash_channels(self, identity_id: UUID) -> None:
+        """Idempotent: legt die voreingestellten Mesh-Rheinland-Hashtag-
+        Channels an. Schon vorhandene Channels (unabhängig von der
+        Quelle) werden nicht angefasst — insbesondere bleibt das
+        ``favorite``-Flag erhalten, wenn der User es manuell gesetzt hat.
+
+        Bewusst kein Migrations-Pfad für falsche Secrets: Hash-Channels
+        sind durch ihren Namen schon eindeutig definiert; Konflikte mit
+        einem fremden Channel gleichen Namens wären selten und sollten
+        dem User nicht stillschweigend wegmigriert werden."""
+        from meshcore_bridge.db import CompanionChannel
+
+        try:
+            async with self.sessionmaker() as db:
+                existing_names = set(
+                    (
+                        await db.execute(
+                            select(CompanionChannel.name).where(
+                                CompanionChannel.identity_id == identity_id,
+                                CompanionChannel.name.in_(DEFAULT_HASH_CHANNELS),
+                            )
+                        )
+                    ).scalars()
+                )
+                added = 0
+                for name in DEFAULT_HASH_CHANNELS:
+                    if name in existing_names:
+                        continue
+                    secret, chash = _hash_channel_secret_and_hash(name)
+                    db.add(
+                        CompanionChannel(
+                            identity_id=identity_id,
+                            name=name,
+                            secret=secret,
+                            channel_hash=chash,
+                            favorite=False,
+                        )
+                    )
+                    added += 1
+                if added:
+                    await db.commit()
+                    _log.info(
+                        "hash_channels_seeded",
+                        identity_id=str(identity_id),
+                        added=added,
+                    )
+        except Exception:
+            _log.exception("ensure_hash_channels_failed", identity_id=str(identity_id))
 
     async def send_channel(
         self,

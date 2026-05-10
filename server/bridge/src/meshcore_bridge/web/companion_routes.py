@@ -290,6 +290,7 @@ def _channel_dict(c: CompanionChannel) -> dict[str, Any]:
         "identity_id": str(c.identity_id),
         "name": c.name,
         "channel_hash_hex": c.channel_hash.hex(),
+        "favorite": bool(c.favorite),
         "created_at": _ts_iso(c.created_at),
     }
 
@@ -316,7 +317,9 @@ async def list_channels(
     rows = list(
         (
             await db.execute(
-                select(CompanionChannel).where(CompanionChannel.identity_id.in_(own_ids))
+                select(CompanionChannel)
+                .where(CompanionChannel.identity_id.in_(own_ids))
+                .order_by(CompanionChannel.favorite.desc(), CompanionChannel.name)
             )
         ).scalars()
     )
@@ -341,6 +344,26 @@ async def create_channel(
     if channel is None:
         raise HTTPException(status_code=409, detail="identity not loaded or duplicate name")
     return _channel_dict(channel)
+
+
+@router.post("/channels/{channel_id}/favorite", response_model=None)
+async def toggle_channel_favorite_rest(
+    channel_id: UUID,
+    user: User = Depends(current_user_required),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Toggle für das ``favorite``-Flag eines Channels (analog zu Contacts).
+    Public bleibt nach Erst-Einrichtung favorisiert, kann hier aber vom
+    User explizit entfavorisiert werden."""
+    channel = await db.get(CompanionChannel, channel_id)
+    if channel is None:
+        raise HTTPException(status_code=404)
+    ident = await db.get(CompanionIdentity, channel.identity_id)
+    if ident is None or ident.user_id != user.id:
+        raise HTTPException(status_code=404)
+    channel.favorite = not channel.favorite
+    await db.commit()
+    return {"id": str(channel.id), "favorite": channel.favorite}
 
 
 @router.post("/messages/channel", response_model=None)
@@ -476,7 +499,7 @@ async def list_identity_threads(
             await db.execute(
                 select(CompanionChannel)
                 .where(CompanionChannel.identity_id == identity_id)
-                .order_by(CompanionChannel.name)
+                .order_by(CompanionChannel.favorite.desc(), CompanionChannel.name)
             )
         ).scalars()
     )
@@ -518,7 +541,7 @@ async def list_identity_threads(
         )
     _sort_dm_threads(dms)
 
-    chan_rows = []
+    chan_rows: list[dict[str, Any]] = []
     for ch in channels:
         last = chan_last.get(ch.name)
         chan_rows.append(
@@ -526,12 +549,15 @@ async def list_identity_threads(
                 "id": str(ch.id),
                 "name": ch.name,
                 "channel_hash_hex": ch.channel_hash.hex(),
+                "favorite": bool(ch.favorite),
                 "last_ts": _ts_iso(last.ts) if last else None,
                 "last_text": last.text if last else None,
                 "last_direction": last.direction if last else None,
             }
         )
+    # Reihenfolge wie bei DMs: zuerst Aktualität, dann Favoriten ganz oben.
     chan_rows.sort(key=lambda c: c["last_ts"] or "", reverse=True)
+    chan_rows.sort(key=lambda c: not c["favorite"])
 
     return {"dms": dms, "channels": chan_rows}
 
@@ -1494,7 +1520,7 @@ async def companion_detail(
             await db.execute(
                 select(CompanionChannel)
                 .where(CompanionChannel.identity_id == identity_id)
-                .order_by(CompanionChannel.name)
+                .order_by(CompanionChannel.favorite.desc(), CompanionChannel.name)
             )
         ).scalars()
     )

@@ -286,10 +286,31 @@
       const key = "ch:" + ch.id;
       if (unread[key] && unread[key] > 0) wrap.classList.add("has-unread");
       if (active && active.kind === "channel" && active.channel_id === ch.id) wrap.classList.add("active");
-      // Kanäle haben (noch) keinen Stern; reservierte Spalte für Layout-Konsistenz
-      const spacer = document.createElement("span");
-      spacer.style.minWidth = "44px";
-      wrap.appendChild(spacer);
+      const star = document.createElement("button");
+      star.type = "button";
+      star.className = "thread-star";
+      star.textContent = ch.favorite ? "★" : "☆";
+      star.style.color = ch.favorite ? "gold" : "var(--muted)";
+      star.title = ch.favorite ? "Favorit entfernen" : "Als Favorit markieren";
+      star.addEventListener("click", async (e) => {
+        e.stopPropagation();
+        e.preventDefault();
+        try {
+          const r = await fetch(`${API}/channels/${ch.id}/favorite`, {
+            method: "POST", credentials: "same-origin",
+          });
+          if (!r.ok) {
+            console.warn("channel favorite toggle failed:", r.status);
+            alert("Favorit-Toggle fehlgeschlagen (HTTP " + r.status + ")");
+            return;
+          }
+          await loadThreads();
+        } catch (err) {
+          console.warn("channel favorite toggle failed", err);
+          alert("Favorit-Toggle fehlgeschlagen: " + (err && err.message || err));
+        }
+      });
+      wrap.appendChild(star);
 
       const item = document.createElement("button");
       item.type = "button";

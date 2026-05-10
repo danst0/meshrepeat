@@ -279,6 +279,9 @@ class CompanionChannel(Base):
     name: Mapped[str] = mapped_column(String(64), nullable=False)
     secret: Mapped[bytes] = mapped_column(BLOB, nullable=False)  # 32 bytes
     channel_hash: Mapped[bytes] = mapped_column(BLOB, nullable=False)  # 1 byte
+    favorite: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="0", default=False
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
