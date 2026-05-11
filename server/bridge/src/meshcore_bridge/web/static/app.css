@@ -181,6 +181,9 @@ code, pre {
   overflow-y: auto;
   flex-direction: column;
   gap: .25rem;
+  /* offsetParent für .thread-row, damit der Sticky-Indikator mit
+     offsetTop/scrollTop rechnen kann. */
+  position: relative;
 }
 .thread-item {
   margin: 0;
@@ -268,6 +271,28 @@ code, pre {
 }
 .thread-row.has-unread .unread-badge { display: inline-block; }
 .thread-row.has-unread .thread-name { font-weight: bold; }
+
+/* Sticky-Pill am unteren Sidebar-Rand: erscheint, wenn ungelesene Threads
+   unterhalb der Sichtbarkeitsgrenze stehen. Klick scrollt zum ersten. */
+.thread-unread-jump {
+  position: sticky;
+  bottom: .5rem;
+  align-self: center;
+  margin-top: auto;
+  background: var(--accent);
+  color: var(--bg);
+  border: none;
+  border-radius: 14px;
+  padding: .35rem .85rem;
+  font-size: .8rem;
+  font-weight: 600;
+  cursor: pointer;
+  box-shadow: 0 2px 8px rgba(0,0,0,.5);
+  z-index: 3;
+  white-space: nowrap;
+}
+.thread-unread-jump[hidden] { display: none; }
+.thread-unread-jump:hover { filter: brightness(1.1); }
 
 .thread-view { display: flex; flex-direction: column; min-width: 0; }
 .thread-header {

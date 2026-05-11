@@ -64,6 +64,8 @@
     unread[key] = (unread[key] || 0) + 1;
     persistUnread();
     updateTitle();
+    // setTimeout, falls die Row gerade erst nachgerendert wird.
+    setTimeout(() => { try { updateUnreadJumpIndicator(); } catch (e) {} }, 0);
   }
   function clearUnread(key) {
     if (!key) return;
@@ -71,6 +73,7 @@
       delete unread[key];
       persistUnread();
       updateTitle();
+      setTimeout(() => { try { updateUnreadJumpIndicator(); } catch (e) {} }, 0);
     }
   }
   function totalUnread() {
@@ -466,11 +469,53 @@
         ? `kein Treffer für "${escText(dmFilter)}"`
         : "Keine Chats. Tippe oben einen Namen oder Pubkey-Hex.";
       box.innerHTML = `<div class="thread-empty" style="color:var(--muted);padding:.5rem">${hint}</div>`;
+      updateUnreadJumpIndicator();
       return;
     }
     box.innerHTML = "";
     for (const it of items) {
       box.appendChild(it.kind === "channel" ? buildChannelRow(it.data) : buildDmRow(it.data));
+    }
+    updateUnreadJumpIndicator();
+  }
+
+  // Zählt ungelesene Sidebar-Zeilen, die unterhalb der sichtbaren
+  // Scroll-Region des #threads-Containers stehen. Schaltet die sticky-Pill
+  // entsprechend ein/aus.
+  function updateUnreadJumpIndicator() {
+    const scroller = document.getElementById("threads");
+    const btn = document.getElementById("thread-jump-unread");
+    if (!scroller || !btn) return;
+    const rows = scroller.querySelectorAll(".thread-row.has-unread");
+    if (!rows.length) {
+      btn.hidden = true;
+      return;
+    }
+    const fold = scroller.scrollTop + scroller.clientHeight;
+    let belowCount = 0;
+    for (const r of rows) {
+      // offsetTop ist relativ zum nächsten positionierten Vorfahren;
+      // bei #threads als offsetParent passt das (siehe CSS unten).
+      if (r.offsetTop + r.offsetHeight > fold) belowCount++;
+    }
+    if (belowCount > 0) {
+      btn.textContent = `↓ ${belowCount} ungelesen`;
+      btn.hidden = false;
+    } else {
+      btn.hidden = true;
+    }
+  }
+
+  function scrollToFirstUnreadBelow() {
+    const scroller = document.getElementById("threads");
+    if (!scroller) return;
+    const fold = scroller.scrollTop + scroller.clientHeight;
+    const rows = scroller.querySelectorAll(".thread-row.has-unread");
+    for (const r of rows) {
+      if (r.offsetTop + r.offsetHeight > fold) {
+        r.scrollIntoView({block: "center", behavior: "smooth"});
+        return;
+      }
     }
   }
 
@@ -800,6 +845,25 @@
       alert("send failed: " + r.status);
     }
   });
+
+  // ---------- Ungelesen-Sprung-Pill ----------
+  (function setupUnreadJump() {
+    const scroller = document.getElementById("threads");
+    const btn = document.getElementById("thread-jump-unread");
+    if (!scroller || !btn) return;
+    let raf = 0;
+    scroller.addEventListener("scroll", () => {
+      if (raf) return;
+      raf = requestAnimationFrame(() => {
+        raf = 0;
+        updateUnreadJumpIndicator();
+      });
+    }, {passive: true});
+    btn.addEventListener("click", scrollToFirstUnreadBelow);
+    // Initial einmal anstoßen, falls beim Laden schon ungelesene Items
+    // unterhalb der Sichtbarkeitsgrenze stehen.
+    setTimeout(updateUnreadJumpIndicator, 0);
+  })();
 
   // ---------- Sidebar-Suche (clientseitig + Server-FTS bei "?"-Prefix) ----------
   const searchInput = document.getElementById("dm-search");
