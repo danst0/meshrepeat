@@ -210,6 +210,17 @@
       .replace(/y/g, "i");
   }
 
+  function applyChannelFilter(chs) {
+    const q = (dmFilter || "").trim();
+    if (!q || q.startsWith("?")) return chs;
+    // 64-hex ist ein Pubkey → keine Kanäle als Treffer.
+    if (/^[0-9a-fA-F]{64}$/.test(q)) return [];
+    const stripped = q.startsWith("#") ? q.slice(1) : q;
+    const qN = normalizeForSearch(stripped);
+    if (!qN) return chs;
+    return chs.filter(c => normalizeForSearch(c.name || "").includes(qN));
+  }
+
   function applyDmFilter(dms) {
     const q = (dmFilter || "").trim();
     if (!q || q.startsWith("?")) return dms;
@@ -275,12 +286,16 @@
 
   function renderChannelList(chs) {
     const box = document.getElementById("ch-list");
-    if (!chs.length) {
-      box.innerHTML = '<div class="thread-empty" style="color:var(--muted);padding:.5rem">Keine Kanäle.</div>';
+    const filtered = applyChannelFilter(chs);
+    if (!filtered.length) {
+      const hint = (dmFilter || "").trim()
+        ? `kein Treffer für "${escText(dmFilter)}"`
+        : "Keine Kanäle.";
+      box.innerHTML = `<div class="thread-empty" style="color:var(--muted);padding:.5rem">${hint}</div>`;
       return;
     }
     box.innerHTML = "";
-    for (const ch of chs) {
+    for (const ch of filtered) {
       const wrap = document.createElement("div");
       wrap.className = "thread-row";
       const key = "ch:" + ch.id;
@@ -780,6 +795,7 @@
   searchInput.setAttribute("enterkeyhint", "search");
   searchInput.addEventListener("input", (e) => {
     dmFilter = e.target.value;
+    renderChannelList(threadCache.channels);
     renderDmList(threadCache.dms);
     const trimmed = dmFilter.trim();
     if (trimmed.startsWith("?") && trimmed.length >= 2) {
@@ -792,6 +808,7 @@
     if (e.key === "Escape") {
       searchInput.value = "";
       dmFilter = "";
+      renderChannelList(threadCache.channels);
       renderDmList(threadCache.dms);
       renderSearchHits([]);
       return;
@@ -808,6 +825,7 @@
       selectDm(v.toLowerCase(), null);
       searchInput.value = "";
       dmFilter = "";
+      renderChannelList(threadCache.channels);
       renderDmList(threadCache.dms);
       return;
     }
@@ -816,6 +834,16 @@
       selectDm(filtered[0].peer_pubkey_hex.toLowerCase(), filtered[0].peer_name);
       searchInput.value = "";
       dmFilter = "";
+      renderChannelList(threadCache.channels);
+      renderDmList(threadCache.dms);
+      return;
+    }
+    const filteredCh = applyChannelFilter(threadCache.channels);
+    if (filteredCh.length > 0) {
+      selectChannel(filteredCh[0].id, filteredCh[0].name);
+      searchInput.value = "";
+      dmFilter = "";
+      renderChannelList(threadCache.channels);
       renderDmList(threadCache.dms);
     }
   });
