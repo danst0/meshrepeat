@@ -212,6 +212,11 @@ code, pre {
   border-radius: 4px;
 }
 .thread-row.active { background: rgba(130,170,255,.12); }
+/* Kanäle (#…) in der gemischten alphabetischen Liste optisch von DMs trennen:
+   leichte Amber-Tönung im Hintergrund + Akzentfarbe für den Namen. */
+.thread-row--channel { background: rgba(255,216,102,.04); }
+.thread-row--channel .thread-name { color: #ffd866; }
+.thread-row--channel.active { background: rgba(255,216,102,.12); }
 .thread-star {
   margin: 0;
   padding: 0 .4rem;

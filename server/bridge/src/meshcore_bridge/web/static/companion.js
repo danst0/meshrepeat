@@ -263,8 +263,7 @@
       if (!r.ok) return;
       const j = await r.json();
       threadCache = {dms: j.dms || [], channels: j.channels || []};
-      renderChannelList(threadCache.channels);
-      renderDmList(threadCache.dms);
+      renderThreadList();
       if (active && active.kind === "channel" && (!active.channel_name || active.channel_name.length <= 8)) {
         const ch = threadCache.channels.find(c => c.id === active.channel_id);
         if (ch) {
@@ -284,20 +283,9 @@
     }
   }
 
-  function renderChannelList(chs) {
-    const box = document.getElementById("ch-list");
-    const filtered = applyChannelFilter(chs);
-    if (!filtered.length) {
-      const hint = (dmFilter || "").trim()
-        ? `kein Treffer für "${escText(dmFilter)}"`
-        : "Keine Kanäle.";
-      box.innerHTML = `<div class="thread-empty" style="color:var(--muted);padding:.5rem">${hint}</div>`;
-      return;
-    }
-    box.innerHTML = "";
-    for (const ch of filtered) {
+  function buildChannelRow(ch) {
       const wrap = document.createElement("div");
-      wrap.className = "thread-row";
+      wrap.className = "thread-row thread-row--channel";
       const key = "ch:" + ch.id;
       if (unread[key] && unread[key] > 0) wrap.classList.add("has-unread");
       if (active && active.kind === "channel" && active.channel_id === ch.id) wrap.classList.add("active");
@@ -341,26 +329,14 @@
       badge.textContent = unread[key] || "";
       wrap.appendChild(badge);
 
-      box.appendChild(wrap);
-    }
+      return wrap;
   }
 
-  function renderDmList(dms) {
-    const box = document.getElementById("dm-list");
-    const filtered = applyDmFilter(dms);
-    if (!filtered.length) {
-      const hint = dmFilter
-        ? `kein Treffer für "${escText(dmFilter)}"`
-        : "Keine DMs. Tippe oben einen Namen oder Pubkey-Hex.";
-      box.innerHTML = `<div class="thread-empty" style="color:var(--muted);padding:.5rem">${hint}</div>`;
-      return;
-    }
-    box.innerHTML = "";
-    for (const t of filtered) {
+  function buildDmRow(t) {
       const wrap = document.createElement("div");
       const key = "dm:" + t.peer_pubkey_hex;
       const isActive = active && active.kind === "dm" && active.peer === t.peer_pubkey_hex;
-      wrap.className = "thread-row" + (isActive ? " active" : "");
+      wrap.className = "thread-row thread-row--dm" + (isActive ? " active" : "");
       if (unread[key] && unread[key] > 0) wrap.classList.add("has-unread");
 
       const star = document.createElement("button");
@@ -459,7 +435,28 @@
       badge.textContent = unread[key] || "";
       wrap.appendChild(badge);
 
-      box.appendChild(wrap);
+      return wrap;
+  }
+
+  function renderThreadList() {
+    const box = document.getElementById("thread-list");
+    const chs = applyChannelFilter(threadCache.channels);
+    const dms = applyDmFilter(threadCache.dms);
+    const items = [
+      ...chs.map(c => ({sortKey: (c.name || "").toLowerCase(), kind: "channel", data: c})),
+      ...dms.map(d => ({sortKey: (d.peer_name || d.peer_pubkey_hex || "").toLowerCase(), kind: "dm", data: d})),
+    ];
+    items.sort((a, b) => a.sortKey.localeCompare(b.sortKey, "de"));
+    if (!items.length) {
+      const hint = (dmFilter || "").trim()
+        ? `kein Treffer für "${escText(dmFilter)}"`
+        : "Keine Chats. Tippe oben einen Namen oder Pubkey-Hex.";
+      box.innerHTML = `<div class="thread-empty" style="color:var(--muted);padding:.5rem">${hint}</div>`;
+      return;
+    }
+    box.innerHTML = "";
+    for (const it of items) {
+      box.appendChild(it.kind === "channel" ? buildChannelRow(it.data) : buildDmRow(it.data));
     }
   }
 
@@ -795,8 +792,7 @@
   searchInput.setAttribute("enterkeyhint", "search");
   searchInput.addEventListener("input", (e) => {
     dmFilter = e.target.value;
-    renderChannelList(threadCache.channels);
-    renderDmList(threadCache.dms);
+    renderThreadList();
     const trimmed = dmFilter.trim();
     if (trimmed.startsWith("?") && trimmed.length >= 2) {
       runServerSearch(trimmed.slice(1).trim());
@@ -808,8 +804,7 @@
     if (e.key === "Escape") {
       searchInput.value = "";
       dmFilter = "";
-      renderChannelList(threadCache.channels);
-      renderDmList(threadCache.dms);
+      renderThreadList();
       renderSearchHits([]);
       return;
     }
@@ -825,8 +820,7 @@
       selectDm(v.toLowerCase(), null);
       searchInput.value = "";
       dmFilter = "";
-      renderChannelList(threadCache.channels);
-      renderDmList(threadCache.dms);
+      renderThreadList();
       return;
     }
     const filtered = applyDmFilter(threadCache.dms);
@@ -834,8 +828,7 @@
       selectDm(filtered[0].peer_pubkey_hex.toLowerCase(), filtered[0].peer_name);
       searchInput.value = "";
       dmFilter = "";
-      renderChannelList(threadCache.channels);
-      renderDmList(threadCache.dms);
+      renderThreadList();
       return;
     }
     const filteredCh = applyChannelFilter(threadCache.channels);
@@ -843,8 +836,7 @@
       selectChannel(filteredCh[0].id, filteredCh[0].name);
       searchInput.value = "";
       dmFilter = "";
-      renderChannelList(threadCache.channels);
-      renderDmList(threadCache.dms);
+      renderThreadList();
     }
   });
 
