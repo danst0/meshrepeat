@@ -443,10 +443,24 @@
     const chs = applyChannelFilter(threadCache.channels);
     const dms = applyDmFilter(threadCache.dms);
     const items = [
-      ...chs.map(c => ({sortKey: (c.name || "").toLowerCase(), kind: "channel", data: c})),
-      ...dms.map(d => ({sortKey: (d.peer_name || d.peer_pubkey_hex || "").toLowerCase(), kind: "dm", data: d})),
+      ...chs.map(c => ({
+        sortKey: (c.name || "").toLowerCase(),
+        favorite: !!c.favorite,
+        kind: "channel",
+        data: c,
+      })),
+      ...dms.map(d => ({
+        sortKey: (d.peer_name || d.peer_pubkey_hex || "").toLowerCase(),
+        favorite: !!d.favorite,
+        kind: "dm",
+        data: d,
+      })),
     ];
-    items.sort((a, b) => a.sortKey.localeCompare(b.sortKey, "de"));
+    // Favoriten zuerst, innerhalb der Gruppe alphabetisch.
+    items.sort((a, b) => {
+      if (a.favorite !== b.favorite) return a.favorite ? -1 : 1;
+      return a.sortKey.localeCompare(b.sortKey, "de");
+    });
     if (!items.length) {
       const hint = (dmFilter || "").trim()
         ? `kein Treffer für "${escText(dmFilter)}"`
