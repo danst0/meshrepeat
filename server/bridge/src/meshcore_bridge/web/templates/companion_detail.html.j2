@@ -261,7 +261,177 @@
         Teilnehmer brauchen denselben Namen und dasselbe Passwort.
       </p>
     </div>
+
+    {# ---------- API-Tokens ---------- #}
+    <div class="card">
+      <h2>API-Tokens</h2>
+      <p style="font-size:.9em;color:var(--muted);margin:0 0 .75rem">
+        Bearer-Tokens für Skripte / Home-Assistant / CLI, die diese
+        Identität ansprechen sollen. Ein Token sperrt auf diese Identität.
+        Scope <code>read</code> = lesen, <code>write</code> = DM/Channel
+        senden, <code>admin</code> = Identitäts-Einstellungen. Token-Anlage
+        und Revoke gehen nur über das Web-Login.
+      </p>
+
+      <table id="tokens-table">
+        <thead>
+          <tr><th>Name</th><th>Scopes</th><th>Erstellt</th><th>Zuletzt</th><th>Status</th><th></th></tr>
+        </thead>
+        <tbody>
+        {% for t in api_tokens %}
+          <tr data-token-id="{{ t.id }}">
+            <td>{{ t.name }}</td>
+            <td><code>{{ t.scopes }}</code></td>
+            <td>{{ t.created_at | localtime }}</td>
+            <td>{% if t.last_used_at %}{{ t.last_used_at | localtime }}{% else %}—{% endif %}</td>
+            <td class="tok-status">
+              {% if t.revoked_at %}<span style="color:var(--danger)">revoked</span>
+              {% elif t.expires_at %}<span title="läuft ab">expires {{ t.expires_at | localtime }}</span>
+              {% else %}aktiv{% endif %}
+            </td>
+            <td>
+              {% if not t.revoked_at %}
+                <button type="button" class="tok-revoke"
+                        style="margin:0;padding:.25rem .6rem;background:var(--danger)">
+                  revoken
+                </button>
+              {% endif %}
+            </td>
+          </tr>
+        {% endfor %}
+        {% if not api_tokens %}
+          <tr id="tokens-empty"><td colspan="6" style="color:var(--muted)">Noch kein Token.</td></tr>
+        {% endif %}
+        </tbody>
+      </table>
+
+      <h3 style="margin-top:1rem">Neuen Token erstellen</h3>
+      <form id="tokens-create-form" onsubmit="return false"
+            style="display:flex;flex-wrap:wrap;gap:.75rem;align-items:flex-end">
+        <label style="margin:0">Name
+          <input name="name" required maxlength="64" placeholder="z.B. ha-bridge">
+        </label>
+        <fieldset style="margin:0;padding:.25rem .5rem;border:1px solid var(--border)">
+          <legend style="font-size:.85em">Scopes</legend>
+          <label style="display:inline-flex;gap:.25rem;align-items:center;margin-right:.75rem">
+            <input type="checkbox" name="scope" value="read" checked> read
+          </label>
+          <label style="display:inline-flex;gap:.25rem;align-items:center;margin-right:.75rem">
+            <input type="checkbox" name="scope" value="write"> write
+          </label>
+          <label style="display:inline-flex;gap:.25rem;align-items:center">
+            <input type="checkbox" name="scope" value="admin"> admin
+          </label>
+        </fieldset>
+        <label style="margin:0">Läuft ab (optional, ISO-Datum)
+          <input name="expires_at" type="text" placeholder="2027-01-01T00:00:00Z" pattern=".{0}|.{10,}">
+        </label>
+        <button type="submit" style="margin:0">Erstellen</button>
+      </form>
+
+      <div id="token-plaintext-box" hidden
+           style="margin-top:1rem;padding:.75rem;border:1px solid var(--warn,#a60);background:rgba(170,100,0,.08);border-radius:.25rem">
+        <strong>Token (wird nur einmal angezeigt — jetzt kopieren!):</strong>
+        <div style="display:flex;gap:.5rem;align-items:center;margin-top:.5rem">
+          <code id="token-plaintext"
+                style="flex:1;user-select:all;word-break:break-all;font-size:1rem"></code>
+          <button type="button" id="token-copy-btn" style="margin:0">Kopieren</button>
+        </div>
+      </div>
+      <div id="tokens-error" style="margin-top:.5rem;color:var(--danger)" hidden></div>
+    </div>
   </section>
+
+  <script>
+    (() => {
+      const IDENT = "{{ identity.id }}";
+      const tableBody = document.querySelector("#tokens-table tbody");
+      const empty = document.getElementById("tokens-empty");
+      const form = document.getElementById("tokens-create-form");
+      const plainBox = document.getElementById("token-plaintext-box");
+      const plainEl = document.getElementById("token-plaintext");
+      const errEl = document.getElementById("tokens-error");
+
+      function fmtLocal(iso) {
+        if (!iso) return "—";
+        try { return new Date(iso).toLocaleString(); } catch { return iso; }
+      }
+
+      function showError(msg) {
+        errEl.textContent = msg;
+        errEl.hidden = false;
+      }
+      function clearError() { errEl.hidden = true; errEl.textContent = ""; }
+
+      function attachRevoke(btn) {
+        btn.addEventListener("click", async () => {
+          const tr = btn.closest("tr");
+          const tid = tr.dataset.tokenId;
+          if (!confirm("Token unwiderruflich revoken?")) return;
+          btn.disabled = true;
+          try {
+            const r = await fetch(`/api/v1/companion/tokens/${tid}/revoke`,
+              {method: "POST", credentials: "same-origin"});
+            if (!r.ok) { showError(`Revoke fehlgeschlagen: ${r.status}`); btn.disabled = false; return; }
+            const data = await r.json();
+            tr.querySelector(".tok-status").innerHTML =
+              `<span style="color:var(--danger)">revoked</span>`;
+            btn.remove();
+          } catch (e) {
+            showError(String(e));
+            btn.disabled = false;
+          }
+        });
+      }
+      document.querySelectorAll(".tok-revoke").forEach(attachRevoke);
+
+      form.addEventListener("submit", async () => {
+        clearError();
+        plainBox.hidden = true;
+        const fd = new FormData(form);
+        const scopes = fd.getAll("scope").join(",");
+        if (!scopes) { showError("Mindestens ein Scope wählen."); return; }
+        const body = new URLSearchParams();
+        body.set("name", fd.get("name"));
+        body.set("scopes", scopes);
+        const exp = (fd.get("expires_at") || "").trim();
+        if (exp) body.set("expires_at", exp);
+
+        try {
+          const r = await fetch(`/api/v1/companion/identities/${IDENT}/tokens`,
+            {method: "POST", credentials: "same-origin", body});
+          if (!r.ok) {
+            const t = await r.text();
+            showError(`${r.status}: ${t}`); return;
+          }
+          const t = await r.json();
+          plainEl.textContent = t.token;
+          plainBox.hidden = false;
+
+          if (empty) empty.remove();
+          const tr = document.createElement("tr");
+          tr.dataset.tokenId = t.id;
+          tr.innerHTML =
+            `<td>${t.name.replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}</td>` +
+            `<td><code>${t.scopes.join(",")}</code></td>` +
+            `<td>${fmtLocal(t.created_at)}</td>` +
+            `<td>—</td>` +
+            `<td class="tok-status">${t.expires_at ? `<span title="läuft ab">expires ${fmtLocal(t.expires_at)}</span>` : "aktiv"}</td>` +
+            `<td><button type="button" class="tok-revoke" style="margin:0;padding:.25rem .6rem;background:var(--danger)">revoken</button></td>`;
+          tableBody.prepend(tr);
+          attachRevoke(tr.querySelector(".tok-revoke"));
+          form.reset();
+        } catch (e) {
+          showError(String(e));
+        }
+      });
+
+      document.getElementById("token-copy-btn").addEventListener("click", async () => {
+        try { await navigator.clipboard.writeText(plainEl.textContent); }
+        catch { /* Clipboard kann blockiert sein; user-select:all reicht als Fallback */ }
+      });
+    })();
+  </script>
 
   <script id="companion-bootstrap" type="application/json">
     {"identityId": "{{ identity.id }}", "identityName": {{ identity.name | tojson }}, "atTargets": {{ at_targets | tojson }}}

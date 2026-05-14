@@ -1795,6 +1795,16 @@ async def companion_detail(
         at_targets.append({"name": name, "pubkey_hex": None, "contact_id": None, "favorite": False})
     at_targets.sort(key=lambda t: t["name"].lower())
 
+    api_tokens = list(
+        (
+            await db.execute(
+                select(CompanionApiToken)
+                .where(CompanionApiToken.identity_id == identity_id)
+                .order_by(desc(CompanionApiToken.created_at))
+            )
+        ).scalars()
+    )
+
     return _templates(request).TemplateResponse(
         request,
         "companion_detail.html.j2",
@@ -1803,6 +1813,7 @@ async def companion_detail(
             "identity": identity,
             "channels": channels,
             "at_targets": at_targets,
+            "api_tokens": api_tokens,
             "flash": None,
         },
     )
