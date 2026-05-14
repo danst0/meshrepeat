@@ -23,6 +23,7 @@ from sqlalchemy import text as sql_text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meshcore_bridge.db import (
+    CompanionApiToken,
     CompanionChannel,
     CompanionContact,
     CompanionIdentity,
@@ -30,7 +31,13 @@ from meshcore_bridge.db import (
     CompanionMessage,
     User,
 )
-from meshcore_bridge.web.deps import admin_required, current_user_required, get_db
+from meshcore_bridge.web.deps import (
+    CompanionAuth,
+    admin_required,
+    companion_auth,
+    current_user_required,
+    get_db,
+)
 from meshcore_companion.coords import cluster_outlier_mask, is_valid_coord
 
 router = APIRouter(prefix="/api/v1/companion")
@@ -86,19 +93,17 @@ def _identity_dict(row: CompanionIdentity) -> dict[str, Any]:
 
 @router.get("/identities")
 async def list_identities(
-    user: User = Depends(current_user_required),
+    ctx: CompanionAuth = Depends(companion_auth),
     db: AsyncSession = Depends(get_db),
 ) -> list[dict[str, Any]]:
-    rows = list(
-        (
-            await db.execute(
-                select(CompanionIdentity).where(
-                    CompanionIdentity.user_id == user.id,
-                    CompanionIdentity.archived_at.is_(None),
-                )
-            )
-        ).scalars()
+    ctx.require_scope("read")
+    stmt = select(CompanionIdentity).where(
+        CompanionIdentity.user_id == ctx.user.id,
+        CompanionIdentity.archived_at.is_(None),
     )
+    if ctx.identity_lock is not None:
+        stmt = stmt.where(CompanionIdentity.id == ctx.identity_lock)
+    rows = list((await db.execute(stmt)).scalars())
     return [_identity_dict(r) for r in rows]
 
 
@@ -139,12 +144,14 @@ async def create_identity(
 async def broadcast_advert(
     request: Request,
     identity_id: UUID,
-    user: User = Depends(current_user_required),
+    ctx: CompanionAuth = Depends(companion_auth),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
     """Sofort einen Advert für diese Identity in den Scope pushen."""
+    ctx.require_scope("admin")
+    ctx.require_identity(identity_id)
     row = await db.get(CompanionIdentity, identity_id)
-    if row is None or row.user_id != user.id:
+    if row is None or row.user_id != ctx.user.id:
         raise HTTPException(status_code=404)
     svc = _service(request)
     if svc is None:
@@ -160,11 +167,13 @@ async def broadcast_advert(
 async def archive_identity(
     request: Request,
     identity_id: UUID,
-    user: User = Depends(current_user_required),
+    ctx: CompanionAuth = Depends(companion_auth),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, bool]:
+    ctx.require_scope("admin")
+    ctx.require_identity(identity_id)
     row = await db.get(CompanionIdentity, identity_id)
-    if row is None or row.user_id != user.id:
+    if row is None or row.user_id != ctx.user.id:
         raise HTTPException(status_code=404)
     svc = _service(request)
     if svc is None:
@@ -178,11 +187,13 @@ async def set_identity_echo(
     request: Request,
     identity_id: UUID,
     enabled: Annotated[bool, Form()],
-    user: User = Depends(current_user_required),
+    ctx: CompanionAuth = Depends(companion_auth),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, bool]:
+    ctx.require_scope("admin")
+    ctx.require_identity(identity_id)
     row = await db.get(CompanionIdentity, identity_id)
-    if row is None or row.user_id != user.id:
+    if row is None or row.user_id != ctx.user.id:
         raise HTTPException(status_code=404)
     svc = _service(request)
     if svc is None:
@@ -196,11 +207,13 @@ async def set_identity_path_hash_mode(
     request: Request,
     identity_id: UUID,
     mode: Annotated[int, Form()],
-    user: User = Depends(current_user_required),
+    ctx: CompanionAuth = Depends(companion_auth),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
+    ctx.require_scope("admin")
+    ctx.require_identity(identity_id)
     row = await db.get(CompanionIdentity, identity_id)
-    if row is None or row.user_id != user.id:
+    if row is None or row.user_id != ctx.user.id:
         raise HTTPException(status_code=404)
     if mode not in (0, 1, 2):
         raise HTTPException(status_code=422, detail="mode must be 0, 1, or 2")
@@ -213,18 +226,22 @@ async def set_identity_path_hash_mode(
 
 @router.get("/messages")
 async def list_messages(
-    user: User = Depends(current_user_required),
+    ctx: CompanionAuth = Depends(companion_auth),
     db: AsyncSession = Depends(get_db),
     limit: int = Query(default=50, ge=1, le=500),
 ) -> list[dict[str, Any]]:
-    # Join: nur eigene Identitäten
+    ctx.require_scope("read")
+    # Join: nur eigene Identitäten (bei Token-Auth zusätzlich auf die
+    # gelockte Identity reduziert).
     own_ids = list(
         (
             await db.execute(
-                select(CompanionIdentity.id).where(CompanionIdentity.user_id == user.id)
+                select(CompanionIdentity.id).where(CompanionIdentity.user_id == ctx.user.id)
             )
         ).scalars()
     )
+    if ctx.identity_lock is not None:
+        own_ids = [i for i in own_ids if i == ctx.identity_lock]
     if not own_ids:
         return []
     rows = list(
@@ -259,11 +276,13 @@ async def send_dm(
     identity_id: Annotated[UUID, Form()],
     peer_pubkey_hex: Annotated[str, Form()],
     text: Annotated[str, Form()],
-    user: User = Depends(current_user_required),
+    ctx: CompanionAuth = Depends(companion_auth),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
+    ctx.require_scope("write")
+    ctx.require_identity(identity_id)
     row = await db.get(CompanionIdentity, identity_id)
-    if row is None or row.user_id != user.id:
+    if row is None or row.user_id != ctx.user.id:
         raise HTTPException(status_code=404)
     try:
         peer = bytes.fromhex(peer_pubkey_hex.strip())
@@ -280,16 +299,19 @@ async def send_dm(
 
 @router.get("/contacts")
 async def list_contacts(
-    user: User = Depends(current_user_required),
+    ctx: CompanionAuth = Depends(companion_auth),
     db: AsyncSession = Depends(get_db),
 ) -> list[dict[str, Any]]:
+    ctx.require_scope("read")
     own_ids = list(
         (
             await db.execute(
-                select(CompanionIdentity.id).where(CompanionIdentity.user_id == user.id)
+                select(CompanionIdentity.id).where(CompanionIdentity.user_id == ctx.user.id)
             )
         ).scalars()
     )
+    if ctx.identity_lock is not None:
+        own_ids = [i for i in own_ids if i == ctx.identity_lock]
     if not own_ids:
         return []
     rows = list(
@@ -331,16 +353,19 @@ async def _user_owns_identity(db: AsyncSession, user_id: UUID, identity_id: UUID
 
 @router.get("/channels")
 async def list_channels(
-    user: User = Depends(current_user_required),
+    ctx: CompanionAuth = Depends(companion_auth),
     db: AsyncSession = Depends(get_db),
 ) -> list[dict[str, Any]]:
+    ctx.require_scope("read")
     own_ids = list(
         (
             await db.execute(
-                select(CompanionIdentity.id).where(CompanionIdentity.user_id == user.id)
+                select(CompanionIdentity.id).where(CompanionIdentity.user_id == ctx.user.id)
             )
         ).scalars()
     )
+    if ctx.identity_lock is not None:
+        own_ids = [i for i in own_ids if i == ctx.identity_lock]
     if not own_ids:
         return []
     rows = list(
@@ -361,10 +386,12 @@ async def create_channel(
     identity_id: Annotated[UUID, Form()],
     name: Annotated[str, Form()],
     password: Annotated[str, Form()],
-    user: User = Depends(current_user_required),
+    ctx: CompanionAuth = Depends(companion_auth),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
-    if not await _user_owns_identity(db, user.id, identity_id):
+    ctx.require_scope("admin")
+    ctx.require_identity(identity_id)
+    if not await _user_owns_identity(db, ctx.user.id, identity_id):
         raise HTTPException(status_code=404)
     svc = _service(request)
     if svc is None:
@@ -378,17 +405,19 @@ async def create_channel(
 @router.post("/channels/{channel_id}/favorite", response_model=None)
 async def toggle_channel_favorite_rest(
     channel_id: UUID,
-    user: User = Depends(current_user_required),
+    ctx: CompanionAuth = Depends(companion_auth),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
     """Toggle für das ``favorite``-Flag eines Channels (analog zu Contacts).
     Public bleibt nach Erst-Einrichtung favorisiert, kann hier aber vom
     User explizit entfavorisiert werden."""
+    ctx.require_scope("admin")
     channel = await db.get(CompanionChannel, channel_id)
     if channel is None:
         raise HTTPException(status_code=404)
+    ctx.require_identity(channel.identity_id)
     ident = await db.get(CompanionIdentity, channel.identity_id)
-    if ident is None or ident.user_id != user.id:
+    if ident is None or ident.user_id != ctx.user.id:
         raise HTTPException(status_code=404)
     channel.favorite = not channel.favorite
     await db.commit()
@@ -401,10 +430,12 @@ async def send_channel_message(
     identity_id: Annotated[UUID, Form()],
     channel_id: Annotated[UUID, Form()],
     text: Annotated[str, Form()],
-    user: User = Depends(current_user_required),
+    ctx: CompanionAuth = Depends(companion_auth),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
-    if not await _user_owns_identity(db, user.id, identity_id):
+    ctx.require_scope("write")
+    ctx.require_identity(identity_id)
+    if not await _user_owns_identity(db, ctx.user.id, identity_id):
         raise HTTPException(status_code=404)
     svc = _service(request)
     if svc is None:
@@ -502,12 +533,14 @@ async def _resolve_room_sender_names(
 @router.get("/identities/{identity_id}/threads")
 async def list_identity_threads(
     identity_id: UUID,
-    user: User = Depends(current_user_required),
+    ctx: CompanionAuth = Depends(companion_auth),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
     """DM-Threads (gruppiert nach peer_pubkey) und Channel-Threads für eine
     Identity. Channels erscheinen auch ohne Posts."""
-    if not await _user_owns_identity(db, user.id, identity_id):
+    ctx.require_scope("read")
+    ctx.require_identity(identity_id)
+    if not await _user_owns_identity(db, ctx.user.id, identity_id):
         raise HTTPException(status_code=404)
 
     # Top 100 Kontakte (mit Pubkey, sortiert nach last_seen DESC) — die
@@ -595,7 +628,7 @@ async def list_identity_threads(
 async def list_dm_messages(
     identity_id: UUID,
     peer_pubkey_hex: str,
-    user: User = Depends(current_user_required),
+    ctx: CompanionAuth = Depends(companion_auth),
     db: AsyncSession = Depends(get_db),
     limit: int = Query(default=50, ge=1, le=200),
     before_ts: str | None = Query(default=None),
@@ -605,7 +638,9 @@ async def list_dm_messages(
     zuerst, zur direkten Anzeige) und ``next_cursor`` (älteste ts der Page
     oder ``null`` wenn weniger als ``limit`` zurückkam = Ende erreicht).
     """
-    if not await _user_owns_identity(db, user.id, identity_id):
+    ctx.require_scope("read")
+    ctx.require_identity(identity_id)
+    if not await _user_owns_identity(db, ctx.user.id, identity_id):
         raise HTTPException(status_code=404)
     try:
         peer = bytes.fromhex(peer_pubkey_hex.strip())
@@ -651,7 +686,7 @@ async def list_dm_messages(
 @router.get("/identities/{identity_id}/contacts")
 async def list_identity_contacts(
     identity_id: UUID,
-    user: User = Depends(current_user_required),
+    ctx: CompanionAuth = Depends(companion_auth),
     db: AsyncSession = Depends(get_db),
     limit: int = Query(default=100, ge=1, le=500),
 ) -> list[dict[str, Any]]:
@@ -660,7 +695,9 @@ async def list_identity_contacts(
     favorite-Flag hervor; Top-Reihenfolge ist aber Aktualität, nicht
     Favorit-Priorität — sonst würden alte Favoriten neue Mesh-Sender
     aus der Liste verdrängen."""
-    if not await _user_owns_identity(db, user.id, identity_id):
+    ctx.require_scope("read")
+    ctx.require_identity(identity_id)
+    if not await _user_owns_identity(db, ctx.user.id, identity_id):
         raise HTTPException(status_code=404)
     rows = list(
         (
@@ -694,7 +731,7 @@ async def upsert_contact(
     peer_pubkey_hex: Annotated[str, Form()],
     peer_name: Annotated[str, Form()] = "",
     favorite: Annotated[bool, Form()] = False,
-    user: User = Depends(current_user_required),
+    ctx: CompanionAuth = Depends(companion_auth),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
     """Erzeugt oder aktualisiert einen CompanionContact ohne Mesh-Advert.
@@ -706,7 +743,9 @@ async def upsert_contact(
     favorite nur setzen wenn explizit ``favorite=true`` gesendet wird
     (kein versehentliches Demoten).
     """
-    if not await _user_owns_identity(db, user.id, identity_id):
+    ctx.require_scope("admin")
+    ctx.require_identity(identity_id)
+    if not await _user_owns_identity(db, ctx.user.id, identity_id):
         raise HTTPException(status_code=404)
     try:
         peer = bytes.fromhex(peer_pubkey_hex.strip())
@@ -751,16 +790,18 @@ async def upsert_contact(
 @router.post("/contacts/{contact_id}/favorite", response_model=None)
 async def toggle_contact_favorite_rest(
     contact_id: UUID,
-    user: User = Depends(current_user_required),
+    ctx: CompanionAuth = Depends(companion_auth),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
     """REST-Variante (JSON statt 303-Redirect) zum Favorit-Toggle —
     für Frontend-fetch ohne Page-Reload."""
+    ctx.require_scope("admin")
     contact = await db.get(CompanionContact, contact_id)
     if contact is None:
         raise HTTPException(status_code=404)
+    ctx.require_identity(contact.identity_id)
     ident = await db.get(CompanionIdentity, contact.identity_id)
-    if ident is None or ident.user_id != user.id:
+    if ident is None or ident.user_id != ctx.user.id:
         raise HTTPException(status_code=404)
     contact.favorite = not contact.favorite
     await db.commit()
@@ -788,13 +829,15 @@ async def request_contact_telemetry(
     request: Request,
     identity_id: UUID,
     peer_pubkey_hex: str,
-    user: User = Depends(current_user_required),
+    ctx: CompanionAuth = Depends(companion_auth),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
     """Schickt einen REQ_TYPE_GET_TELEMETRY_DATA an den angegebenen Peer.
     Antwort kommt asynchron zurück und füllt last_lat/last_lon, falls
     der Peer LPP_GPS in der Telemetrie liefert."""
-    peer = await _validate_peer_for_request(db, user.id, identity_id, peer_pubkey_hex)
+    ctx.require_scope("admin")
+    ctx.require_identity(identity_id)
+    peer = await _validate_peer_for_request(db, ctx.user.id, identity_id, peer_pubkey_hex)
     svc = _service(request)
     if svc is None:
         raise HTTPException(status_code=503, detail="companion-service not running")
@@ -809,7 +852,7 @@ async def request_contact_login(
     request: Request,
     identity_id: UUID,
     peer_pubkey_hex: str,
-    user: User = Depends(current_user_required),
+    ctx: CompanionAuth = Depends(companion_auth),
     db: AsyncSession = Depends(get_db),
     password: Annotated[str, Form()] = "",
 ) -> dict[str, Any]:
@@ -817,7 +860,9 @@ async def request_contact_login(
     auf nachfolgende REQ_TYPE_GET_STATUS / GET_TELEMETRY_DATA antwortet —
     Repeater verwerfen REQs von unbekannten Sendern (ACL-Check).
     Leeres Passwort = Guest-Login (bei den meisten Repeatern OK)."""
-    peer = await _validate_peer_for_request(db, user.id, identity_id, peer_pubkey_hex)
+    ctx.require_scope("admin")
+    ctx.require_identity(identity_id)
+    peer = await _validate_peer_for_request(db, ctx.user.id, identity_id, peer_pubkey_hex)
     svc = _service(request)
     if svc is None:
         raise HTTPException(status_code=503, detail="companion-service not running")
@@ -835,14 +880,16 @@ async def get_contact_login_state(
     request: Request,
     identity_id: UUID,
     peer_pubkey_hex: str,
-    user: User = Depends(current_user_required),
+    ctx: CompanionAuth = Depends(companion_auth),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
     """Aktueller in-memory Login-Status für (Identity, Peer). Wird vom
     Companion-Frontend gepollt, um „eingeloggt"-Pill am Konvo-Header zu
     rendern. Geht beim Container-Restart verloren — Werte sind eine
     Heuristik, kein verlässlicher Server-Vertrag."""
-    peer = await _validate_peer_for_request(db, user.id, identity_id, peer_pubkey_hex)
+    ctx.require_scope("read")
+    ctx.require_identity(identity_id)
+    peer = await _validate_peer_for_request(db, ctx.user.id, identity_id, peer_pubkey_hex)
     svc = _service(request)
     if svc is None:
         raise HTTPException(status_code=503, detail="companion-service not running")
@@ -864,13 +911,15 @@ async def request_contact_status(
     request: Request,
     identity_id: UUID,
     peer_pubkey_hex: str,
-    user: User = Depends(current_user_required),
+    ctx: CompanionAuth = Depends(companion_auth),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
     """Schickt einen REQ_TYPE_GET_STATUS — wirkt wie ein Ping mit Stats.
     Antwort kommt asynchron zurück: System-Message in der Konvo + SSE-Event
     ``status_response`` mit ``rtt_ms`` und ``stats``."""
-    peer = await _validate_peer_for_request(db, user.id, identity_id, peer_pubkey_hex)
+    ctx.require_scope("admin")
+    ctx.require_identity(identity_id)
+    peer = await _validate_peer_for_request(db, ctx.user.id, identity_id, peer_pubkey_hex)
     svc = _service(request)
     if svc is None:
         raise HTTPException(status_code=503, detail="companion-service not running")
@@ -885,7 +934,7 @@ async def trigger_link_probe(
     request: Request,
     identity_id: UUID,
     peer_pubkey_hex: str,
-    user: User = Depends(current_user_required),
+    ctx: CompanionAuth = Depends(companion_auth),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
     """Schickt eine Stabilität-Probe (STATUS-REQ ohne UI-Bubble) und
@@ -893,7 +942,9 @@ async def trigger_link_probe(
     automatisierte Erreichbarkeits-Messung über die Zeit. Liefert die
     Probe-ID; das Ergebnis (ack vs. timeout, rtt_ms) ist asynchron via
     History-Endpoint abrufbar."""
-    peer = await _validate_peer_for_request(db, user.id, identity_id, peer_pubkey_hex)
+    ctx.require_scope("admin")
+    ctx.require_identity(identity_id)
+    peer = await _validate_peer_for_request(db, ctx.user.id, identity_id, peer_pubkey_hex)
     # Vor dem Service-Call den node_type checken — bessere Fehlermeldung als
     # generisches 409, und der Sync-Pfad ohne Service-Roundtrip.
     contact = (
@@ -927,14 +978,16 @@ async def trigger_link_probe(
 async def list_link_probes(
     identity_id: UUID,
     peer_pubkey_hex: str,
-    user: User = Depends(current_user_required),
+    ctx: CompanionAuth = Depends(companion_auth),
     db: AsyncSession = Depends(get_db),
     limit: int = Query(default=100, ge=1, le=1000),
     since_hours: int | None = Query(default=None, ge=1, le=720),
 ) -> dict[str, Any]:
     """Probe-History für (identity, peer). Liefert Liste + aggregierte
     Stabilitäts-Kennzahlen (loss%, RTT-median/p95)."""
-    peer = await _validate_peer_for_request(db, user.id, identity_id, peer_pubkey_hex)
+    ctx.require_scope("read")
+    ctx.require_identity(identity_id)
+    peer = await _validate_peer_for_request(db, ctx.user.id, identity_id, peer_pubkey_hex)
     q = select(CompanionLinkProbe).where(
         CompanionLinkProbe.identity_id == identity_id,
         CompanionLinkProbe.peer_pubkey == peer,
@@ -979,7 +1032,7 @@ async def list_link_probes(
 @router.get("/identities/{identity_id}/reachability")
 async def identity_reachability(
     identity_id: UUID,
-    user: User = Depends(current_user_required),
+    ctx: CompanionAuth = Depends(companion_auth),
     db: AsyncSession = Depends(get_db),
     hours: int = Query(default=24, ge=1, le=168),
 ) -> dict[str, Any]:
@@ -989,7 +1042,9 @@ async def identity_reachability(
 
     Sortierung: Favoriten oben, dann nach Aktualität (last_seen DESC).
     """
-    if not await _user_owns_identity(db, user.id, identity_id):
+    ctx.require_scope("read")
+    ctx.require_identity(identity_id)
+    if not await _user_owns_identity(db, ctx.user.id, identity_id):
         raise HTTPException(status_code=404)
 
     contacts = list(
@@ -1085,7 +1140,7 @@ def _iso_to_epoch(s: str | None) -> float | None:
 @router.get("/identities/{identity_id}/map")
 async def list_identity_map_pins(
     identity_id: UUID,
-    user: User = Depends(current_user_required),
+    ctx: CompanionAuth = Depends(companion_auth),
     db: AsyncSession = Depends(get_db),
     hours: int = Query(default=72, ge=1, le=8760),
     include_outliers: bool = Query(default=False),
@@ -1100,7 +1155,9 @@ async def list_identity_map_pins(
     - Hard-Filter via ``is_valid_coord`` (Range, NaN/Inf, Null-Insel)
     - Cluster-Filter via ``cluster_outlier_mask`` (Distanz zum Median).
       Beide deaktivierbar mit ``include_outliers=1`` (Debug)."""
-    if not await _user_owns_identity(db, user.id, identity_id):
+    ctx.require_scope("read")
+    ctx.require_identity(identity_id)
+    if not await _user_owns_identity(db, ctx.user.id, identity_id):
         raise HTTPException(status_code=404)
     cutoff = datetime.now(UTC) - timedelta(hours=hours)
     dm_peers_subq = (
@@ -1211,13 +1268,15 @@ async def admin_cleanup_coords(
 async def list_channel_messages(
     identity_id: UUID,
     channel_id: UUID,
-    user: User = Depends(current_user_required),
+    ctx: CompanionAuth = Depends(companion_auth),
     db: AsyncSession = Depends(get_db),
     limit: int = Query(default=50, ge=1, le=200),
     before_ts: str | None = Query(default=None),
 ) -> dict[str, Any]:
     """Wie list_dm_messages, aber für einen Channel."""
-    if not await _user_owns_identity(db, user.id, identity_id):
+    ctx.require_scope("read")
+    ctx.require_identity(identity_id)
+    if not await _user_owns_identity(db, ctx.user.id, identity_id):
         raise HTTPException(status_code=404)
     channel = await db.get(CompanionChannel, channel_id)
     if channel is None or channel.identity_id != identity_id:
@@ -1253,7 +1312,7 @@ async def list_channel_messages(
 @router.get("/identities/{identity_id}/search")
 async def search_messages(
     identity_id: UUID,
-    user: User = Depends(current_user_required),
+    ctx: CompanionAuth = Depends(companion_auth),
     db: AsyncSession = Depends(get_db),
     q: str = Query(..., min_length=2, max_length=200),
     limit: int = Query(default=30, ge=1, le=100),
@@ -1262,7 +1321,9 @@ async def search_messages(
     Liefert Hits mit ``snippet`` (server-side <mark>...</mark>) plus
     Konvo-Kontext (DM-peer / channel) zum Springen im Frontend.
     """
-    if not await _user_owns_identity(db, user.id, identity_id):
+    ctx.require_scope("read")
+    ctx.require_identity(identity_id)
+    if not await _user_owns_identity(db, ctx.user.id, identity_id):
         raise HTTPException(status_code=404)
 
     # FTS5 MATCH-Syntax: einfache Suchterms erlauben, aber Anführungs-/
@@ -1343,6 +1404,128 @@ def _bytes_to_uuid_str(b: bytes | None) -> str | None:
     if isinstance(b, bytes) and len(b) == 16:
         return str(UUID(bytes=b))
     return str(b)
+
+
+# ---------- API-Tokens (Cookie-only Management) ----------
+
+
+def _token_dict(t: CompanionApiToken) -> dict[str, Any]:
+    return {
+        "id": str(t.id),
+        "identity_id": str(t.identity_id),
+        "name": t.name,
+        "scopes": [s for s in t.scopes.split(",") if s],
+        "created_at": _ts_iso(t.created_at),
+        "last_used_at": _ts_iso(t.last_used_at),
+        "revoked_at": _ts_iso(t.revoked_at),
+        "expires_at": _ts_iso(t.expires_at),
+    }
+
+
+@router.get("/identities/{identity_id}/tokens")
+async def list_identity_tokens(
+    identity_id: UUID,
+    user: User = Depends(current_user_required),
+    db: AsyncSession = Depends(get_db),
+) -> list[dict[str, Any]]:
+    """Token-Übersicht einer Identity. Liefert nur Metadaten — der
+    Klartext ist nach der Erzeugung nicht mehr abrufbar."""
+    if not await _user_owns_identity(db, user.id, identity_id):
+        raise HTTPException(status_code=404)
+    rows = list(
+        (
+            await db.execute(
+                select(CompanionApiToken)
+                .where(CompanionApiToken.identity_id == identity_id)
+                .order_by(desc(CompanionApiToken.created_at))
+            )
+        ).scalars()
+    )
+    return [_token_dict(t) for t in rows]
+
+
+@router.post("/identities/{identity_id}/tokens", response_model=None)
+async def create_identity_token(
+    identity_id: UUID,
+    name: Annotated[str, Form()],
+    scopes: Annotated[str, Form()] = "read",
+    expires_at: Annotated[str, Form()] = "",
+    user: User = Depends(current_user_required),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Erzeugt einen neuen API-Token für eine Identity. Der Klartext wird
+    **genau einmal** in der Antwort als ``token`` zurückgegeben — Server
+    speichert nur den argon2id-Hash plus 4-Byte-Prefix.
+
+    ``scopes`` ist CSV aus ``read`` / ``write`` / ``admin`` (default:
+    ``read``). ``admin`` erlaubt Identity-Einstellungen (Advert, Echo,
+    Path-Hash-Mode, Archive) sowie Channel- und Kontakt-Verwaltung — aber
+    *nicht* Identity-Erstellung oder Token-Verwaltung selbst, das bleibt
+    Cookie-only. ``expires_at`` ist ein ISO-8601-Datetime oder leer (= nie).
+    """
+    from meshcore_bridge.auth.tokens import (  # noqa: PLC0415
+        generate_bearer_token,
+        hash_bearer_token,
+    )
+    from meshcore_bridge.auth.tokens import (  # noqa: PLC0415
+        token_prefix as compute_prefix,
+    )
+
+    if not await _user_owns_identity(db, user.id, identity_id):
+        raise HTTPException(status_code=404)
+    label = name.strip()
+    if not label:
+        raise HTTPException(status_code=422, detail="name required")
+    parsed_scopes = frozenset(s.strip() for s in scopes.split(",") if s.strip())
+    invalid = parsed_scopes - {"read", "write", "admin"}
+    if invalid:
+        raise HTTPException(
+            status_code=422, detail=f"unknown scopes: {sorted(invalid)}"
+        )
+    if not parsed_scopes:
+        raise HTTPException(status_code=422, detail="at least one scope required")
+    exp_dt: datetime | None = None
+    if expires_at.strip():
+        try:
+            exp_dt = datetime.fromisoformat(expires_at.strip())
+        except ValueError as e:
+            raise HTTPException(status_code=422, detail="bad expires_at") from e
+        if exp_dt.tzinfo is None:
+            exp_dt = exp_dt.replace(tzinfo=UTC)
+
+    raw = generate_bearer_token()
+    row = CompanionApiToken(
+        user_id=user.id,
+        identity_id=identity_id,
+        name=label[:64],
+        prefix=compute_prefix(raw),
+        token_hash=hash_bearer_token(raw),
+        scopes=",".join(sorted(parsed_scopes)),
+        expires_at=exp_dt,
+    )
+    db.add(row)
+    await db.commit()
+    await db.refresh(row)
+    payload = _token_dict(row)
+    payload["token"] = raw
+    return payload
+
+
+@router.post("/tokens/{token_id}/revoke", response_model=None)
+async def revoke_token(
+    token_id: UUID,
+    user: User = Depends(current_user_required),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Setzt ``revoked_at`` auf jetzt. Idempotent: erneuter Aufruf ändert
+    den Zeitpunkt nicht."""
+    row = await db.get(CompanionApiToken, token_id)
+    if row is None or row.user_id != user.id:
+        raise HTTPException(status_code=404)
+    if row.revoked_at is None:
+        row.revoked_at = datetime.now(UTC)
+        await db.commit()
+    return _token_dict(row)
 
 
 # ---------- Loopback-Admin-Scan ----------
@@ -1432,12 +1615,14 @@ async def internal_companion_scan(
 async def companion_stream(
     request: Request,
     identity_id: UUID,
-    user: User = Depends(current_user_required),
+    ctx: CompanionAuth = Depends(companion_auth),
     db: AsyncSession = Depends(get_db),
 ) -> StreamingResponse:
     """text/event-stream — ein offener SSE-Channel pro Browser-Tab. Wir
     pushen DM-/Channel-Empfang, Sent-Echos und Contact-Updates."""
-    if not await _user_owns_identity(db, user.id, identity_id):
+    ctx.require_scope("read")
+    ctx.require_identity(identity_id)
+    if not await _user_owns_identity(db, ctx.user.id, identity_id):
         raise HTTPException(status_code=404)
     bus = getattr(request.app.state, "companion_events", None)
     if bus is None:

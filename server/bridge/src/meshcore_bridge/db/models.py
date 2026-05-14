@@ -306,6 +306,38 @@ class CompanionChannel(Base):
     )
 
 
+class CompanionApiToken(Base):
+    """Bearer-Token zum direkten Ansprechen einer Companion-Identity über
+    die REST-API ohne Web-Session. 1 Token = 1 Identity. Scopes ``read``
+    und/oder ``write`` (CSV). ``token_hash`` ist argon2id wie bei Repeater-
+    Tokens, ``prefix`` (4 Byte SHA-256-Anfang) ist der Lookup-Index."""
+
+    __tablename__ = "companion_api_tokens"
+
+    id: Mapped[UUID] = mapped_column(_UUIDBlob, primary_key=True, default=uuid4)
+    user_id: Mapped[UUID] = mapped_column(_UUIDBlob, ForeignKey("users.id"), nullable=False)
+    identity_id: Mapped[UUID] = mapped_column(
+        _UUIDBlob, ForeignKey("companion_identities.id"), nullable=False
+    )
+    name: Mapped[str] = mapped_column(String(64), nullable=False)
+    prefix: Mapped[bytes] = mapped_column(BLOB, nullable=False)
+    token_hash: Mapped[str] = mapped_column(String, nullable=False)
+    scopes: Mapped[str] = mapped_column(String(64), nullable=False)
+    """CSV von 'read','write'."""
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        Index("ix_companion_api_tokens_prefix", "prefix"),
+        Index("ix_companion_api_tokens_identity", "identity_id"),
+        Index("ix_companion_api_tokens_user", "user_id"),
+    )
+
+
 class CompanionLinkProbe(Base):
     """Ergebnis einer Companion→Peer-Erreichbarkeitsprobe.
 

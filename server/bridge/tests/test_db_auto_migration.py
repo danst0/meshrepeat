@@ -27,7 +27,7 @@ async def test_fresh_db_creates_tables_and_stamps_head(tmp_path: Path) -> None:
         assert "companion_messages" in tables
         assert "alembic_version" in tables
         head = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
-        assert head == "f5c1d8a3b2e7"
+        assert head == "a1f3e7b9c2d4"
         cols = {r[1] for r in conn.execute("PRAGMA table_info(companion_contacts)")}
         assert "node_type" in cols
         msg_cols = {r[1] for r in conn.execute("PRAGMA table_info(companion_messages)")}
@@ -66,7 +66,7 @@ async def test_legacy_db_gets_patched_and_stamped(tmp_path: Path) -> None:
         msg_cols = {r[1] for r in conn.execute("PRAGMA table_info(companion_messages)")}
         assert "room_sender_pubkey" in msg_cols
         head = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
-        assert head == "f5c1d8a3b2e7"
+        assert head == "a1f3e7b9c2d4"
 
 
 @pytest.mark.asyncio
@@ -93,7 +93,7 @@ async def test_alembic_managed_db_runs_upgrade(tmp_path: Path) -> None:
         cols = {r[1] for r in conn.execute("PRAGMA table_info(companion_contacts)")}
         assert "node_type" in cols  # nach upgrade: da
         head = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
-        assert head == "f5c1d8a3b2e7"
+        assert head == "a1f3e7b9c2d4"
 
 
 @pytest.mark.asyncio
@@ -123,7 +123,7 @@ async def test_legacy_db_gets_path_hash_mode_column(tmp_path: Path) -> None:
         cols = {r[1] for r in conn.execute("PRAGMA table_info(companion_identities)")}
         assert "path_hash_mode" in cols
         head = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
-        assert head == "f5c1d8a3b2e7"
+        assert head == "a1f3e7b9c2d4"
 
 
 @pytest.mark.asyncio
@@ -183,7 +183,7 @@ async def test_sigil_strip_migration_renames_existing_channels(tmp_path: Path) -
         head = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
     assert ch_name == "bonn"
     assert msg_name == "bonn"
-    assert head == "f5c1d8a3b2e7"
+    assert head == "a1f3e7b9c2d4"
 
 
 @pytest.mark.asyncio
