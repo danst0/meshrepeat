@@ -335,9 +335,10 @@
             {% endfor %}
           </select>
         </label>
-        <label style="margin:0">HA-Entity-ID
-          <input name="ha_entity_id" required maxlength="128"
-                 placeholder="weather.home" style="min-width:14rem">
+        <label style="margin:0">HA-Entity-ID(s)
+          <input name="ha_entity_id" required maxlength="512"
+                 placeholder="weather.home oder sensor.temp, sensor.humidity, sensor.wind_speed"
+                 style="min-width:22rem">
         </label>
         <label style="margin:0">Intervall
           <select name="interval_s">
@@ -356,8 +357,11 @@
       <div id="weather-error" style="margin-top:.5rem;color:var(--danger)" hidden></div>
       <p style="font-size:.85em;color:var(--muted);margin:.75rem 0 0">
         Tipp: HA-Entwicklertools → Zustände → nach <code>weather.</code>
-        filtern, um deine entity_id zu finden. Anpassungen (Intervall,
-        Pause) gelten ab dem nächsten Tick.
+        oder <code>sensor.</code> filtern, um die entity_id zu finden.
+        Mehrere Sensoren werden durch Komma getrennt eingegeben — der
+        Format-Builder fasst sie zu einer Zeile zusammen (z.B.
+        <code>🌡18.4 °C · 💧62% · 💨12 km/h</code>). Anpassungen
+        (Intervall, Pause) gelten ab dem nächsten Tick.
       </p>
     </div>
 

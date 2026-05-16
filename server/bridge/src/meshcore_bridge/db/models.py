@@ -412,8 +412,12 @@ class CompanionWeatherPost(Base):
     channel_id: Mapped[UUID] = mapped_column(
         _UUIDBlob, ForeignKey("companion_channels.id"), nullable=False
     )
-    ha_entity_id: Mapped[str] = mapped_column(String(128), nullable=False)
-    """Z.B. ``weather.home`` oder ``weather.wetterstation_balkon``."""
+    ha_entity_id: Mapped[str] = mapped_column(String(512), nullable=False)
+    """Eine oder mehrere HA-Entities. Bei mehreren als CSV speichern
+    (z.B. ``"sensor.wetterstation_actual_temperature,
+    sensor.wetterstation_actual_humidity, sensor.wetterstation_wind_speed"``).
+    Der Service-Loop ruft jede separat über die HA-REST-API und fasst
+    die Werte in einer Channel-Zeile zusammen."""
     interval_s: Mapped[int] = mapped_column(Integer, nullable=False, default=21_600)
     """Sekunden zwischen zwei Posts. Default 6 h = 21600."""
     location_label: Mapped[str | None] = mapped_column(String(64), nullable=True)

@@ -1,16 +1,19 @@
 """Format-Builder für Wetter-Posts aus Home-Assistant-States.
 
-Pure-Function-Modul ohne I/O — :func:`format_weather_line` nimmt einen
-:class:`HAState`, eine optionale Ortsbezeichnung, und liefert die fertige
-Mesh-Channel-Zeile zurück (kompakt, mit Emoji).
+Pure-Function-Modul ohne I/O. Zwei Eintrittspunkte:
+
+* :func:`format_weather_line` — ein einzelner :class:`HAState`. Für
+  ``weather.*``-Entities mit Standardattributen (temperature, humidity,
+  wind_speed) zieht der Builder das Maximum an Information raus.
+* :func:`format_weather_line_multi` — Liste von Sensor-States (z.B.
+  einzelne Wetterstations-Sensoren). Pro State wird ``state +
+  unit_of_measurement`` ausgegeben; die Reihenfolge bleibt erhalten.
 
 Designziele:
 - LoRa-Bytecount klein halten (Zielzeile ≤ ~120 Bytes nach UTF-8-Encoding).
-- Deterministisch: gleiches HAState → gleiche Zeile.
+- Deterministisch: gleiche Inputs → gleiche Zeile.
 - Robust gegen fehlende Attribute: Felder, die HA nicht liefert, werden
   einfach weggelassen statt eine Exception zu werfen.
-- Erst-Konsument ist der ``_weather_loop`` im CompanionService; Tests
-  prüfen das Modul isoliert ohne DB/HTTP.
 """
 
 from __future__ import annotations
@@ -108,4 +111,93 @@ def format_weather_line(state: HAState, location: str | None = None) -> str:
     prefix = " ".join(prefix_parts)
     if prefix:
         return f"{prefix} {body}"
+    return body
+
+
+# Pro-Sensor-Emoji nach entity_id-Substring. Schmückt die Multi-Variante,
+# damit "18.4 °C, 62 %, 12 km/h" als "🌡18.4°C · 💧62% · 💨12 km/h"
+# lesbarer wird. Reihenfolge der Patterns ist relevant: erstes Treffer-Pattern
+# gewinnt.
+_SENSOR_EMOJI: tuple[tuple[str, str], ...] = (
+    ("temperature", "🌡"),
+    ("temp", "🌡"),
+    ("humidity", "💧"),
+    ("rain", "🌧"),
+    ("wind_speed", "💨"),
+    ("windspeed", "💨"),
+    ("wind", "💨"),
+    ("pressure", "📈"),
+    ("uv", "☀"),
+    ("illuminance", "💡"),
+    ("lux", "💡"),
+)
+
+
+def _emoji_for_entity(entity_id: str) -> str:
+    lowered = entity_id.lower()
+    for substr, emoji in _SENSOR_EMOJI:
+        if substr in lowered:
+            return emoji
+    return ""
+
+
+def _fmt_sensor_value(state: HAState) -> str | None:
+    """``HAState`` → ``"18.4 °C"`` o.ä. Liefert ``None``, wenn der State
+    keinen darstellbaren Wert hat (z.B. ``"unavailable"``).
+
+    Zahlen werden konservativ formatiert: enthält der Roh-String einen
+    Punkt, eine Nachkommastelle; sonst ganzzahlig. So vermeiden wir den
+    häufigen Fall, dass HA ``"62"`` liefert und wir daraus ``"62.0 %"``
+    machen würden.
+    """
+    raw = state.state
+    if not raw or raw.lower() in ("unavailable", "unknown", "none"):
+        return None
+    unit_raw = state.attributes.get("unit_of_measurement")
+    unit = unit_raw if isinstance(unit_raw, str) and unit_raw else ""
+    try:
+        f = float(raw)
+    except (TypeError, ValueError):
+        val = raw
+    else:
+        val = f"{f:.1f}" if "." in raw else f"{int(f)}"
+    if unit:
+        # %-Einheiten ohne Leerzeichen — HA-Konvention.
+        if unit == "%":
+            return f"{val}%"
+        return f"{val} {unit}"
+    return val
+
+
+def format_weather_line_multi(
+    states: list[HAState], location: str | None = None
+) -> str:
+    """Baue eine Wetter-Zeile aus mehreren HA-Sensor-States.
+
+    Beispiel (location = ``"Bonn"``)::
+
+        states = [
+            HAState("sensor.wetterstation_actual_temperature", "18.4",
+                    {"unit_of_measurement": "°C"}),
+            HAState("sensor.wetterstation_actual_humidity", "62",
+                    {"unit_of_measurement": "%"}),
+            HAState("sensor.wetterstation_wind_speed", "12",
+                    {"unit_of_measurement": "km/h"}),
+        ]
+        → "Bonn: 🌡18.4 °C · 💧62% · 💨12 km/h"
+
+    Sensoren mit ``state="unavailable"`` werden übersprungen; ist nach
+    dem Filter nichts mehr übrig, ist die Zeile leer (Caller-Loop
+    skippt den Post dann).
+    """
+    parts: list[str] = []
+    for s in states:
+        value = _fmt_sensor_value(s)
+        if value is None:
+            continue
+        emoji = _emoji_for_entity(s.entity_id)
+        parts.append(f"{emoji}{value}" if emoji else value)
+    body = " · ".join(parts)
+    if location and body:
+        return f"{location}: {body}"
     return body

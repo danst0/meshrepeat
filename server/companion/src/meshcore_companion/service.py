@@ -60,7 +60,7 @@ from meshcore_companion.node import (
 from meshcore_companion.packet import Packet, PayloadType, RouteType
 from meshcore_companion.storage import decrypt_seed, encrypt_seed
 from meshcore_companion.translator import Translation, TranslatorConfig, translate
-from meshcore_companion.weather import format_weather_line
+from meshcore_companion.weather import format_weather_line, format_weather_line_multi
 
 if TYPE_CHECKING:
     from meshcore_bridge.db import CompanionChannel, CompanionContact
@@ -2624,11 +2624,16 @@ class CompanionService:
         except asyncio.CancelledError:
             return
 
-    async def _run_weather_post(self, post_id: UUID) -> None:
+    async def _run_weather_post(self, post_id: UUID) -> None:  # noqa: PLR0911
         """Genau ein Wetter-Post-Zyklus: HA lesen → formatieren → senden →
         ``last_posted_at`` fortschreiben. Idempotent gegen Race-Conditions
         (Row könnte zwischen Auswahl und Execute deaktiviert/gelöscht
-        worden sein)."""
+        worden sein).
+
+        Mehrere ``return``-Pfade decken alle Skip-Gründe ab (kein HA-Client,
+        Row weg, leere Entity-Liste, alle HA-Calls fehlgeschlagen, leerer
+        Text, Send abgelehnt, Send-Exception) — wir lassen das explizit
+        flach statt einer Verschachtelung, die schwerer lesbar wäre."""
         from meshcore_bridge.db import CompanionWeatherPost
 
         if self.homeassistant is None:
@@ -2643,18 +2648,38 @@ class CompanionService:
             ha_entity_id = row.ha_entity_id
             location_label = row.location_label
 
-        try:
-            state = await self.homeassistant.get_state(ha_entity_id)
-        except HomeAssistantError as exc:
-            _log.warning(
-                "weather_ha_fetch_failed",
-                post_id=str(post_id),
-                entity=ha_entity_id,
-                error=str(exc),
-            )
+        entity_ids = [e.strip() for e in ha_entity_id.split(",") if e.strip()]
+        if not entity_ids:
+            _log.warning("weather_no_entities", post_id=str(post_id))
             return
 
-        text = format_weather_line(state, location=location_label)
+        from meshcore_companion.homeassistant import HAState
+
+        states: list[HAState] = []
+        for entity in entity_ids:
+            try:
+                states.append(await self.homeassistant.get_state(entity))
+            except HomeAssistantError as exc:
+                _log.warning(
+                    "weather_ha_fetch_failed",
+                    post_id=str(post_id),
+                    entity=entity,
+                    error=str(exc),
+                )
+        if not states:
+            return
+
+        if len(states) == 1:
+            text = format_weather_line(states[0], location=location_label)
+        else:
+            text = format_weather_line_multi(states, location=location_label)
+        if not text.strip():
+            _log.warning(
+                "weather_empty_text",
+                post_id=str(post_id),
+                entities=entity_ids,
+            )
+            return
         try:
             ok = await self.send_channel(
                 identity_id=identity_id,
@@ -2663,7 +2688,9 @@ class CompanionService:
             )
         except Exception:
             _log.exception(
-                "weather_send_failed", post_id=str(post_id), entity=ha_entity_id
+                "weather_send_failed",
+                post_id=str(post_id),
+                entities=entity_ids,
             )
             return
         if not ok:
