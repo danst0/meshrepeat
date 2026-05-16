@@ -59,11 +59,29 @@
     if (active.kind === "channel") return "ch:" + active.channel_id;
     return null;
   }
+  // Aktualisiert das Badge einer bereits gerenderten Sidebar-Row direkt im
+  // DOM. So müssen bump/clear nicht auf den nächsten loadThreads()-Refresh
+  // warten — sonst bleibt das alte Badge zwischen Klick und nächstem SSE
+  // sichtbar (Sekunden bis Minuten).
+  function setRowUnread(key, count) {
+    if (!key) return;
+    const row = document.querySelector(`.thread-row[data-conv-key="${key}"]`);
+    if (!row) return;
+    const badge = row.querySelector(".unread-badge");
+    if (count > 0) {
+      row.classList.add("has-unread");
+      if (badge) badge.textContent = String(count);
+    } else {
+      row.classList.remove("has-unread");
+      if (badge) badge.textContent = "";
+    }
+  }
   function bumpUnread(key) {
     if (!key) return;
     unread[key] = (unread[key] || 0) + 1;
     persistUnread();
     updateTitle();
+    setRowUnread(key, unread[key]);
     // setTimeout, falls die Row gerade erst nachgerendert wird.
     setTimeout(() => { try { updateUnreadJumpIndicator(); } catch (e) {} }, 0);
   }
@@ -73,8 +91,12 @@
       delete unread[key];
       persistUnread();
       updateTitle();
-      setTimeout(() => { try { updateUnreadJumpIndicator(); } catch (e) {} }, 0);
     }
+    // Auch DOM aufräumen, falls die Row aus einem früheren Render-Stand
+    // noch das has-unread-Klassen-Flag trägt (z.B. Reload mit aktiver
+    // Konvo, die in localStorage als ungelesen markiert war).
+    setRowUnread(key, 0);
+    setTimeout(() => { try { updateUnreadJumpIndicator(); } catch (e) {} }, 0);
   }
   function totalUnread() {
     return Object.values(unread).reduce((a, b) => a + b, 0);
@@ -290,6 +312,7 @@
       const wrap = document.createElement("div");
       wrap.className = "thread-row thread-row--channel";
       const key = "ch:" + ch.id;
+      wrap.dataset.convKey = key;
       if (unread[key] && unread[key] > 0) wrap.classList.add("has-unread");
       if (active && active.kind === "channel" && active.channel_id === ch.id) wrap.classList.add("active");
       const star = document.createElement("button");
@@ -340,6 +363,7 @@
       const key = "dm:" + t.peer_pubkey_hex;
       const isActive = active && active.kind === "dm" && active.peer === t.peer_pubkey_hex;
       wrap.className = "thread-row thread-row--dm" + (isActive ? " active" : "");
+      wrap.dataset.convKey = key;
       if (unread[key] && unread[key] > 0) wrap.classList.add("has-unread");
 
       const star = document.createElement("button");
@@ -544,8 +568,10 @@
     updateConvHeader((peerName ? peerName+" · " : "") + shortHex(peerHex, 16));
     document.getElementById("conv-messages").innerHTML = "";
     setComposeMode("dm");
-    await loadDmMessages(peerHex, {replace: true});
+    // Vor dem await — sonst bleibt das Badge bis loadDmMessages durch ist
+    // (oder gar bis zum nächsten SSE-Event) sichtbar.
     clearUnread("dm:" + peerHex);
+    await loadDmMessages(peerHex, {replace: true});
     markActiveThread();
     refreshLoginPill();
     if (MQ_MOBILE.matches) setMobileView("conv");
@@ -597,8 +623,8 @@
     updateConvHeader("#" + channelName);
     document.getElementById("conv-messages").innerHTML = "";
     setComposeMode("channel");
-    await loadChannelMessages(channelId, {replace: true});
     clearUnread("ch:" + channelId);
+    await loadChannelMessages(channelId, {replace: true});
     markActiveThread();
     setLoginPill(null);
     if (MQ_MOBILE.matches) setMobileView("conv");
@@ -1397,22 +1423,31 @@
     if (t === "dm" || t === "sent_dm") {
       // Eingehender DM: peer ist Sender; ausgehender DM (sent_dm): peer ist Empfänger.
       const peerHex = evt.peer_pubkey_hex;
-      if (active && active.kind === "dm" && active.peer === peerHex) {
-        appendIncomingMessage(evt);
-        clearUnread("dm:" + peerHex);
-      } else if (t === "dm") {
-        bumpUnread("dm:" + peerHex);
-        maybeNotify(evt);
+      const isActive = active && active.kind === "dm" && active.peer === peerHex;
+      if (isActive) appendIncomingMessage(evt);
+      if (t === "dm") {
+        // "Aktiv + sichtbar" gilt als gelesen. Versteckter Tab (oder
+        // anderer Thread) muss das Badge/die Notification kriegen, sonst
+        // verpasst der User Nachrichten, die im Hintergrund eintrudeln.
+        if (isActive && !document.hidden) {
+          clearUnread("dm:" + peerHex);
+        } else {
+          bumpUnread("dm:" + peerHex);
+          maybeNotify(evt);
+        }
       }
       loadThreads();
     } else if (t === "channel" || t === "sent_channel") {
       const chId = evt.channel_id;
-      if (active && active.kind === "channel" && active.channel_id === chId) {
-        appendIncomingMessage(evt);
-        clearUnread("ch:" + chId);
-      } else if (t === "channel") {
-        bumpUnread("ch:" + chId);
-        maybeNotify(evt);
+      const isActive = active && active.kind === "channel" && active.channel_id === chId;
+      if (isActive) appendIncomingMessage(evt);
+      if (t === "channel") {
+        if (isActive && !document.hidden) {
+          clearUnread("ch:" + chId);
+        } else {
+          bumpUnread("ch:" + chId);
+          maybeNotify(evt);
+        }
       }
       loadThreads();
     } else if (t === "pending_request") {
@@ -1453,8 +1488,9 @@
       // Push vom Room-Server: peer_pubkey_hex ist der Room, room_sender_*
       // identifiziert den eigentlichen Autor. Sonst wie bei "dm".
       const peerHex = evt.peer_pubkey_hex;
-      if (active && active.kind === "dm" && active.peer === peerHex) {
-        appendIncomingMessage(evt);
+      const isActive = active && active.kind === "dm" && active.peer === peerHex;
+      if (isActive) appendIncomingMessage(evt);
+      if (isActive && !document.hidden) {
         clearUnread("dm:" + peerHex);
       } else {
         bumpUnread("dm:" + peerHex);
@@ -1718,6 +1754,15 @@
       applyTranslateToggleAll();
     });
   }
+
+  // Beim Zurückkommen auf den Tab gilt der aktive Thread als gelesen —
+  // er liegt offen vor dem User. Räumt den Counter weg, der im Hintergrund
+  // (document.hidden) hochgezählt wurde.
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden || !active) return;
+    if (active.kind === "dm") clearUnread("dm:" + active.peer);
+    else if (active.kind === "channel") clearUnread("ch:" + active.channel_id);
+  });
 
   setInterval(loadThreads, POLL_THREADS_FALLBACK_MS);
   restoreState();
