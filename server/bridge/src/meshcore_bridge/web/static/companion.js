@@ -19,10 +19,12 @@
   const LS_KEY = `meshcore.companion.${IDENTITY_ID}.lastConv`;
   const LS_TAB = `meshcore.companion.${IDENTITY_ID}.lastTab`;
   const LS_UNREAD = `meshcore.companion.${IDENTITY_ID}.unread`;
-  // Globaler Translate-Toggle (alle Identities einer Browser-Session).
-  // Server übersetzt eingehende Nachrichten unabhängig vom Browser; die
-  // Checkbox blendet die deutsche Variante nur ein/aus.
-  const LS_TRANSLATE = "meshcore.companion.translateView";
+  // Translate-Toggle pro Konversation. Server übersetzt eingehende
+  // Nachrichten unabhängig vom Browser; die Checkbox blendet die
+  // deutsche Variante nur ein/aus — und zwar je Chat/Kanal getrennt,
+  // damit z.B. ein internationaler Kanal "an", DM mit deutschem
+  // Kontakt aber "aus" bleibt.
+  const LS_TRANSLATE = `meshcore.companion.${IDENTITY_ID}.translate`;
   const MQ_MOBILE = window.matchMedia("(max-width: 640px)");
 
   // ---------- Hash + LocalStorage state ----------
@@ -184,12 +186,28 @@
     return _LANG_LABELS[k] || iso.toUpperCase();
   }
 
-  // ---------- Translate-Toggle ----------
-  function isTranslateOn() {
-    try { return localStorage.getItem(LS_TRANSLATE) === "1"; } catch (e) { return false; }
+  // ---------- Translate-Toggle (pro Konversation) ----------
+  // Map "dm:<peerHex>"|"ch:<channelId>" → true; fehlende Einträge = aus.
+  let translatePrefs = {};
+  try {
+    const raw = localStorage.getItem(LS_TRANSLATE);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      // Backcompat: alter globaler Toggle ("0"/"1") — ignorieren, neuer
+      // Default ist "aus pro Konvo", User stellt bei Bedarf neu ein.
+      if (parsed && typeof parsed === "object") translatePrefs = parsed;
+    }
+  } catch (e) { translatePrefs = {}; }
+
+  function isTranslateOn(key) {
+    if (!key) return false;
+    return !!translatePrefs[key];
   }
-  function setTranslateOn(on) {
-    try { localStorage.setItem(LS_TRANSLATE, on ? "1" : "0"); } catch (e) {}
+  function setTranslateOn(key, on) {
+    if (!key) return;
+    if (on) translatePrefs[key] = true;
+    else delete translatePrefs[key];
+    try { localStorage.setItem(LS_TRANSLATE, JSON.stringify(translatePrefs)); } catch (e) {}
   }
 
   // ADV_TYPE → Icon-Prefix für Sidebar-Einträge.
@@ -462,6 +480,19 @@
       badge.textContent = unread[key] || "";
       wrap.appendChild(badge);
 
+      // Kontextmenü: Rechtsklick + Long-Press → „Archivieren“. Nur für
+      // echte DB-Kontakte (t.id gesetzt) — AT_TARGETS-Pseudo-Einträge
+      // haben noch keinen archiverbaren Zustand.
+      if (t.id) {
+        wrap.addEventListener("contextmenu", (e) => {
+          e.preventDefault();
+          showThreadCtxMenu(e.clientX, e.clientY, t.peer_pubkey_hex, t.peer_name);
+        });
+        attachThreadLongPress(wrap, (x, y) => {
+          showThreadCtxMenu(x, y, t.peer_pubkey_hex, t.peer_name);
+        });
+      }
+
       return wrap;
   }
 
@@ -571,6 +602,7 @@
     // Vor dem await — sonst bleibt das Badge bis loadDmMessages durch ist
     // (oder gar bis zum nächsten SSE-Event) sichtbar.
     clearUnread("dm:" + peerHex);
+    syncTranslateToggle();
     await loadDmMessages(peerHex, {replace: true});
     markActiveThread();
     refreshLoginPill();
@@ -624,6 +656,7 @@
     document.getElementById("conv-messages").innerHTML = "";
     setComposeMode("channel");
     clearUnread("ch:" + channelId);
+    syncTranslateToggle();
     await loadChannelMessages(channelId, {replace: true});
     markActiveThread();
     setLoginPill(null);
@@ -733,7 +766,9 @@
     const original = div.dataset.originalText || "";
     const translated = div.dataset.translatedText || "";
     const lang = (div.dataset.language || "").toLowerCase();
-    const want = isTranslateOn() && translated && lang && lang !== "de";
+    // Bubbles in #conv-messages gehören immer zur aktiven Konvo —
+    // deren Pref entscheidet.
+    const want = isTranslateOn(unreadKey(active)) && translated && lang && lang !== "de";
     txt.innerHTML = escText(want ? translated : original);
     let sub = div.querySelector(".msg-translation-meta");
     if (want) {
@@ -1146,40 +1181,91 @@
   if (btnStatus) btnStatus.addEventListener("click", () => requestDmAction("status"));
   const btnTele = document.getElementById("btn-telemetry");
   if (btnTele) btnTele.addEventListener("click", () => requestDmAction("telemetry"));
-  const btnArchive = document.getElementById("btn-archive");
-  if (btnArchive) btnArchive.addEventListener("click", async () => {
-    if (!active || active.kind !== "dm") return;
-    const peer = active.peer;
-    btnArchive.disabled = true;
+
+  // ---------- Kontextmenü auf DM-Thread-Zeilen ----------
+  // Rechtsklick (Desktop) bzw. Long-Press (Touch) auf einer DM-Zeile
+  // öffnet ein Mini-Menü mit „Archivieren“. Archivierte Kontakte
+  // verschwinden aus /threads; eine neue eingehende DM oder ein
+  // Favorit-Klick aus dem Suchtreffer holt sie zurück.
+  function closeThreadCtxMenu() {
+    const old = document.getElementById("thread-ctx-menu");
+    if (old) old.remove();
+    document.removeEventListener("keydown", onCtxMenuEsc, true);
+  }
+  function onCtxMenuEsc(e) { if (e.key === "Escape") closeThreadCtxMenu(); }
+  async function archiveDmContact(peerHex) {
     try {
-      const r = await fetch(`${API}/identities/${IDENTITY_ID}/contacts/${peer}/archive`,
+      const r = await fetch(`${API}/identities/${IDENTITY_ID}/contacts/${peerHex}/archive`,
         {method: "POST", credentials: "same-origin"});
       if (!r.ok) {
         alert("Archivieren fehlgeschlagen (HTTP " + r.status + ")");
         return;
       }
-      // Konversation schließen + Liste neu laden — der Kontakt fällt
-      // bei archived_at != null aus /threads raus. Suche findet ihn weiter.
-      active = null;
-      document.getElementById("conv-messages").innerHTML = "";
-      document.getElementById("conv-compose").style.display = "none";
-      document.getElementById("conv-actions").hidden = true;
-      updateConvHeader("Wähle einen Chat oder starte einen DM.");
-      // Hash + Storage zurücksetzen (sonst springt der Reload-Restore
-      // gleich wieder in den archivierten Chat).
-      const h = parseHash();
-      delete h.conv;
-      h.tab = "chats";
-      writeHash(h);
-      persistConv(null);
-      if (MQ_MOBILE.matches) setMobileView("threads");
+      if (active && active.kind === "dm" && active.peer === peerHex) {
+        active = null;
+        document.getElementById("conv-messages").innerHTML = "";
+        document.getElementById("conv-compose").style.display = "none";
+        const actEl = document.getElementById("conv-actions");
+        if (actEl) actEl.hidden = true;
+        updateConvHeader("Wähle einen Chat oder starte einen DM.");
+        const h = parseHash();
+        delete h.conv;
+        h.tab = "chats";
+        writeHash(h);
+        persistConv(null);
+        if (MQ_MOBILE.matches) setMobileView("threads");
+      }
       await loadThreads();
     } catch (e) {
       alert("Archivieren fehlgeschlagen: " + (e && e.message || e));
-    } finally {
-      btnArchive.disabled = false;
     }
-  });
+  }
+  function showThreadCtxMenu(x, y, peerHex, peerName) {
+    closeThreadCtxMenu();
+    const menu = document.createElement("div");
+    menu.id = "thread-ctx-menu";
+    menu.className = "thread-ctx-menu";
+    menu.style.left = "0px"; menu.style.top = "0px";
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.textContent = peerName
+      ? `Konversation mit ${peerName} archivieren`
+      : "Konversation archivieren";
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      closeThreadCtxMenu();
+      archiveDmContact(peerHex);
+    });
+    menu.appendChild(btn);
+    document.body.appendChild(menu);
+    const rect = menu.getBoundingClientRect();
+    const left = Math.min(x, window.innerWidth - rect.width - 8);
+    const top = Math.min(y, window.innerHeight - rect.height - 8);
+    menu.style.left = Math.max(0, left) + "px";
+    menu.style.top = Math.max(0, top) + "px";
+    setTimeout(() => {
+      document.addEventListener("click", closeThreadCtxMenu, {once: true, capture: true});
+      document.addEventListener("contextmenu", closeThreadCtxMenu, {once: true, capture: true});
+      document.addEventListener("keydown", onCtxMenuEsc, true);
+    }, 0);
+  }
+  function attachThreadLongPress(el, onTrigger) {
+    let timer = null, startX = 0, startY = 0;
+    el.addEventListener("touchstart", (e) => {
+      const t = e.touches[0]; startX = t.clientX; startY = t.clientY;
+      timer = setTimeout(() => { timer = null; onTrigger(startX, startY); }, 500);
+    }, {passive: true});
+    el.addEventListener("touchmove", (e) => {
+      if (!timer) return;
+      const t = e.touches[0];
+      if (Math.abs(t.clientX - startX) > 10 || Math.abs(t.clientY - startY) > 10) {
+        clearTimeout(timer); timer = null;
+      }
+    }, {passive: true});
+    const cancel = () => { if (timer) { clearTimeout(timer); timer = null; } };
+    el.addEventListener("touchend", cancel, {passive: true});
+    el.addEventListener("touchcancel", cancel, {passive: true});
+  }
 
   // ---------- Map ----------
   let mapInstance = null;
@@ -1744,13 +1830,21 @@
     }
   }
 
-  // Translate-Toggle initialisieren — Checkbox-State aus LocalStorage,
-  // Change-Listener swappt alle bereits gerenderten Bubbles in-place.
+  // Translate-Toggle initialisieren — pro aktive Konvo. Ohne aktive
+  // Konvo ist die Checkbox sinnlos, also disabled.
   const _translateCb = document.getElementById("translate-toggle");
+  function syncTranslateToggle() {
+    if (!_translateCb) return;
+    const key = unreadKey(active);
+    _translateCb.disabled = !key;
+    _translateCb.checked = key ? isTranslateOn(key) : false;
+  }
   if (_translateCb) {
-    _translateCb.checked = isTranslateOn();
+    syncTranslateToggle();
     _translateCb.addEventListener("change", () => {
-      setTranslateOn(_translateCb.checked);
+      const key = unreadKey(active);
+      if (!key) { _translateCb.checked = false; return; }
+      setTranslateOn(key, _translateCb.checked);
       applyTranslateToggleAll();
     });
   }

@@ -509,6 +509,34 @@ code, pre {
   .conv-action-btn { width: 44px; height: 44px; min-height: 44px; }
 }
 
+/* Rechtsklick-Menü auf Thread-Zeilen (Sidebar). Wird per JS positioniert
+   und auf Klick außerhalb / Esc geschlossen. Long-Press triggert dasselbe
+   Menü auf Touch-Geräten. */
+.thread-ctx-menu {
+  position: fixed;
+  z-index: 1000;
+  min-width: 180px;
+  background: var(--bg, #1a1a1a);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  box-shadow: 0 4px 12px rgba(0,0,0,.4);
+  padding: .25rem 0;
+  font-size: .9rem;
+}
+.thread-ctx-menu button {
+  display: block;
+  width: 100%;
+  margin: 0;
+  padding: .4rem .75rem;
+  background: transparent;
+  border: 0;
+  text-align: left;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+}
+.thread-ctx-menu button:hover { background: rgba(130,170,255,.12); }
+
 /* Login-Status-Pill neben dem 🔑-Button. Wird per JS gefüllt aus dem
    /login-state-Endpoint und SSE-Events. */
 .login-pill {
