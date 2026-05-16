@@ -905,6 +905,7 @@
     }
     const r = await fetch(endpoint, {method:"POST", body: fd, credentials:"same-origin"});
     if (r.ok) {
+      pushHistory(text);
       t.value = "";
       // SSE liefert das Event normalerweise zurück (type=sent); zur Sicherheit
       // hier auch reload der ersten Page für robustes Verhalten.
@@ -915,6 +916,91 @@
       alert("send failed: " + r.status);
     }
   });
+
+  // ---------- Eingabe-History (↑/↓ in der Eingabezeile, pro Konversation) ----------
+  // Persistenz via localStorage: nur `entries` werden gespeichert; cursor/draft
+  // sind session-lokal.
+  const messageHistory = new Map();
+  const HISTORY_LIMIT = 100;
+  function convHistKey() {
+    if (!active) return null;
+    return active.kind === "dm" ? `dm:${active.peer}` : `ch:${active.channel_id}`;
+  }
+  function lsHistKey(convKey) {
+    return `meshcore.companion.${IDENTITY_ID}.history.${convKey}`;
+  }
+  function loadEntries(convKey) {
+    try {
+      const raw = localStorage.getItem(lsHistKey(convKey));
+      if (!raw) return [];
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) ? parsed.filter(x => typeof x === "string") : [];
+    } catch { return []; }
+  }
+  function saveEntries(convKey, entries) {
+    try { localStorage.setItem(lsHistKey(convKey), JSON.stringify(entries)); }
+    catch { /* Quota oder Storage deaktiviert — still ignorieren */ }
+  }
+  function getHist() {
+    const k = convHistKey();
+    if (!k) return null;
+    let h = messageHistory.get(k);
+    if (!h) { h = {entries: loadEntries(k), cursor: -1, draft: ""}; messageHistory.set(k, h); }
+    return h;
+  }
+  function pushHistory(text) {
+    const h = getHist();
+    if (!h) return;
+    const last = h.entries[h.entries.length - 1];
+    if (last !== text) {
+      h.entries.push(text);
+      if (h.entries.length > HISTORY_LIMIT) h.entries.shift();
+      const k = convHistKey();
+      if (k) saveEntries(k, h.entries);
+    }
+    h.cursor = -1;
+    h.draft = "";
+  }
+  (function attachHistoryNav() {
+    const input = document.getElementById("conv-text");
+    const popup = document.getElementById("conv-at-popup");
+    if (!input) return;
+    function moveCursorToEnd() {
+      requestAnimationFrame(() => input.setSelectionRange(input.value.length, input.value.length));
+    }
+    input.addEventListener("keydown", (e) => {
+      if (popup && !popup.hidden) return; // @-Autocomplete hat Vorrang
+      if (e.key !== "ArrowUp" && e.key !== "ArrowDown") return;
+      const h = getHist();
+      if (!h || !h.entries.length) return;
+      if (e.key === "ArrowUp") {
+        if (h.cursor === -1) {
+          h.draft = input.value;
+          h.cursor = h.entries.length - 1;
+        } else if (h.cursor > 0) {
+          h.cursor--;
+        } else {
+          return; // schon am ältesten Eintrag — weiteres ↑ ignorieren
+        }
+        input.value = h.entries[h.cursor];
+      } else {
+        if (h.cursor === -1) return;
+        if (h.cursor < h.entries.length - 1) {
+          h.cursor++;
+          input.value = h.entries[h.cursor];
+        } else {
+          h.cursor = -1;
+          input.value = h.draft;
+        }
+      }
+      e.preventDefault();
+      moveCursorToEnd();
+    });
+    input.addEventListener("input", () => {
+      const h = getHist();
+      if (h && h.cursor !== -1) { h.cursor = -1; h.draft = ""; }
+    });
+  })();
 
   // ---------- Ungelesen-Sprung-Pill ----------
   (function setupUnreadJump() {
