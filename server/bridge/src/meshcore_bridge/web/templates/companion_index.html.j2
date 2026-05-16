@@ -18,11 +18,7 @@
             <td class="scope-{{ 'public' if i.scope == 'public' else 'pool' }}">{{ i.scope }}</td>
             <td><code>{{ i.pubkey.hex()[:24] }}…</code></td>
             <td>
-              <a href="/companion/{{ i.id }}/"
-                 style="display:inline-block;padding:.3rem .7rem;background:var(--accent);
-                        color:var(--bg);border-radius:4px;font-weight:bold;text-decoration:none">
-                öffnen →
-              </a>
+              <a href="/companion/{{ i.id }}/" class="btn-link">öffnen →</a>
             </td>
           </tr>
         {% endfor %}
