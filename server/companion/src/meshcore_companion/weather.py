@@ -141,7 +141,7 @@ def _emoji_for_entity(entity_id: str) -> str:
     return ""
 
 
-def _fmt_sensor_value(state: HAState) -> str | None:
+def fmt_sensor_value(state: HAState) -> str | None:
     """``HAState`` → ``"18.4 °C"`` o.ä. Liefert ``None``, wenn der State
     keinen darstellbaren Wert hat (z.B. ``"unavailable"``).
 
@@ -192,7 +192,7 @@ def format_weather_line_multi(
     """
     parts: list[str] = []
     for s in states:
-        value = _fmt_sensor_value(s)
+        value = fmt_sensor_value(s)
         if value is None:
             continue
         emoji = _emoji_for_entity(s.entity_id)

@@ -40,6 +40,12 @@ from meshcore_bridge.web.deps import (
     get_db,
 )
 from meshcore_companion.coords import cluster_outlier_mask, is_valid_coord
+from meshcore_companion.homeassistant import (
+    HomeAssistantAuthError,
+    HomeAssistantError,
+    HomeAssistantNotFound,
+)
+from meshcore_companion.weather import fmt_sensor_value
 
 router = APIRouter(prefix="/api/v1/companion")
 ui_router = APIRouter(prefix="/companion")
@@ -590,6 +596,70 @@ async def update_weather_post(
     await db.commit()
     await db.refresh(post)
     return _weather_post_dict(post)
+
+
+@router.get("/ha/preview", response_model=None)
+async def ha_state_preview(
+    request: Request,
+    entity_ids: Annotated[str, Query()],
+    ctx: CompanionAuth = Depends(companion_auth),
+) -> list[dict[str, Any]]:
+    """Live-Preview für HA-Entity-Werte.
+
+    Liest pro Entity (CSV in ``entity_ids``) den aktuellen Zustand über
+    den ``HomeAssistantClient`` und liefert eine Liste mit
+    ``{entity_id, ok, state, unit, friendly_name, formatted, error}``-
+    Dicts in derselben Reihenfolge wie die Anfrage. ``formatted`` ist
+    derselbe Output, den der Multi-Format-Builder im Channel-Post
+    produzieren würde — der User kann damit direkt einschätzen, ob die
+    eingegebene Entity-ID korrekt ist.
+
+    Wir schützen den Endpoint mit der gleichen Companion-Auth wie die
+    übrigen Routen; ein eigener Read-Scope reicht (der HA-Token ist
+    eh server-seitig hinterlegt, der Endpoint exponiert nur das, was
+    der Companion sowieso schon lesen darf).
+    """
+    ctx.require_scope("read")
+    ha_client = getattr(request.app.state, "homeassistant_client", None)
+    if ha_client is None:
+        raise HTTPException(
+            status_code=503,
+            detail="HA-Adapter nicht aktiv — homeassistant.enabled + Token setzen.",
+        )
+    ids = [e.strip() for e in entity_ids.split(",") if e.strip()]
+    if not ids:
+        return []
+
+    out: list[dict[str, Any]] = []
+    for entity in ids:
+        item: dict[str, Any] = {"entity_id": entity, "ok": False}
+        try:
+            state = await ha_client.get_state(entity)
+        except HomeAssistantNotFound:
+            item["error"] = "entity nicht gefunden"
+            out.append(item)
+            continue
+        except HomeAssistantAuthError:
+            item["error"] = "HA-Token ungültig"
+            out.append(item)
+            continue
+        except HomeAssistantError as exc:
+            item["error"] = f"HA-Fehler: {exc}"
+            out.append(item)
+            continue
+        unit_raw = state.attributes.get("unit_of_measurement")
+        friendly = state.attributes.get("friendly_name")
+        item.update(
+            {
+                "ok": True,
+                "state": state.state,
+                "unit": unit_raw if isinstance(unit_raw, str) else None,
+                "friendly_name": friendly if isinstance(friendly, str) else None,
+                "formatted": fmt_sensor_value(state),
+            }
+        )
+        out.append(item)
+    return out
 
 
 @router.delete("/weather/{post_id}", response_model=None)
