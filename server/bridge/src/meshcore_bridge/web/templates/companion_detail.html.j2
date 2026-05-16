@@ -293,9 +293,22 @@
         {% endif %}
       </p>
 
+      {# Template-Snippet für eine einzelne Sensor-Zeile — kommt sowohl in
+         der bestehenden Liste als auch im JS-Add-Button zum Einsatz. #}
+      <template id="wp-entity-row-template">
+        <div class="wp-entity-row" style="display:flex;gap:.5rem;align-items:center;margin-bottom:.35rem">
+          <input class="wp-entity-input" maxlength="128"
+                 placeholder="weather.home oder sensor.…"
+                 style="flex:1;min-width:18rem">
+          <span class="wp-entity-preview" style="font-size:.85em;color:var(--muted);min-width:8rem"></span>
+          <button type="button" class="wp-entity-remove"
+                  title="Sensor entfernen" style="margin:0;padding:.2rem .55rem">−</button>
+        </div>
+      </template>
+
       <div id="weather-list">
       {% for wp in weather_posts %}
-        {% set wp_channel = channels | selectattr('id', 'equalto', wp.channel_id) | list | first %}
+        {% set entities = (wp.ha_entity_id or '').split(',') %}
         <form class="wp-row" data-wp-id="{{ wp.id }}" onsubmit="return false"
               style="border:1px solid var(--border);border-radius:.25rem;padding:.75rem;margin-bottom:.75rem">
           <div style="display:flex;flex-wrap:wrap;gap:.75rem;align-items:flex-end">
@@ -305,9 +318,6 @@
                   <option value="{{ ch.id }}"{% if ch.id == wp.channel_id %} selected{% endif %}>#{{ ch.name }}</option>
                 {% endfor %}
               </select>
-            </label>
-            <label style="margin:0;flex:1;min-width:18rem">HA-Entity-IDs (Komma-getrennt)
-              <input name="ha_entity_id" maxlength="512" value="{{ wp.ha_entity_id }}">
             </label>
             <label style="margin:0">Intervall
               <select name="interval_s">
@@ -322,20 +332,38 @@
               <input name="location_label" maxlength="64" value="{{ wp.location_label or '' }}">
             </label>
           </div>
+          <div style="margin-top:.75rem">
+            <strong style="display:block;margin-bottom:.25rem">HA-Entities</strong>
+            <div class="wp-entities">
+              {% for raw in entities %}
+                {% set entity = raw.strip() %}
+                {% if entity or loop.first %}
+                  <div class="wp-entity-row" style="display:flex;gap:.5rem;align-items:center;margin-bottom:.35rem">
+                    <input class="wp-entity-input" maxlength="128"
+                           value="{{ entity }}"
+                           placeholder="weather.home oder sensor.…"
+                           style="flex:1;min-width:18rem">
+                    <span class="wp-entity-preview"
+                          style="font-size:.85em;color:var(--muted);min-width:8rem"></span>
+                    <button type="button" class="wp-entity-remove"
+                            title="Sensor entfernen" style="margin:0;padding:.2rem .55rem">−</button>
+                  </div>
+                {% endif %}
+              {% endfor %}
+            </div>
+            <button type="button" class="wp-entity-add"
+                    style="margin:0;padding:.25rem .75rem">+ Sensor</button>
+          </div>
           <div style="margin-top:.5rem;font-size:.85em;color:var(--muted)">
             Zuletzt: {% if wp.last_posted_at %}{{ wp.last_posted_at | localtime }}{% else %}—{% endif %}
             · Status: {% if wp.enabled %}aktiv{% else %}<span style="color:var(--muted)">pausiert</span>{% endif %}
           </div>
           <div style="display:flex;gap:.5rem;flex-wrap:wrap;margin-top:.5rem">
             <button type="button" class="wp-save-btn" style="margin:0">Speichern</button>
-            <button type="button" class="wp-preview-btn" style="margin:0">Werte von HA abrufen</button>
             <button type="button" class="wp-toggle-btn" data-enabled="{{ '1' if wp.enabled else '0' }}" style="margin:0">
               {{ 'pausieren' if wp.enabled else 'aktivieren' }}
             </button>
             <button type="button" class="wp-delete-btn" style="margin:0;background:var(--danger)">löschen</button>
-          </div>
-          <div class="wp-preview" hidden
-               style="margin-top:.5rem;padding:.5rem;border-left:2px solid var(--border);font-size:.9em">
           </div>
           <div class="wp-error" hidden style="margin-top:.5rem;color:var(--danger)"></div>
         </form>
@@ -347,44 +375,56 @@
 
       <h3 style="margin-top:1rem">Neuer Wetter-Auto-Post</h3>
       <form id="weather-create-form" onsubmit="return false"
-            style="display:flex;flex-wrap:wrap;gap:.75rem;align-items:flex-end">
-        <label style="margin:0">Kanal
-          <select name="channel_id" required>
-            {% for ch in channels if not ch.archived_at %}
-              <option value="{{ ch.id }}"{% if ch.name == 'wetter' %} selected{% endif %}>#{{ ch.name }}</option>
-            {% endfor %}
-          </select>
-        </label>
-        <label style="margin:0">HA-Entity-ID(s)
-          <input name="ha_entity_id" required maxlength="512"
-                 placeholder="weather.home oder sensor.temp, sensor.humidity, sensor.wind_speed"
-                 style="min-width:22rem">
-        </label>
-        <label style="margin:0">Intervall
-          <select name="interval_s">
-            <option value="3600">1 h</option>
-            <option value="10800">3 h</option>
-            <option value="21600" selected>6 h</option>
-            <option value="43200">12 h</option>
-            <option value="86400">24 h</option>
-          </select>
-        </label>
-        <label style="margin:0">Ort (optional)
-          <input name="location_label" maxlength="64" placeholder="z.B. Bonn">
-        </label>
-        <button type="submit" style="margin:0">Anlegen</button>
-        <button type="button" id="weather-create-preview-btn" style="margin:0">Werte von HA abrufen</button>
+            style="display:flex;flex-direction:column;gap:.75rem">
+        <div style="display:flex;flex-wrap:wrap;gap:.75rem;align-items:flex-end">
+          <label style="margin:0">Kanal
+            <select name="channel_id" required>
+              {% for ch in channels if not ch.archived_at %}
+                <option value="{{ ch.id }}"{% if ch.name == 'wetter' %} selected{% endif %}>#{{ ch.name }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label style="margin:0">Intervall
+            <select name="interval_s">
+              <option value="3600">1 h</option>
+              <option value="10800">3 h</option>
+              <option value="21600" selected>6 h</option>
+              <option value="43200">12 h</option>
+              <option value="86400">24 h</option>
+            </select>
+          </label>
+          <label style="margin:0">Ort (optional)
+            <input name="location_label" maxlength="64" placeholder="z.B. Bonn">
+          </label>
+        </div>
+        <div>
+          <strong style="display:block;margin-bottom:.25rem">HA-Entities</strong>
+          <div class="wp-entities">
+            <div class="wp-entity-row" style="display:flex;gap:.5rem;align-items:center;margin-bottom:.35rem">
+              <input class="wp-entity-input" maxlength="128"
+                     placeholder="weather.home oder sensor.…"
+                     style="flex:1;min-width:18rem">
+              <span class="wp-entity-preview"
+                    style="font-size:.85em;color:var(--muted);min-width:8rem"></span>
+              <button type="button" class="wp-entity-remove"
+                      title="Sensor entfernen" style="margin:0;padding:.2rem .55rem">−</button>
+            </div>
+          </div>
+          <button type="button" class="wp-entity-add"
+                  style="margin:0;padding:.25rem .75rem">+ Sensor</button>
+        </div>
+        <div>
+          <button type="submit" style="margin:0">Anlegen</button>
+        </div>
       </form>
-      <div id="weather-create-preview" hidden
-           style="margin-top:.5rem;padding:.5rem;border-left:2px solid var(--border);font-size:.9em"></div>
       <div id="weather-error" style="margin-top:.5rem;color:var(--danger)" hidden></div>
       <p style="font-size:.85em;color:var(--muted);margin:.75rem 0 0">
         Tipp: HA-Entwicklertools → Zustände → nach <code>weather.</code>
         oder <code>sensor.</code> filtern, um die entity_id zu finden.
-        Mehrere Sensoren werden durch Komma getrennt eingegeben — der
-        Format-Builder fasst sie zu einer Zeile zusammen (z.B.
-        <code>🌡18.4 °C · 💧62% · 💨12 km/h</code>). Anpassungen
-        (Intervall, Pause) gelten ab dem nächsten Tick.
+        Jeder Sensor hat sein eigenes Feld; 2 s nach einer Eingabe holt der
+        Browser den aktuellen HA-Wert und zeigt ihn rechts daneben. Der
+        Format-Builder fasst alle gefundenen Werte zu einer Channel-Zeile
+        zusammen (z.B. <code>🌡18.4 °C · 💧62% · 💨12 km/h</code>).
       </p>
     </div>
 
@@ -582,10 +622,11 @@
       });
 
       // ---------- Wetter-Auto-Posts ----------
-      // Jede Row ist ein eigenes <form>; gespeichert wird per PATCH gegen
-      // /api/v1/companion/weather/<id>. Vorschau ruft /api/v1/companion/ha/preview
-      // und rendert pro Entity ihren aktuellen Wert — damit man Tippfehler
-      // in der entity_id sofort sieht.
+      // Pro Post ein eigenes <form>; HA-Sensoren werden je ein Input mit
+      // Inline-Preview rechts daneben dargestellt. + Button hängt eine
+      // weitere Sensor-Zeile an, − entfernt sie. Beim Speichern werden
+      // alle Inputs gesammelt und als CSV in das ``ha_entity_id``-Feld
+      // gejoint — das Backend bleibt unverändert.
       const wpErrTop = document.getElementById("weather-error");
       function wpShowError(msg, el) {
         const target = el || wpErrTop;
@@ -598,58 +639,117 @@
         if (target) { target.hidden = true; target.textContent = ""; }
       }
 
-      // Debounced Auto-Preview: 2 s nach letztem Edit eines Entity-Felds
-      // ruft renderPreview() automatisch. Manueller "Werte von HA abrufen"-
-      // Button triggert sofort.
       const WP_PREVIEW_DEBOUNCE_MS = 2000;
-      function wpAttachAutoPreview(inputEl, previewEl) {
-        if (!inputEl || !previewEl) return;
-        let timer = null;
-        inputEl.addEventListener("input", () => {
-          if (timer) clearTimeout(timer);
-          timer = setTimeout(() => {
-            timer = null;
-            renderPreview(previewEl, inputEl.value);
-          }, WP_PREVIEW_DEBOUNCE_MS);
-        });
+      const WP_ENTITY_TPL = document.getElementById("wp-entity-row-template");
+
+      function wpCollectEntities(formEl) {
+        return Array.from(formEl.querySelectorAll(".wp-entity-input"))
+          .map(i => i.value.trim())
+          .filter(Boolean);
       }
 
-      async function renderPreview(targetEl, entityIds) {
-        if (!targetEl) return;
-        targetEl.hidden = false;
-        targetEl.innerHTML = '<span style="color:var(--muted)">lade…</span>';
-        const ids = (entityIds || "").split(",").map(s => s.trim()).filter(Boolean);
-        if (!ids.length) {
-          targetEl.innerHTML = '<span style="color:var(--muted)">keine Entity-ID eingegeben</span>';
+      async function wpPreviewEntity(inputEl, previewSpan) {
+        const entityId = inputEl.value.trim();
+        if (!entityId) {
+          previewSpan.textContent = "";
+          previewSpan.style.color = "var(--muted)";
           return;
         }
+        previewSpan.textContent = "lade…";
+        previewSpan.style.color = "var(--muted)";
         try {
-          const url = `/api/v1/companion/ha/preview?entity_ids=${encodeURIComponent(ids.join(","))}`;
-          const r = await fetch(url, {credentials: "same-origin"});
+          const r = await fetch(
+            `/api/v1/companion/ha/preview?entity_ids=${encodeURIComponent(entityId)}`,
+            {credentials: "same-origin"});
           if (!r.ok) {
-            targetEl.innerHTML =
-              `<span style="color:var(--danger)">HTTP ${r.status}: ${await r.text()}</span>`;
+            previewSpan.textContent = `HTTP ${r.status}`;
+            previewSpan.style.color = "var(--danger)";
             return;
           }
           const data = await r.json();
-          targetEl.innerHTML = data.map(item => {
-            if (item.ok) {
-              const fn = item.friendly_name ? ` <span style="color:var(--muted)">(${item.friendly_name})</span>` : "";
-              return `<div>✓ <code>${item.entity_id}</code> → <strong>${item.formatted ?? item.state}</strong>${fn}</div>`;
-            }
-            return `<div style="color:var(--danger)">✗ <code>${item.entity_id}</code> — ${item.error || "Fehler"}</div>`;
-          }).join("");
+          const item = Array.isArray(data) ? data[0] : null;
+          if (!item) {
+            previewSpan.textContent = "—";
+            previewSpan.style.color = "var(--muted)";
+            return;
+          }
+          if (item.ok) {
+            const val = item.formatted ?? item.state;
+            previewSpan.textContent = `→ ${val}`;
+            previewSpan.style.color = "";
+            previewSpan.title = item.friendly_name || "";
+          } else {
+            previewSpan.textContent = `✗ ${item.error || "Fehler"}`;
+            previewSpan.style.color = "var(--danger)";
+            previewSpan.title = "";
+          }
         } catch (e) {
-          targetEl.innerHTML = `<span style="color:var(--danger)">${String(e)}</span>`;
+          previewSpan.textContent = String(e);
+          previewSpan.style.color = "var(--danger)";
+        }
+      }
+
+      function wpWireEntityRow(rowEl, formEl) {
+        const input = rowEl.querySelector(".wp-entity-input");
+        const preview = rowEl.querySelector(".wp-entity-preview");
+        const removeBtn = rowEl.querySelector(".wp-entity-remove");
+        let timer = null;
+        input.addEventListener("input", () => {
+          if (timer) clearTimeout(timer);
+          timer = setTimeout(() => {
+            timer = null;
+            wpPreviewEntity(input, preview);
+          }, WP_PREVIEW_DEBOUNCE_MS);
+        });
+        removeBtn.addEventListener("click", () => {
+          const rows = formEl.querySelectorAll(".wp-entity-row");
+          if (rows.length <= 1) {
+            // Mindestens ein Feld muss bleiben — wir leeren es lieber.
+            input.value = "";
+            preview.textContent = "";
+            input.focus();
+            return;
+          }
+          rowEl.remove();
+        });
+        // Bei vorgegebenem Wert (Server-Render) direkt eine Vorschau triggern.
+        if (input.value.trim()) {
+          wpPreviewEntity(input, preview);
+        }
+      }
+
+      function wpWireEntityList(formEl) {
+        formEl.querySelectorAll(".wp-entity-row").forEach((rowEl) => {
+          wpWireEntityRow(rowEl, formEl);
+        });
+        const addBtn = formEl.querySelector(".wp-entity-add");
+        if (addBtn) {
+          addBtn.addEventListener("click", () => {
+            const list = formEl.querySelector(".wp-entities");
+            const newRow = WP_ENTITY_TPL.content.firstElementChild.cloneNode(true);
+            list.appendChild(newRow);
+            wpWireEntityRow(newRow, formEl);
+            newRow.querySelector(".wp-entity-input").focus();
+          });
         }
       }
 
       // --- Anlege-Form
       const wpForm = document.getElementById("weather-create-form");
       if (wpForm) {
+        wpWireEntityList(wpForm);
         wpForm.querySelector("button[type=submit]").addEventListener("click", async () => {
           wpClearError();
-          const fd = new FormData(wpForm);
+          const entities = wpCollectEntities(wpForm);
+          if (!entities.length) {
+            wpShowError("Mindestens eine HA-Entity-ID angeben.");
+            return;
+          }
+          const fd = new FormData();
+          fd.append("channel_id", wpForm.querySelector("select[name=channel_id]").value);
+          fd.append("interval_s", wpForm.querySelector("select[name=interval_s]").value);
+          fd.append("location_label", wpForm.querySelector("input[name=location_label]").value);
+          fd.append("ha_entity_id", entities.join(","));
           try {
             const r = await fetch(`/api/v1/companion/identities/${IDENT}/weather`,
               {method: "POST", credentials: "same-origin", body: fd});
@@ -663,27 +763,9 @@
             wpShowError(String(e));
           }
         });
-        const wpCreatePrevEl = document.getElementById("weather-create-preview");
-        const wpCreateInput = wpForm.querySelector("input[name=ha_entity_id]");
-        const wpCreatePrevBtn = document.getElementById("weather-create-preview-btn");
-        if (wpCreatePrevBtn) {
-          wpCreatePrevBtn.addEventListener("click", () => {
-            renderPreview(wpCreatePrevEl, wpCreateInput?.value || "");
-          });
-        }
-        wpAttachAutoPreview(wpCreateInput, wpCreatePrevEl);
       }
 
-      // --- Pro-Row Aktionen (Save / Preview / Toggle / Delete)
-      function wpRowFormData(row) {
-        const fd = new FormData();
-        fd.append("channel_id", row.querySelector("select[name=channel_id]").value);
-        fd.append("ha_entity_id", row.querySelector("input[name=ha_entity_id]").value);
-        fd.append("interval_s", row.querySelector("select[name=interval_s]").value);
-        fd.append("location_label", row.querySelector("input[name=location_label]").value);
-        return fd;
-      }
-
+      // --- Pro-Row Aktionen (Save / Toggle / Delete)
       async function wpPatch(row, fd) {
         const wpId = row.dataset.wpId;
         const errEl = row.querySelector(".wp-error");
@@ -705,18 +787,22 @@
 
       document.querySelectorAll(".wp-row").forEach((row) => {
         const errEl = row.querySelector(".wp-error");
-        const prevEl = row.querySelector(".wp-preview");
+        wpWireEntityList(row);
 
         row.querySelector(".wp-save-btn").addEventListener("click", async () => {
-          const ok = await wpPatch(row, wpRowFormData(row));
+          const entities = wpCollectEntities(row);
+          if (!entities.length) {
+            wpShowError("Mindestens eine HA-Entity-ID angeben.", errEl);
+            return;
+          }
+          const fd = new FormData();
+          fd.append("channel_id", row.querySelector("select[name=channel_id]").value);
+          fd.append("interval_s", row.querySelector("select[name=interval_s]").value);
+          fd.append("location_label", row.querySelector("input[name=location_label]").value);
+          fd.append("ha_entity_id", entities.join(","));
+          const ok = await wpPatch(row, fd);
           if (ok) location.reload();
         });
-
-        const entityInput = row.querySelector("input[name=ha_entity_id]");
-        row.querySelector(".wp-preview-btn").addEventListener("click", () => {
-          renderPreview(prevEl, entityInput?.value || "");
-        });
-        wpAttachAutoPreview(entityInput, prevEl);
 
         const toggleBtn = row.querySelector(".wp-toggle-btn");
         toggleBtn.addEventListener("click", async () => {
