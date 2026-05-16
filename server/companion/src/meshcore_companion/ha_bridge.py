@@ -29,7 +29,7 @@ import json
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 from zoneinfo import ZoneInfo
@@ -210,6 +210,67 @@ async def _load_bridge_context(
         )
 
 
+# Wieviel DM-Vorgeschichte wir dem LLM mitgeben (= 4 Runden). Mehr
+# verwirrt kleine Modelle eher, als dass es hilft.
+_HISTORY_LIMIT = 8
+# Älter als das → ignorieren (sonst rutscht der "wie warm draußen" von
+# gestern in eine heutige "sag mal"-Begrüßung).
+_HISTORY_MAX_AGE_MIN = 30
+
+
+async def _load_recent_dm_history(
+    *,
+    sessionmaker: Callable[[], AbstractAsyncContextManager[AsyncSession]],
+    identity_id: UUID,
+    peer_pubkey: bytes,
+    exclude_text: str,
+) -> list[tuple[str, str]]:
+    """Lade die letzten DM-Turns zwischen dieser Identity und dem Peer
+    in chronologischer Reihenfolge.
+
+    Liefert ``[(role, content), ...]`` mit ``role`` ∈ ``{"user","assistant"}``
+    (in = User, out = Assistant). Die aktuell verarbeitete Inbound-DM
+    wird ausgeschlossen, wenn sie textgleich als jüngste Inbound-Row
+    vorliegt — sie wird vom Aufrufer eigenständig als letzter User-Turn
+    angehängt.
+    """
+    from sqlalchemy import select
+
+    from meshcore_bridge.db import CompanionMessage
+
+    cutoff = datetime.now(UTC) - timedelta(minutes=_HISTORY_MAX_AGE_MIN)
+    async with sessionmaker() as db:
+        rows = list(
+            (
+                await db.execute(
+                    select(CompanionMessage)
+                    .where(
+                        CompanionMessage.identity_id == identity_id,
+                        CompanionMessage.peer_pubkey == peer_pubkey,
+                        CompanionMessage.channel_name.is_(None),
+                        CompanionMessage.text.is_not(None),
+                        CompanionMessage.ts >= cutoff,
+                    )
+                    .order_by(CompanionMessage.ts.desc())
+                    .limit(_HISTORY_LIMIT + 1)
+                )
+            ).scalars()
+        )
+    # Jüngste Inbound, die textgleich ist, ist die gerade verarbeitete
+    # Frage — die hängt der Aufrufer als finalen User-Turn an.
+    if rows and rows[0].direction == "in" and (rows[0].text or "") == exclude_text:
+        rows = rows[1:]
+    rows = rows[:_HISTORY_LIMIT]
+    rows.reverse()  # chronologisch (alt → neu)
+    turns: list[tuple[str, str]] = []
+    for r in rows:
+        role = "user" if r.direction == "in" else "assistant"
+        text = (r.text or "").strip()
+        if text:
+            turns.append((role, text))
+    return turns
+
+
 # ---------- Ollama-Calls ----------
 
 
@@ -265,8 +326,13 @@ def _build_answer_prompt(
     question: str,
     states: Sequence[HAState],
     aliases: dict[str, str],
+    history: Sequence[tuple[str, str]] = (),
 ) -> list[dict[str, str]]:
-    """Formulierungs-Prompt: ≤180 Zeichen, deutsch, ganze Sätze."""
+    """Formulierungs-Prompt: ≤180 Zeichen, deutsch, ganze Sätze.
+
+    ``history`` enthält optional die letzten DM-Turns als
+    ``(role, content)``-Paare (chronologisch, ohne die aktuelle Frage).
+    """
     if not states:
         data_block = "(keine Daten)"
     else:
@@ -284,24 +350,32 @@ def _build_answer_prompt(
         "Werte und Einheiten konkret. Wenn ein Zustand wie 'on'/'off', "
         "'home'/'not_home' geliefert wird, übersetze ihn sinnvoll ins "
         "Deutsche (z.B. 'läuft'/'aus', 'zu Hause'/'unterwegs'). Wenn "
-        "keine Daten geliefert wurden, sag 'keine Daten verfügbar'.\n\n"
+        "keine Daten geliefert wurden, sag 'keine Daten verfügbar'. "
+        "Wenn der User offenbar an die letzte Antwort anknüpft "
+        "(z.B. 'und das Schlafzimmer?'), nutze die Vorgeschichte als "
+        "Kontext.\n\n"
         f"Jetzt: {_format_now_berlin()}\n\n"
         f"Daten:\n{data_block}"
     )
-    return [
-        {"role": "system", "content": system},
-        {"role": "user", "content": question},
-    ]
+    messages: list[dict[str, str]] = [{"role": "system", "content": system}]
+    for role, content in history:
+        messages.append({"role": role, "content": content})
+    messages.append({"role": "user", "content": question})
+    return messages
 
 
 def _build_chat_prompt(
     *,
     question: str,
     entities: Sequence[tuple[str, str, str | None]],
+    history: Sequence[tuple[str, str]] = (),
 ) -> list[dict[str, str]]:
     """Fallback-Prompt für Fragen, zu denen das Routing keine Entity
     findet: freie Antwort auf Deutsch, ggf. mit Hinweis auf vorhandene
     Sensoren — damit der User weiß, wonach er fragen kann.
+
+    ``history`` enthält optional die letzten DM-Turns als
+    ``(role, content)``-Paare (chronologisch, ohne die aktuelle Frage).
     """
     lines = [f"- {alias}" + (f" ({hint})" if hint else "") for _ent, alias, hint in entities]
     catalog = "\n".join(lines) if lines else "(keine)"
@@ -314,14 +388,17 @@ def _build_chat_prompt(
         "passend kurz. Wenn der User offenbar einen Sensor-Wert wollte, "
         "den du nicht hast, sag das knapp und nenne ggf. einen passenden "
         "Sensor aus der Liste, sofern einer thematisch nahe liegt. Datum, "
-        "Uhrzeit und Wochentag darfst du direkt aus dem Kontext beantworten.\n\n"
+        "Uhrzeit und Wochentag darfst du direkt aus dem Kontext beantworten. "
+        "Nutze die bisherige Konversation als Kontext, wenn der User "
+        "darauf Bezug nimmt.\n\n"
         f"Jetzt: {_format_now_berlin()}\n\n"
         f"Verfügbare Sensoren (nur als Hinweis, keine Werte!):\n{catalog}"
     )
-    return [
-        {"role": "system", "content": system},
-        {"role": "user", "content": question},
-    ]
+    messages: list[dict[str, str]] = [{"role": "system", "content": system}]
+    for role, content in history:
+        messages.append({"role": role, "content": content})
+    messages.append({"role": "user", "content": question})
+    return messages
 
 
 async def _ollama_chat_json(
@@ -512,6 +589,13 @@ async def _handle_query_inner(
         # Bot-Loop bekommt.
         return
 
+    history = await _load_recent_dm_history(
+        sessionmaker=sessionmaker,
+        identity_id=identity_id,
+        peer_pubkey=sender_pubkey,
+        exclude_text=question,
+    )
+
     max_pick = min(ctx.max_entities_per_query, _HARD_ENTITIES_PER_QUERY_CAP)
     routing_msgs = _build_routing_prompt(
         question=question, entities=ctx.entities, max_pick=max_pick
@@ -530,7 +614,7 @@ async def _handle_query_inner(
             sender_prefix=sender_pubkey[:4].hex(),
             question_preview=question[:60],
         )
-        chat_msgs = _build_chat_prompt(question=question, entities=ctx.entities)
+        chat_msgs = _build_chat_prompt(question=question, entities=ctx.entities, history=history)
         chat_reply = await _ollama_chat_text(
             base_url=runner.ollama_base_url,
             model=ctx.ollama_model,
@@ -584,7 +668,9 @@ async def _handle_query_inner(
         )
         return
 
-    answer_msgs = _build_answer_prompt(question=question, states=states, aliases=aliases)
+    answer_msgs = _build_answer_prompt(
+        question=question, states=states, aliases=aliases, history=history
+    )
     answer = await _ollama_chat_text(
         base_url=runner.ollama_base_url,
         model=ctx.ollama_model,
