@@ -71,6 +71,17 @@ companion:
 #   # Reload/Tab-Wechsel.
 #   live_grace_s: 120.0
 
+# Home-Assistant-Lese-Adapter (REST-API). Konsumenten (zukünftiger
+# Wetter-Poster, weitere Sensor-Posts) greifen den Client via
+# ``app.state.homeassistant_client``. Token wird *nicht* hier gepflegt
+# — er kommt aus MESHCORE_HA_TOKEN_FILE (Docker-Secret bevorzugt) oder
+# MESHCORE_HA_TOKEN.
+# homeassistant:
+#   enabled: true
+#   base_url: "https://lu.dumke.me"
+#   timeout_s: 10.0
+#   verify_ssl: true
+
 storage:
   sqlite_path: "/data/meshcore.sqlite"
   # MESHCORE_DB_KEY_FILE wird via Env-Var aus Docker-Secret geladen

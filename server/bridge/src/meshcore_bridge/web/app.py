@@ -45,6 +45,7 @@ from meshcore_bridge.web import (
     repeater_routes,
 )
 from meshcore_bridge.wire import Packet as WirePacket
+from meshcore_companion.homeassistant import HomeAssistantClient, HomeAssistantConfig
 from meshcore_companion.packet import Packet as MCPacket
 from meshcore_companion.service import CompanionService
 from meshcore_companion.translator import TranslatorConfig
@@ -144,6 +145,29 @@ def build_app(cfg: AppConfig) -> FastAPI:
         app.state.asset_version = asset_version
         app.state.app_version = app_version
 
+        # Home-Assistant-Lese-Client. Eigenständig vom Companion — so kann
+        # später ein Wetter-Poster (oder andere Konsumenten) den Client per
+        # ``app.state.homeassistant_client`` greifen, ohne dass Companion
+        # selbst HA-Logik kennt.
+        ha_client: HomeAssistantClient | None = None
+        if cfg.homeassistant.enabled and cfg.homeassistant.base_url and cfg.ha_token:
+            ha_client = HomeAssistantClient(
+                HomeAssistantConfig(
+                    base_url=cfg.homeassistant.base_url,
+                    token=cfg.ha_token,
+                    timeout_s=cfg.homeassistant.timeout_s,
+                    verify_ssl=cfg.homeassistant.verify_ssl,
+                )
+            )
+            log.info("homeassistant_enabled", base_url=cfg.homeassistant.base_url)
+        elif cfg.homeassistant.enabled:
+            log.warning(
+                "homeassistant_disabled_incomplete",
+                has_base_url=bool(cfg.homeassistant.base_url),
+                has_token=bool(cfg.ha_token),
+            )
+        app.state.homeassistant_client = ha_client
+
         # CompanionService aufsetzen (sofern db_key vorhanden ist)
         companion_service: CompanionService | None = None
         if cfg.companion.enabled and cfg.db_key:
@@ -220,6 +244,8 @@ def build_app(cfg: AppConfig) -> FastAPI:
         log.info("stopping")
         if companion_service is not None:
             await companion_service.stop()
+        if ha_client is not None:
+            await ha_client.aclose()
         traffic.set_hook(None)
         await packet_spool.stop()
         await close_engine()

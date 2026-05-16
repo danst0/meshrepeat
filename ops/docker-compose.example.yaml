@@ -3,6 +3,7 @@
 # Pfad-Konvention auf cassius:
 #   /home/danst/dockers/meshcore/docker-compose.yaml   (Kopie dieser Datei)
 #   /home/danst/dockers/meshcore/secrets/db_key        (32B Hex; chmod 600)
+#   /home/danst/dockers/meshcore/secrets/ha_token      (HA Long-Lived Token; chmod 600; optional)
 #   /home/danst/dockers/meshcore/app.yaml              (optional: eigene Config)
 #
 # Image kommt aus GHCR (gebaut von .github/workflows/ci.yml). Updates per:
@@ -23,6 +24,8 @@ services:
       - MESHCORE_CONFIG=/config/app.yaml
       - MESHCORE_DB_PATH=/data/meshcore.sqlite
       - MESHCORE_DB_KEY_FILE=/run/secrets/db_key
+      # HA-Lese-Adapter — nur nötig wenn homeassistant.enabled=true in app.yaml.
+      - MESHCORE_HA_TOKEN_FILE=/run/secrets/ha_token
       - MESHCORE_LOG_LEVEL=INFO
     volumes:
       # Eigene Config (optional). Ohne Mount greift die im Image enthaltene
@@ -31,6 +34,7 @@ services:
       - app_data:/data
     secrets:
       - db_key
+      - ha_token
     networks:
       - traefik_proxy
     labels:
@@ -57,6 +61,8 @@ volumes:
 secrets:
   db_key:
     file: ./secrets/db_key
+  ha_token:
+    file: ./secrets/ha_token
 
 networks:
   traefik_proxy:

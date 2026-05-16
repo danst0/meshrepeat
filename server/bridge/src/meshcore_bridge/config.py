@@ -118,6 +118,22 @@ class TranslationConfig(BaseModel):
     live_grace_s: float = 120.0
 
 
+class HomeAssistantSettings(BaseModel):
+    """Lese-Zugang zur Home-Assistant-REST-API.
+
+    Token kommt nicht aus dem YAML, sondern aus
+    ``MESHCORE_HA_TOKEN_FILE`` (bevorzugt) oder ``MESHCORE_HA_TOKEN``
+    — gleiches Muster wie ``db_key``, damit das Geheimnis als
+    Docker-Secret bzw. .env-File ausserhalb der versionierten Config
+    lebt.
+    """
+
+    enabled: bool = False
+    base_url: str = ""
+    timeout_s: float = 10.0
+    verify_ssl: bool = True
+
+
 class StorageConfig(BaseModel):
     sqlite_path: Path = Path("/data/meshcore.sqlite")
 
@@ -145,6 +161,7 @@ class AppConfig(BaseSettings):
     web: WebConfig = WebConfig()
     companion: CompanionConfig = CompanionConfig()
     translation: TranslationConfig = TranslationConfig()
+    homeassistant: HomeAssistantSettings = HomeAssistantSettings()
     storage: StorageConfig = StorageConfig()
     logging: LoggingConfig = LoggingConfig()
     metrics: MetricsConfig = MetricsConfig()
@@ -154,6 +171,13 @@ class AppConfig(BaseSettings):
 
     Loaded from ``MESHCORE_DB_KEY_FILE`` (preferred) or ``MESHCORE_DB_KEY``.
     Empty until ``load()`` resolves it.
+    """
+
+    ha_token: Annotated[str, Field(default="")] = ""
+    """Long-Lived Access Token für Home Assistant.
+
+    Loaded from ``MESHCORE_HA_TOKEN_FILE`` (preferred) or ``MESHCORE_HA_TOKEN``.
+    Leer wenn HA nicht konfiguriert ist.
     """
 
     @classmethod
@@ -170,6 +194,7 @@ class AppConfig(BaseSettings):
 
         cfg = cls(**data)
         cfg.db_key = _resolve_db_key()
+        cfg.ha_token = _resolve_ha_token()
         return cfg
 
 
@@ -189,3 +214,16 @@ def _resolve_db_key() -> bytes:
     if inline:
         return inline.encode("utf-8").strip()
     return b""
+
+
+def _resolve_ha_token() -> str:
+    """Load Home-Assistant token from file (preferred) or env var."""
+    file_path = os.environ.get("MESHCORE_HA_TOKEN_FILE")
+    if file_path:
+        path = Path(file_path)
+        if path.exists():
+            return path.read_text(encoding="utf-8").strip()
+    inline = os.environ.get("MESHCORE_HA_TOKEN")
+    if inline:
+        return inline.strip()
+    return ""

@@ -69,6 +69,7 @@ Notable env vars:
 - `MESHCORE_DB_KEY_FILE` (preferred) or `MESHCORE_DB_KEY` — 32-byte master key for at-rest encryption of companion privkey seeds (XChaCha20-Poly1305). **Required** for the companion subsystem to start.
 - `MESHCORE_DB_PATH` — SQLite path (Docker default `/data/meshcore.sqlite`)
 - `MESHCORE_ALEMBIC_DIR` — override for the alembic dir lookup (image default: `/app/server/bridge/alembic`)
+- `MESHCORE_HA_TOKEN_FILE` (preferred) or `MESHCORE_HA_TOKEN` — Long-Lived Access Token für den Home-Assistant-Lese-Adapter (`meshcore_companion.homeassistant`). Nur nötig, wenn `homeassistant.enabled=true` in `app.yaml`.
 - `MESHCORE_BUILD_SHA` — cache-buster for `/static/` URLs
 
 `SIGHUP` triggers a hot reload of `AppConfig` and the `PolicyEngine` (see `web/app.py` lifespan).
