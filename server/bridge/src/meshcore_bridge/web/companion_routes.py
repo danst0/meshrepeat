@@ -424,6 +424,31 @@ async def toggle_channel_favorite_rest(
     return {"id": str(channel.id), "favorite": channel.favorite}
 
 
+@router.post("/channels/{channel_id}/archive", response_model=None)
+async def toggle_channel_archived_rest(
+    channel_id: UUID,
+    ctx: CompanionAuth = Depends(companion_auth),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Toggle ``archived_at`` für einen Channel. Archivierte Kanäle fallen
+    aus /threads raus; der Settings-Tab listet sie weiter und bietet
+    einen Restore-Knopf. Kein Auto-Unarchive bei eingehenden Posts."""
+    ctx.require_scope("admin")
+    channel = await db.get(CompanionChannel, channel_id)
+    if channel is None:
+        raise HTTPException(status_code=404)
+    ctx.require_identity(channel.identity_id)
+    ident = await db.get(CompanionIdentity, channel.identity_id)
+    if ident is None or ident.user_id != ctx.user.id:
+        raise HTTPException(status_code=404)
+    channel.archived_at = None if channel.archived_at else datetime.now(UTC)
+    await db.commit()
+    return {
+        "id": str(channel.id),
+        "archived_at": _ts_iso(channel.archived_at),
+    }
+
+
 @router.post("/messages/channel", response_model=None)
 async def send_channel_message(
     request: Request,
@@ -577,7 +602,10 @@ async def list_identity_threads(
         (
             await db.execute(
                 select(CompanionChannel)
-                .where(CompanionChannel.identity_id == identity_id)
+                .where(
+                    CompanionChannel.identity_id == identity_id,
+                    CompanionChannel.archived_at.is_(None),
+                )
                 .order_by(CompanionChannel.favorite.desc(), CompanionChannel.name)
             )
         ).scalars()

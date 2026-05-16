@@ -217,10 +217,10 @@
       <h2>Kanäle ({{ channels | length }})</h2>
       {% if channels %}
         <table>
-          <thead><tr><th></th><th>Name</th><th>Hash</th><th></th></tr></thead>
+          <thead><tr><th></th><th>Name</th><th>Hash</th><th>Status</th><th></th></tr></thead>
           <tbody>
           {% for ch in channels %}
-            <tr>
+            <tr{% if ch.archived_at %} style="opacity:.6"{% endif %}>
               <td title="{{ 'Favorit' if ch.favorite else 'Kein Favorit' }}"
                   style="color:{{ 'gold' if ch.favorite else 'var(--muted)' }};font-size:1.1em">
                 {{ '★' if ch.favorite else '☆' }}
@@ -228,6 +228,20 @@
               <td>{{ ch.name }}</td>
               <td><code>{{ ch.channel_hash.hex() }}</code></td>
               <td>
+                {% if ch.archived_at %}
+                  <span style="color:var(--muted)" title="archiviert {{ ch.archived_at | localtime }}">archiviert</span>
+                {% else %}
+                  aktiv
+                {% endif %}
+              </td>
+              <td style="display:flex;gap:.25rem;flex-wrap:wrap">
+                <button type="button"
+                        class="ch-archive-btn"
+                        data-ch-id="{{ ch.id }}"
+                        data-archived="{{ '1' if ch.archived_at else '0' }}"
+                        style="margin:0;padding:.25rem .6rem">
+                  {{ 'wiederherstellen' if ch.archived_at else 'archivieren' }}
+                </button>
                 <form method="post" action="/companion/channels/{{ ch.id }}/delete"
                       style="margin:0">
                   <button type="submit"
@@ -383,6 +397,30 @@
         });
       }
       document.querySelectorAll(".tok-revoke").forEach(attachRevoke);
+
+      // Channel-Archivieren / Wiederherstellen in der Settings-Liste.
+      document.querySelectorAll(".ch-archive-btn").forEach((btn) => {
+        btn.addEventListener("click", async () => {
+          const chId = btn.dataset.chId;
+          btn.disabled = true;
+          try {
+            const r = await fetch(`/api/v1/companion/channels/${chId}/archive`,
+              {method: "POST", credentials: "same-origin"});
+            if (!r.ok) {
+              alert("Archiv-Toggle fehlgeschlagen (HTTP " + r.status + ")");
+              btn.disabled = false;
+              return;
+            }
+            // Einfachster Reload — die Tabelle hängt an einer ganzen Reihe
+            // serverseitiger Felder (Status-Text, Reihen-Opacity). Lokales
+            // Patchen lohnt sich hier nicht.
+            location.reload();
+          } catch (e) {
+            alert("Archiv-Toggle fehlgeschlagen: " + (e && e.message || e));
+            btn.disabled = false;
+          }
+        });
+      });
 
       form.addEventListener("submit", async () => {
         clearError();

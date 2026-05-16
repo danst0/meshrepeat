@@ -373,6 +373,15 @@
       badge.textContent = unread[key] || "";
       wrap.appendChild(badge);
 
+      // Kontextmenü: „Kanal archivieren". Restore geht über den Settings-Tab.
+      wrap.addEventListener("contextmenu", (e) => {
+        e.preventDefault();
+        showChannelCtxMenu(e.clientX, e.clientY, ch.id, ch.name);
+      });
+      attachThreadLongPress(wrap, (x, y) => {
+        showChannelCtxMenu(x, y, ch.id, ch.name);
+      });
+
       return wrap;
   }
 
@@ -1220,7 +1229,8 @@
       alert("Archivieren fehlgeschlagen: " + (e && e.message || e));
     }
   }
-  function showThreadCtxMenu(x, y, peerHex, peerName) {
+  // Generisches Ein-Eintrag-Kontextmenü. Wird mit Label und Action gefüttert.
+  function openCtxMenu(x, y, label, onAction) {
     closeThreadCtxMenu();
     const menu = document.createElement("div");
     menu.id = "thread-ctx-menu";
@@ -1228,13 +1238,11 @@
     menu.style.left = "0px"; menu.style.top = "0px";
     const btn = document.createElement("button");
     btn.type = "button";
-    btn.textContent = peerName
-      ? `Konversation mit ${peerName} archivieren`
-      : "Konversation archivieren";
+    btn.textContent = label;
     btn.addEventListener("click", (e) => {
       e.stopPropagation();
       closeThreadCtxMenu();
-      archiveDmContact(peerHex);
+      onAction();
     });
     menu.appendChild(btn);
     document.body.appendChild(menu);
@@ -1248,6 +1256,43 @@
       document.addEventListener("contextmenu", closeThreadCtxMenu, {once: true, capture: true});
       document.addEventListener("keydown", onCtxMenuEsc, true);
     }, 0);
+  }
+  function showThreadCtxMenu(x, y, peerHex, peerName) {
+    const label = peerName
+      ? `Konversation mit ${peerName} archivieren`
+      : "Konversation archivieren";
+    openCtxMenu(x, y, label, () => archiveDmContact(peerHex));
+  }
+  async function archiveChannel(channelId) {
+    try {
+      const r = await fetch(`${API}/channels/${channelId}/archive`,
+        {method: "POST", credentials: "same-origin"});
+      if (!r.ok) {
+        alert("Archivieren fehlgeschlagen (HTTP " + r.status + ")");
+        return;
+      }
+      // Falls der archivierte Channel offen ist → Konversation schließen.
+      if (active && active.kind === "channel" && active.channel_id === channelId) {
+        active = null;
+        document.getElementById("conv-messages").innerHTML = "";
+        document.getElementById("conv-compose").style.display = "none";
+        const actEl = document.getElementById("conv-actions");
+        if (actEl) actEl.hidden = true;
+        updateConvHeader("Wähle einen Chat oder starte einen DM.");
+        const h = parseHash();
+        delete h.conv;
+        h.tab = "chats";
+        writeHash(h);
+        persistConv(null);
+        if (MQ_MOBILE.matches) setMobileView("threads");
+      }
+      await loadThreads();
+    } catch (e) {
+      alert("Archivieren fehlgeschlagen: " + (e && e.message || e));
+    }
+  }
+  function showChannelCtxMenu(x, y, channelId, channelName) {
+    openCtxMenu(x, y, `#${channelName} archivieren`, () => archiveChannel(channelId));
   }
   function attachThreadLongPress(el, onTrigger) {
     let timer = null, startX = 0, startY = 0;

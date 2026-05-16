@@ -301,6 +301,13 @@ class CompanionChannel(Base):
     favorite: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default="0", default=False
     )
+    # Aus der Sidebar verbannt (analog zu CompanionContact.archived_at).
+    # Kein Auto-Unarchive: Channels sind Broadcasts, jede neue Nachricht
+    # würde den Eintrag sonst sofort zurückholen — das war der Grund fürs
+    # Archivieren überhaupt. Settings-Tab bietet einen Restore-Knopf.
+    archived_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
