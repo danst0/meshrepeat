@@ -364,6 +364,64 @@ class CompanionService:
             },
         )
 
+    def _schedule_translation_fanout(
+        self, *, targets: list[tuple[UUID, UUID]], text: str
+    ) -> None:
+        """Wie :meth:`_schedule_translation`, aber translate-mal-1 für N Rows:
+        ein einziger Ollama-Roundtrip, Ergebnis wird auf alle ``(identity_id,
+        msg_id)``-Paare angewendet. Spart pro Inbound-Channel-Post (N-1)
+        Aufrufe, wenn mehrere Identitäten denselben Channel abonniert haben.
+        """
+        if self.translation is None or not text or not targets:
+            return
+        if self.is_listener_active is not None and not self.is_listener_active():
+            _log.debug("translate_skip_no_listener_fanout", count=len(targets))
+            return
+        task = asyncio.create_task(self._translate_and_publish_fanout(targets, text))
+        self._translation_tasks.add(task)
+        task.add_done_callback(self._translation_tasks.discard)
+
+    async def _translate_and_publish_fanout(
+        self, targets: list[tuple[UUID, UUID]], text: str
+    ) -> None:
+        """Translator EINMAL anstoßen, Ergebnis auf alle Rows persistieren,
+        pro Identity ein SSE-Event schicken."""
+        from meshcore_bridge.db import CompanionMessage
+
+        cfg = self.translation
+        if cfg is None:
+            return
+        try:
+            result: Translation | None = await translate(text, cfg)
+        except Exception:
+            _log.exception("translate_unhandled_fanout", count=len(targets))
+            return
+        if result is None:
+            return
+        updated: list[tuple[UUID, UUID]] = []
+        now = datetime.now(UTC)
+        async with self.sessionmaker() as db:
+            for identity_id, msg_id in targets:
+                row = await db.get(CompanionMessage, msg_id)
+                if row is None:
+                    _log.warning("translate_missing_row", msg_id=str(msg_id))
+                    continue
+                row.language = result.language
+                row.translated_text = result.translated_text
+                row.translated_at = now
+                updated.append((identity_id, msg_id))
+            await db.commit()
+        for identity_id, msg_id in updated:
+            await self._emit(
+                identity_id,
+                {
+                    "type": "message_translated",
+                    "id": str(msg_id),
+                    "language": result.language,
+                    "translated_text": result.translated_text,
+                },
+            )
+
     async def start(self) -> None:
         """DB → Identitäten laden, Advert-Loop starten."""
         from meshcore_bridge.db import CompanionIdentity
@@ -1986,6 +2044,10 @@ class CompanionService:
         if not targets:
             return
         ts = datetime.fromtimestamp(decoded.timestamp, UTC)
+        # Translation-Fan-Out: pro Channel-Post nur EINMAL übersetzen, das
+        # Ergebnis dann auf alle Inbox-Kopien anwenden. Sonst feuern N
+        # Identitäten N parallele Ollama-Roundtrips für identischen Text.
+        translation_targets: list[tuple[UUID, UUID]] = []
         for target in targets:
             loaded = self._by_id.get(target.identity_id)
             if loaded is None:
@@ -2023,11 +2085,11 @@ class CompanionService:
                         "hops": pkt.hop_count,
                     },
                 )
-                self._schedule_translation(
-                    identity_id=target.identity_id,
-                    msg_id=new_msg.id,
-                    text=decoded.text,
-                )
+                translation_targets.append((target.identity_id, new_msg.id))
+        if translation_targets:
+            self._schedule_translation_fanout(
+                targets=translation_targets, text=decoded.text
+            )
 
     async def _handle_inbound_response(self, *, pkt: Packet, scope: str) -> None:
         """RESPONSE auf einen unserer REQs (DIRECT-Variante)."""
