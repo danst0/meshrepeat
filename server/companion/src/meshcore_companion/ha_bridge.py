@@ -29,8 +29,10 @@ import json
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 import httpx
 import structlog
@@ -236,6 +238,28 @@ def _build_routing_prompt(
     ]
 
 
+_DE_WEEKDAYS = (
+    "Montag",
+    "Dienstag",
+    "Mittwoch",
+    "Donnerstag",
+    "Freitag",
+    "Samstag",
+    "Sonntag",
+)
+_BERLIN_TZ = ZoneInfo("Europe/Berlin")
+
+
+def _format_now_berlin(now: datetime | None = None) -> str:
+    """Aktuelles Datum/Uhrzeit/Wochentag in Berlin als deutscher String.
+
+    Eigene Formatierung statt ``locale``, weil die Container-Locale nicht
+    garantiert ``de_DE`` ist.
+    """
+    dt = (now or datetime.now(_BERLIN_TZ)).astimezone(_BERLIN_TZ)
+    return f"{_DE_WEEKDAYS[dt.weekday()]}, {dt:%d.%m.%Y}, {dt:%H:%M} Uhr (Europe/Berlin)"
+
+
 def _build_answer_prompt(
     *,
     question: str,
@@ -261,6 +285,7 @@ def _build_answer_prompt(
         "'home'/'not_home' geliefert wird, übersetze ihn sinnvoll ins "
         "Deutsche (z.B. 'läuft'/'aus', 'zu Hause'/'unterwegs'). Wenn "
         "keine Daten geliefert wurden, sag 'keine Daten verfügbar'.\n\n"
+        f"Jetzt: {_format_now_berlin()}\n\n"
         f"Daten:\n{data_block}"
     )
     return [
@@ -288,7 +313,9 @@ def _build_chat_prompt(
         "Frage nicht zum Smart Home passt (Begrüßung, Smalltalk), antworte "
         "passend kurz. Wenn der User offenbar einen Sensor-Wert wollte, "
         "den du nicht hast, sag das knapp und nenne ggf. einen passenden "
-        "Sensor aus der Liste, sofern einer thematisch nahe liegt.\n\n"
+        "Sensor aus der Liste, sofern einer thematisch nahe liegt. Datum, "
+        "Uhrzeit und Wochentag darfst du direkt aus dem Kontext beantworten.\n\n"
+        f"Jetzt: {_format_now_berlin()}\n\n"
         f"Verfügbare Sensoren (nur als Hinweis, keine Werte!):\n{catalog}"
     )
     return [
