@@ -229,8 +229,7 @@
               <td><code>{{ ch.channel_hash.hex() }}</code></td>
               <td>
                 <form method="post" action="/companion/channels/{{ ch.id }}/delete"
-                      style="margin:0"
-                      onsubmit="return confirm('Kanal {{ ch.name }} löschen?');">
+                      style="margin:0">
                   <button type="submit"
                           style="margin:0;padding:.25rem .6rem;background:var(--danger)">
                     löschen
