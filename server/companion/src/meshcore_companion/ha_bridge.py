@@ -14,7 +14,7 @@ Datenfluss (eine DM → eine Antwort-DM):
    * Routing-Call gegen Ollama → JSON ``{"entities":[…], "reason":…}``.
    * HA-Reads parallel.
    * Formulierungs-Call → Antworttext.
-   * Hard-Trim auf 140 Bytes (UTF-8-safe), Send-DM zurück.
+   * Hard-Trim auf 200 Bytes (UTF-8-safe), Send-DM zurück.
 
 Fehler-Pfade sind bewusst lax: jeder unerwartete Fehler endet in einem
 ``log.warning`` und liefert entweder eine kurze Skip-Antwort oder gar
@@ -49,8 +49,9 @@ if TYPE_CHECKING:
 _log = structlog.get_logger("companion.ha_bridge")
 
 # Maximal-Länge der Antwort-DM in UTF-8-Bytes. Bewusst etwas unter dem
-# Hard-Limit, damit Header/Ack-Felder noch Luft haben.
-MAX_REPLY_BYTES = 140
+# TXT_MSG-Plaintext-Limit (~229 Byte), damit Header/Ack-Felder noch
+# Luft haben. Reicht für 1–2 ganze deutsche Sätze.
+MAX_REPLY_BYTES = 200
 
 # Wenn das Modell keine passende Entity findet, schicken wir diesen
 # kurzen Hinweis — sonst wirkt es, als hätte der Bot keine Antwort
@@ -240,7 +241,7 @@ def _build_answer_prompt(
     states: Sequence[HAState],
     aliases: dict[str, str],
 ) -> list[dict[str, str]]:
-    """Formulierungs-Prompt: ≤130 Zeichen, deutsch, keine Floskeln."""
+    """Formulierungs-Prompt: ≤180 Zeichen, deutsch, ganze Sätze."""
     if not states:
         data_block = "(keine Daten)"
     else:
@@ -252,10 +253,13 @@ def _build_answer_prompt(
             rows.append(f"- {alias} = {s.state}{unit_str}")
         data_block = "\n".join(rows)
     system = (
-        "Du beantwortest eine LoRa-Mesh-DM in höchstens 130 Zeichen auf "
-        "Deutsch. Knapp, ohne Floskeln, ohne Anrede, ohne Erklärung. "
-        "Werte und Einheiten direkt nennen. Wenn keine Daten geliefert "
-        "wurden, sag 'keine Daten verfügbar'.\n\n"
+        "Du beantwortest eine LoRa-Mesh-DM auf Deutsch in höchstens 180 "
+        "Zeichen. Antworte in ein bis zwei ganzen Sätzen, natürlich "
+        "formuliert, ohne Anrede und ohne überflüssige Floskeln. Nenne "
+        "Werte und Einheiten konkret. Wenn ein Zustand wie 'on'/'off', "
+        "'home'/'not_home' geliefert wird, übersetze ihn sinnvoll ins "
+        "Deutsche (z.B. 'läuft'/'aus', 'zu Hause'/'unterwegs'). Wenn "
+        "keine Daten geliefert wurden, sag 'keine Daten verfügbar'.\n\n"
         f"Daten:\n{data_block}"
     )
     return [
@@ -364,9 +368,9 @@ def trim_to_bytes(text: str, max_bytes: int = MAX_REPLY_BYTES) -> str:
     wenn gekürzt wurde, und sorgt dafür, dass das Ergebnis inklusive
     Ellipse das Byte-Budget einhält.
 
-    Bewusst keine Word-Boundary-Erkennung: für 140-Byte-Mesh-Antworten
+    Bewusst keine Word-Boundary-Erkennung: für 200-Byte-Mesh-Antworten
     ist Mid-Word-Schnitt akzeptabel und in der Praxis selten relevant
-    (Modell zielt schon auf ≤130 Zeichen).
+    (Modell zielt schon auf ≤180 Zeichen).
     """
     encoded = text.encode("utf-8")
     if len(encoded) <= max_bytes:
