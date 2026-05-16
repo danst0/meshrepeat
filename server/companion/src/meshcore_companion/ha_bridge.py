@@ -50,7 +50,7 @@ _log = structlog.get_logger("companion.ha_bridge")
 
 # Maximal-Länge der Antwort-DM in UTF-8-Bytes. Bewusst etwas unter dem
 # TXT_MSG-Plaintext-Limit (~229 Byte), damit Header/Ack-Felder noch
-# Luft haben. Reicht für 1–2 ganze deutsche Sätze.
+# Luft haben. Reicht für 1-2 ganze deutsche Sätze.
 MAX_REPLY_BYTES = 200
 
 # Wenn das Modell keine passende Entity findet, schicken wir diesen
