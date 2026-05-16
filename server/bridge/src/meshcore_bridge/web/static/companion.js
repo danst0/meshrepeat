@@ -1102,8 +1102,9 @@
         : "#" + (h.channel_name || "?");
       const el = document.createElement("div");
       el.className = "search-hit";
-      // h.snippet ist Server-side <mark>…</mark> mit Snippet-Tokens —
-      // wir trauen dem (FTS5 snippet() ist sicher) und parsen als HTML.
+      // h.snippet ist serverseitig html-escaped, danach werden Sentinels
+      // durch echte <mark>/</mark>-Tags ersetzt — siehe companion_routes.py
+      // (search-Endpoint). Nur deshalb darf das hier per innerHTML rein.
       el.innerHTML = `<div class="search-hit-where">${escText(where)}</div>
                       <div class="search-hit-snippet">${h.snippet}</div>`;
       el.addEventListener("click", () => {

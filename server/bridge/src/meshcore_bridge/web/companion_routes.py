@@ -7,6 +7,7 @@ senden / einsehen.
 from __future__ import annotations
 
 import asyncio
+import html
 import json
 import time
 from collections.abc import AsyncIterator
@@ -2001,11 +2002,19 @@ async def search_messages(
         raise HTTPException(status_code=400, detail="empty query")
     fts_query = " ".join(f'"{t}"' for t in tokens)
 
+    # Sentinels statt direkt '<mark>'/'</mark>' an snippet() übergeben:
+    # SQLites snippet() HTML-escaped den umgebenden Text NICHT, daher
+    # müssen wir das Resultat nachträglich escapen und erst danach die
+    # Marker durch echte Tags ersetzen. Sentinels enthalten Steuerzeichen,
+    # die im Klartext einer TXT_MSG nicht vorkommen können.
     sql = sql_text(
         """
         SELECT msg_id, identity_id, peer_pubkey, peer_name,
                channel_name, ts, direction,
-               snippet(companion_messages_fts, 0, '<mark>', '</mark>', '…', 16) AS snippet
+               snippet(companion_messages_fts, 0,
+                       char(2) || 'MO' || char(3),
+                       char(2) || 'MC' || char(3),
+                       '…', 16) AS snippet
         FROM companion_messages_fts
         WHERE companion_messages_fts MATCH :q
           AND identity_id = :identity_id
@@ -2046,12 +2055,18 @@ async def search_messages(
         is_dm = peer_b is not None
         # ts ist als ISO-String mit/ohne TZ in der UNINDEXED-Spalte gelandet
         # (SQLite serialisiert DateTime so). Wir lassen ihn 1:1 durch.
+        raw_snippet = r["snippet"] or ""
+        safe_snippet = (
+            html.escape(raw_snippet)
+            .replace("\x02MO\x03", "<mark>")
+            .replace("\x02MC\x03", "</mark>")
+        )
         hit: dict[str, Any] = {
             "id": _bytes_to_uuid_str(msg_id_b),
             "kind": "dm" if is_dm else "channel",
             "ts": r["ts"],
             "direction": r["direction"],
-            "snippet": r["snippet"],
+            "snippet": safe_snippet,
         }
         if is_dm:
             hit["peer_pubkey_hex"] = peer_b.hex()

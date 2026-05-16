@@ -187,6 +187,50 @@ async def test_search_endpoint_finds_messages(app_and_outbox) -> None:
 
 
 @pytest.mark.asyncio
+async def test_search_snippet_escapes_html(app_and_outbox) -> None:
+    """Regression: ein Mesh-Peer kann HTML/JS in den Klartext einer DM
+    legen. Das FTS5-`snippet()` HTML-escaped den umgebenden Text NICHT
+    von sich aus — wir müssen es serverseitig tun, sonst rendert das
+    Frontend (innerHTML) den Payload als echtes HTML. Siehe
+    companion_routes.py:search_messages.
+    """
+    app, sender = app_and_outbox
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://t") as client:
+        ident_id = await _login_and_create_identity(client, sender, email="xss@example.com")
+        peer = bytes(range(32))
+        payload = 'hallo <img src=x onerror="alert(1)">'
+        async with get_session() as db:
+            db.add(
+                CompanionMessage(
+                    identity_id=UUID(ident_id),
+                    direction="in",
+                    payload_type=0,
+                    peer_pubkey=peer,
+                    peer_name="Mallory",
+                    text=payload,
+                    raw=b"\x00",
+                    ts=datetime.now(UTC),
+                )
+            )
+            await db.commit()
+
+        r = await client.get(f"/api/v1/companion/identities/{ident_id}/search?q=hallo")
+        assert r.status_code == 200, r.text
+        hits = r.json()["hits"]
+        assert hits, "Treffer erwartet"
+        snippet = hits[0]["snippet"]
+        # Match-Marker müssen als echte Tags vorhanden sein …
+        assert "<mark>" in snippet and "</mark>" in snippet
+        # … aber der Angriffs-Payload darf NICHT roh durchgereicht werden.
+        assert "<img" not in snippet
+        assert "onerror" not in snippet or "&quot;" in snippet
+        assert "&lt;img" in snippet
+        # Und die internen Sentinels dürfen nicht leaken.
+        assert "\x02" not in snippet and "\x03" not in snippet
+
+
+@pytest.mark.asyncio
 async def test_search_rejects_short_query(app_and_outbox) -> None:
     app, sender = app_and_outbox
     transport = ASGITransport(app=app)
