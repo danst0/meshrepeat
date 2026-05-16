@@ -275,6 +275,92 @@
       </p>
     </div>
 
+    {# ---------- Wetter-Auto-Posts ---------- #}
+    <div class="card">
+      <h2>Wetter-Auto-Posts</h2>
+      <p style="font-size:.9em;color:var(--muted);margin:0 0 .75rem">
+        Diese Identität postet periodisch das aktuelle Wetter aus Home
+        Assistant in einen Kanal. Quelle ist eine HA-<code>weather.*</code>-
+        Entity (z.B. <code>weather.home</code>); der Server liest sie über
+        die HA-REST-API, formatiert eine kompakte Zeile mit Emoji und
+        sendet sie via Channel-Post.
+        {% if not weather_ha_enabled %}
+          <br><strong style="color:var(--warn,#a60)">HA-Adapter ist nicht
+          aktiv</strong> — neue Posts werden zwar gespeichert, aber erst
+          ausgeliefert, wenn <code>homeassistant.enabled=true</code> in
+          <code>app.yaml</code> + <code>MESHCORE_HA_TOKEN_FILE</code>
+          gesetzt sind.
+        {% endif %}
+      </p>
+
+      <table id="weather-table">
+        <thead>
+          <tr><th>Kanal</th><th>HA-Entity</th><th>Intervall</th><th>Ort</th><th>Zuletzt</th><th>Status</th><th></th></tr>
+        </thead>
+        <tbody>
+        {% for wp in weather_posts %}
+          {% set wp_channel = channels | selectattr('id', 'equalto', wp.channel_id) | list | first %}
+          <tr data-wp-id="{{ wp.id }}">
+            <td>{{ ('#' + wp_channel.name) if wp_channel else '—' }}</td>
+            <td><code>{{ wp.ha_entity_id }}</code></td>
+            <td>{{ (wp.interval_s // 60) }} min</td>
+            <td>{{ wp.location_label or '—' }}</td>
+            <td>{% if wp.last_posted_at %}{{ wp.last_posted_at | localtime }}{% else %}—{% endif %}</td>
+            <td>{% if wp.enabled %}aktiv{% else %}<span style="color:var(--muted)">aus</span>{% endif %}</td>
+            <td style="display:flex;gap:.25rem;flex-wrap:wrap">
+              <button type="button" class="wp-toggle-btn" data-enabled="{{ '1' if wp.enabled else '0' }}"
+                      style="margin:0;padding:.25rem .6rem">
+                {{ 'pausieren' if wp.enabled else 'aktivieren' }}
+              </button>
+              <button type="button" class="wp-delete-btn"
+                      style="margin:0;padding:.25rem .6rem;background:var(--danger)">
+                löschen
+              </button>
+            </td>
+          </tr>
+        {% endfor %}
+        {% if not weather_posts %}
+          <tr id="weather-empty"><td colspan="7" style="color:var(--muted)">Noch kein Wetter-Auto-Post.</td></tr>
+        {% endif %}
+        </tbody>
+      </table>
+
+      <h3 style="margin-top:1rem">Neuer Wetter-Auto-Post</h3>
+      <form id="weather-create-form" onsubmit="return false"
+            style="display:flex;flex-wrap:wrap;gap:.75rem;align-items:flex-end">
+        <label style="margin:0">Kanal
+          <select name="channel_id" required>
+            {% for ch in channels if not ch.archived_at %}
+              <option value="{{ ch.id }}"{% if ch.name == 'wetter' %} selected{% endif %}>#{{ ch.name }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label style="margin:0">HA-Entity-ID
+          <input name="ha_entity_id" required maxlength="128"
+                 placeholder="weather.home" style="min-width:14rem">
+        </label>
+        <label style="margin:0">Intervall
+          <select name="interval_s">
+            <option value="3600">1 h</option>
+            <option value="10800">3 h</option>
+            <option value="21600" selected>6 h</option>
+            <option value="43200">12 h</option>
+            <option value="86400">24 h</option>
+          </select>
+        </label>
+        <label style="margin:0">Ort (optional)
+          <input name="location_label" maxlength="64" placeholder="z.B. Bonn">
+        </label>
+        <button type="submit" style="margin:0">Anlegen</button>
+      </form>
+      <div id="weather-error" style="margin-top:.5rem;color:var(--danger)" hidden></div>
+      <p style="font-size:.85em;color:var(--muted);margin:.75rem 0 0">
+        Tipp: HA-Entwicklertools → Zustände → nach <code>weather.</code>
+        filtern, um deine entity_id zu finden. Anpassungen (Intervall,
+        Pause) gelten ab dem nächsten Tick.
+      </p>
+    </div>
+
     {# ---------- API-Tokens ---------- #}
     <div class="card">
       <h2>API-Tokens</h2>
@@ -466,6 +552,87 @@
       document.getElementById("token-copy-btn").addEventListener("click", async () => {
         try { await navigator.clipboard.writeText(plainEl.textContent); }
         catch { /* Clipboard kann blockiert sein; user-select:all reicht als Fallback */ }
+      });
+
+      // ---------- Wetter-Auto-Posts ----------
+      // Drei Aktionen: anlegen (Form), enabled-Toggle (PATCH), löschen (DELETE).
+      // Bei Erfolg in allen drei Fällen ein simpler Reload — die Tabelle hängt
+      // an einer Reihe serverseitig gerenderter Felder (Channel-Name, Intervall-
+      // Anzeige), lokales DOM-Patchen lohnt sich nicht.
+      const wpErr = document.getElementById("weather-error");
+      function wpShowError(msg) {
+        if (!wpErr) return;
+        wpErr.textContent = msg;
+        wpErr.hidden = false;
+      }
+      function wpClearError() { if (wpErr) { wpErr.hidden = true; wpErr.textContent = ""; } }
+
+      const wpForm = document.getElementById("weather-create-form");
+      if (wpForm) {
+        wpForm.querySelector("button[type=submit]").addEventListener("click", async () => {
+          wpClearError();
+          const fd = new FormData(wpForm);
+          try {
+            const r = await fetch(`/api/v1/companion/identities/${IDENT}/weather`,
+              {method: "POST", credentials: "same-origin", body: fd});
+            if (!r.ok) {
+              const detail = await r.text();
+              wpShowError(`Anlegen fehlgeschlagen (HTTP ${r.status}): ${detail}`);
+              return;
+            }
+            location.reload();
+          } catch (e) {
+            wpShowError(String(e));
+          }
+        });
+      }
+
+      document.querySelectorAll(".wp-toggle-btn").forEach((btn) => {
+        btn.addEventListener("click", async () => {
+          wpClearError();
+          const tr = btn.closest("tr");
+          const wpId = tr.dataset.wpId;
+          const currentlyEnabled = btn.dataset.enabled === "1";
+          const fd = new FormData();
+          fd.append("enabled", currentlyEnabled ? "false" : "true");
+          btn.disabled = true;
+          try {
+            const r = await fetch(`/api/v1/companion/weather/${wpId}`,
+              {method: "PATCH", credentials: "same-origin", body: fd});
+            if (!r.ok) {
+              wpShowError(`Toggle fehlgeschlagen (HTTP ${r.status})`);
+              btn.disabled = false;
+              return;
+            }
+            location.reload();
+          } catch (e) {
+            wpShowError(String(e));
+            btn.disabled = false;
+          }
+        });
+      });
+
+      document.querySelectorAll(".wp-delete-btn").forEach((btn) => {
+        btn.addEventListener("click", async () => {
+          wpClearError();
+          if (!confirm("Wetter-Auto-Post löschen?")) return;
+          const tr = btn.closest("tr");
+          const wpId = tr.dataset.wpId;
+          btn.disabled = true;
+          try {
+            const r = await fetch(`/api/v1/companion/weather/${wpId}`,
+              {method: "DELETE", credentials: "same-origin"});
+            if (!r.ok) {
+              wpShowError(`Löschen fehlgeschlagen (HTTP ${r.status})`);
+              btn.disabled = false;
+              return;
+            }
+            location.reload();
+          } catch (e) {
+            wpShowError(String(e));
+            btn.disabled = false;
+          }
+        });
       });
     })();
   </script>

@@ -213,6 +213,7 @@ def build_app(cfg: AppConfig) -> FastAPI:
                 probe_interval_s=cfg.companion.probe_interval_s,
                 translation=translation_cfg,
                 is_listener_active=lambda: companion_events.has_active_listener(grace_s),
+                homeassistant=ha_client,
             )
             await companion_service.start()
             app.state.companion_service = companion_service

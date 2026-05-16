@@ -29,6 +29,7 @@ from meshcore_bridge.db import (
     CompanionIdentity,
     CompanionLinkProbe,
     CompanionMessage,
+    CompanionWeatherPost,
     User,
 )
 from meshcore_bridge.web.deps import (
@@ -447,6 +448,167 @@ async def toggle_channel_archived_rest(
         "id": str(channel.id),
         "archived_at": _ts_iso(channel.archived_at),
     }
+
+
+# ---------- Weather Posts ----------
+
+
+def _weather_post_dict(p: CompanionWeatherPost) -> dict[str, Any]:
+    return {
+        "id": str(p.id),
+        "identity_id": str(p.identity_id),
+        "channel_id": str(p.channel_id),
+        "ha_entity_id": p.ha_entity_id,
+        "interval_s": p.interval_s,
+        "location_label": p.location_label,
+        "enabled": bool(p.enabled),
+        "last_posted_at": _ts_iso(p.last_posted_at),
+        "created_at": _ts_iso(p.created_at),
+        "updated_at": _ts_iso(p.updated_at),
+    }
+
+
+# Minimum-Intervall in Sekunden. Schützt vor versehentlichem "alle 5 s
+# raushauen" — das wäre Mesh-Spam und kein User würde das wirklich wollen.
+_WEATHER_INTERVAL_MIN_S = 60
+# Sanity-Check, dass das Posten nicht jährlich-selten wird. Praktisch
+# unbegrenzt nach oben, aber 7 Tage als Obergrenze fängt Tippfehler ab.
+_WEATHER_INTERVAL_MAX_S = 7 * 24 * 3600
+
+
+@router.get("/identities/{identity_id}/weather", response_model=None)
+async def list_weather_posts(
+    identity_id: UUID,
+    ctx: CompanionAuth = Depends(companion_auth),
+    db: AsyncSession = Depends(get_db),
+) -> list[dict[str, Any]]:
+    """Alle Wetter-Posts einer Identity."""
+    ctx.require_scope("read")
+    ctx.require_identity(identity_id)
+    if not await _user_owns_identity(db, ctx.user.id, identity_id):
+        raise HTTPException(status_code=404)
+    rows = list(
+        (
+            await db.execute(
+                select(CompanionWeatherPost)
+                .where(CompanionWeatherPost.identity_id == identity_id)
+                .order_by(CompanionWeatherPost.created_at)
+            )
+        ).scalars()
+    )
+    return [_weather_post_dict(r) for r in rows]
+
+
+@router.post("/identities/{identity_id}/weather", response_model=None)
+async def create_weather_post(
+    request: Request,
+    identity_id: UUID,
+    channel_id: Annotated[UUID, Form()],
+    ha_entity_id: Annotated[str, Form()],
+    interval_s: Annotated[int, Form()] = 21_600,
+    location_label: Annotated[str, Form()] = "",
+    enabled: Annotated[bool, Form()] = True,
+    ctx: CompanionAuth = Depends(companion_auth),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Neuer Wetter-Post für diese Identity."""
+    ctx.require_scope("admin")
+    ctx.require_identity(identity_id)
+    if not await _user_owns_identity(db, ctx.user.id, identity_id):
+        raise HTTPException(status_code=404)
+    entity = ha_entity_id.strip()
+    if not entity:
+        raise HTTPException(status_code=400, detail="ha_entity_id darf nicht leer sein")
+    if not (_WEATHER_INTERVAL_MIN_S <= interval_s <= _WEATHER_INTERVAL_MAX_S):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"interval_s muss zwischen {_WEATHER_INTERVAL_MIN_S} "
+                f"und {_WEATHER_INTERVAL_MAX_S} liegen"
+            ),
+        )
+    channel = await db.get(CompanionChannel, channel_id)
+    if channel is None or channel.identity_id != identity_id:
+        raise HTTPException(status_code=400, detail="channel passt nicht zur identity")
+    post = CompanionWeatherPost(
+        identity_id=identity_id,
+        channel_id=channel_id,
+        ha_entity_id=entity,
+        interval_s=interval_s,
+        location_label=(location_label.strip() or None),
+        enabled=enabled,
+    )
+    db.add(post)
+    await db.commit()
+    await db.refresh(post)
+    return _weather_post_dict(post)
+
+
+@router.patch("/weather/{post_id}", response_model=None)
+async def update_weather_post(
+    post_id: UUID,
+    channel_id: Annotated[UUID | None, Form()] = None,
+    ha_entity_id: Annotated[str | None, Form()] = None,
+    interval_s: Annotated[int | None, Form()] = None,
+    location_label: Annotated[str | None, Form()] = None,
+    enabled: Annotated[bool | None, Form()] = None,
+    ctx: CompanionAuth = Depends(companion_auth),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Felder eines Wetter-Posts partiell aktualisieren."""
+    ctx.require_scope("admin")
+    post = await db.get(CompanionWeatherPost, post_id)
+    if post is None:
+        raise HTTPException(status_code=404)
+    ctx.require_identity(post.identity_id)
+    if not await _user_owns_identity(db, ctx.user.id, post.identity_id):
+        raise HTTPException(status_code=404)
+    if channel_id is not None:
+        channel = await db.get(CompanionChannel, channel_id)
+        if channel is None or channel.identity_id != post.identity_id:
+            raise HTTPException(status_code=400, detail="channel passt nicht zur identity")
+        post.channel_id = channel_id
+    if ha_entity_id is not None:
+        entity = ha_entity_id.strip()
+        if not entity:
+            raise HTTPException(status_code=400, detail="ha_entity_id darf nicht leer sein")
+        post.ha_entity_id = entity
+    if interval_s is not None:
+        if not (_WEATHER_INTERVAL_MIN_S <= interval_s <= _WEATHER_INTERVAL_MAX_S):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"interval_s muss zwischen {_WEATHER_INTERVAL_MIN_S} "
+                    f"und {_WEATHER_INTERVAL_MAX_S} liegen"
+                ),
+            )
+        post.interval_s = interval_s
+    if location_label is not None:
+        post.location_label = location_label.strip() or None
+    if enabled is not None:
+        post.enabled = enabled
+    await db.commit()
+    await db.refresh(post)
+    return _weather_post_dict(post)
+
+
+@router.delete("/weather/{post_id}", response_model=None)
+async def delete_weather_post(
+    post_id: UUID,
+    ctx: CompanionAuth = Depends(companion_auth),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Wetter-Post löschen."""
+    ctx.require_scope("admin")
+    post = await db.get(CompanionWeatherPost, post_id)
+    if post is None:
+        raise HTTPException(status_code=404)
+    ctx.require_identity(post.identity_id)
+    if not await _user_owns_identity(db, ctx.user.id, post.identity_id):
+        raise HTTPException(status_code=404)
+    await db.delete(post)
+    await db.commit()
+    return {"id": str(post_id), "deleted": True}
 
 
 @router.post("/messages/channel", response_model=None)
@@ -1888,6 +2050,19 @@ async def companion_detail(
         ).scalars()
     )
 
+    weather_posts = list(
+        (
+            await db.execute(
+                select(CompanionWeatherPost)
+                .where(CompanionWeatherPost.identity_id == identity_id)
+                .order_by(CompanionWeatherPost.created_at)
+            )
+        ).scalars()
+    )
+    weather_ha_enabled = (
+        getattr(request.app.state, "homeassistant_client", None) is not None
+    )
+
     return _templates(request).TemplateResponse(
         request,
         "companion_detail.html.j2",
@@ -1897,6 +2072,8 @@ async def companion_detail(
             "channels": channels,
             "at_targets": at_targets,
             "api_tokens": api_tokens,
+            "weather_posts": weather_posts,
+            "weather_ha_enabled": weather_ha_enabled,
             "flash": None,
         },
     )

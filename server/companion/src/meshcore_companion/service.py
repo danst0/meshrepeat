@@ -39,6 +39,7 @@ from meshcore_companion.crypto import (
     LocalIdentity,
     derive_channel_secret,
 )
+from meshcore_companion.homeassistant import HomeAssistantClient, HomeAssistantError
 from meshcore_companion.node import (
     ADV_TYPE_CHAT,
     ADV_TYPE_ROOM,
@@ -59,6 +60,7 @@ from meshcore_companion.node import (
 from meshcore_companion.packet import Packet, PayloadType, RouteType
 from meshcore_companion.storage import decrypt_seed, encrypt_seed
 from meshcore_companion.translator import Translation, TranslatorConfig, translate
+from meshcore_companion.weather import format_weather_line
 
 if TYPE_CHECKING:
     from meshcore_bridge.db import CompanionChannel, CompanionContact
@@ -233,12 +235,21 @@ class CompanionService:
     # übersetzt werden oder dem ``_translation_batch_loop`` überlassen
     # bleiben. ``None`` = wie bisher immer live (Backwards-kompatibel).
     is_listener_active: Callable[[], bool] | None = None
+    # Wenn gesetzt, läuft ein _weather_loop, der per Identity konfigurierte
+    # CompanionWeatherPost-Rows ausliest, gegen HA frischt und das Ergebnis
+    # via send_channel postet. ``None`` = Feature aus (kein Task).
+    homeassistant: HomeAssistantClient | None = None
+    # Tick-Rate des Weather-Loops in Sekunden. Steuert nur, wie oft der
+    # Loop nach fälligen Posts sucht — der konfigurierte Abstand zwischen
+    # zwei Posts steht in ``CompanionWeatherPost.interval_s``.
+    weather_check_interval_s: int = 60
 
     _by_id: dict[UUID, LoadedIdentity] = field(default_factory=dict)
     _by_pubkey: dict[bytes, LoadedIdentity] = field(default_factory=dict)
     _advert_task: asyncio.Task[None] | None = None
     _probe_task: asyncio.Task[None] | None = None
     _translation_batch_task: asyncio.Task[None] | None = None
+    _weather_task: asyncio.Task[None] | None = None
     _stop: asyncio.Event = field(default_factory=asyncio.Event)
     # Inbound-Dedup: gleiches raw-Paket kommt pro verbundenem Repeater einmal
     # rein. Ohne dedup persistieren wir GRP_TXT/TXT_MSG mehrfach.
@@ -391,10 +402,17 @@ class CompanionService:
             self._probe_task = asyncio.create_task(self._probe_loop())
         if self.translation is not None and self.translation.batch_interval_s > 0:
             self._translation_batch_task = asyncio.create_task(self._translation_batch_loop())
+        if self.homeassistant is not None:
+            self._weather_task = asyncio.create_task(self._weather_loop())
 
     async def stop(self) -> None:
         self._stop.set()
-        for t in (self._advert_task, self._probe_task, self._translation_batch_task):
+        for t in (
+            self._advert_task,
+            self._probe_task,
+            self._translation_batch_task,
+            self._weather_task,
+        ):
             if t is not None:
                 t.cancel()
                 try:
@@ -2533,6 +2551,143 @@ class CompanionService:
                     pass
         except asyncio.CancelledError:
             return
+
+    async def _weather_loop(self) -> None:
+        """Postet Wetter-Updates aus Home Assistant auf konfigurierte Channels.
+
+        Eingelesen werden alle ``CompanionWeatherPost``-Rows mit
+        ``enabled=True``. Fällig ist eine Row, wenn ``last_posted_at`` leer
+        ist oder mehr als ``interval_s`` Sekunden zurückliegt. Der Loop
+        tickt alle ``weather_check_interval_s`` Sekunden und arbeitet die
+        fälligen Rows sequentiell ab — kein Burst, kein paralleler HA-
+        Hammer. Initial-Pause schiebt den ersten Lauf um eine Tickrate
+        nach hinten, damit Adverts/Companion-Boot vorgehen.
+
+        Fehler (HA nicht erreichbar, Entity unbekannt, Send fehlgeschlagen)
+        werden geloggt und führen *nicht* zum Loop-Abbruch — der nächste
+        Tick versucht es erneut. ``last_posted_at`` wird nur bei
+        erfolgreichem ``send_channel`` fortgeschrieben.
+        """
+        from meshcore_bridge.db import CompanionWeatherPost
+
+        if self.homeassistant is None:
+            return
+
+        try:
+            try:
+                await asyncio.wait_for(
+                    self._stop.wait(), timeout=self.weather_check_interval_s
+                )
+            except TimeoutError:
+                pass
+            while not self._stop.is_set():
+                now = datetime.now(UTC)
+                async with self.sessionmaker() as db:
+                    rows = list(
+                        (
+                            await db.execute(
+                                select(CompanionWeatherPost).where(
+                                    CompanionWeatherPost.enabled.is_(True)
+                                )
+                            )
+                        ).scalars()
+                    )
+                due_ids: list[UUID] = []
+                for row in rows:
+                    last = row.last_posted_at
+                    if last is None:
+                        due_ids.append(row.id)
+                        continue
+                    if last.tzinfo is None:
+                        last = last.replace(tzinfo=UTC)
+                    if (now - last).total_seconds() >= row.interval_s:
+                        due_ids.append(row.id)
+
+                for post_id in due_ids:
+                    if self._stop.is_set():
+                        return
+                    await self._run_weather_post(post_id)
+                    # Kleine Pause zwischen Posts auf dasselbe Mesh —
+                    # mehrere Wetter-Stations-Updates hintereinander
+                    # raus zu jagen wäre unhöflich.
+                    try:
+                        await asyncio.wait_for(self._stop.wait(), timeout=2.0)
+                    except TimeoutError:
+                        pass
+
+                try:
+                    await asyncio.wait_for(
+                        self._stop.wait(), timeout=self.weather_check_interval_s
+                    )
+                except TimeoutError:
+                    pass
+        except asyncio.CancelledError:
+            return
+
+    async def _run_weather_post(self, post_id: UUID) -> None:
+        """Genau ein Wetter-Post-Zyklus: HA lesen → formatieren → senden →
+        ``last_posted_at`` fortschreiben. Idempotent gegen Race-Conditions
+        (Row könnte zwischen Auswahl und Execute deaktiviert/gelöscht
+        worden sein)."""
+        from meshcore_bridge.db import CompanionWeatherPost
+
+        if self.homeassistant is None:
+            return
+
+        async with self.sessionmaker() as db:
+            row = await db.get(CompanionWeatherPost, post_id)
+            if row is None or not row.enabled:
+                return
+            identity_id = row.identity_id
+            channel_id = row.channel_id
+            ha_entity_id = row.ha_entity_id
+            location_label = row.location_label
+
+        try:
+            state = await self.homeassistant.get_state(ha_entity_id)
+        except HomeAssistantError as exc:
+            _log.warning(
+                "weather_ha_fetch_failed",
+                post_id=str(post_id),
+                entity=ha_entity_id,
+                error=str(exc),
+            )
+            return
+
+        text = format_weather_line(state, location=location_label)
+        try:
+            ok = await self.send_channel(
+                identity_id=identity_id,
+                channel_id=channel_id,
+                text=text,
+            )
+        except Exception:
+            _log.exception(
+                "weather_send_failed", post_id=str(post_id), entity=ha_entity_id
+            )
+            return
+        if not ok:
+            _log.warning(
+                "weather_send_rejected",
+                post_id=str(post_id),
+                identity_id=str(identity_id),
+                channel_id=str(channel_id),
+            )
+            return
+
+        async with self.sessionmaker() as db:
+            await db.execute(
+                sa_update(CompanionWeatherPost)
+                .where(CompanionWeatherPost.id == post_id)
+                .values(last_posted_at=datetime.now(UTC))
+            )
+            await db.commit()
+        _log.info(
+            "weather_posted",
+            post_id=str(post_id),
+            entity=ha_entity_id,
+            chars=len(text),
+        )
 
     async def _send_advert(self, loaded: LoadedIdentity) -> None:
         if self.inject is None:

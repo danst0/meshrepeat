@@ -386,3 +386,57 @@ class CompanionLinkProbe(Base):
         Index("ix_companion_link_probes_pair_time", "identity_id", "peer_pubkey", "sent_at"),
         Index("ix_companion_link_probes_ack_hash", "ack_hash"),
     )
+
+
+class CompanionWeatherPost(Base):
+    """Wetter-Auto-Post: eine Identity postet periodisch eine Wetter-Zeile
+    aus einer Home-Assistant-Entity in einen Channel.
+
+    Konfiguration läuft pro Identity über den Settings-Tab im Companion-UI;
+    der ``_weather_loop`` im CompanionService klappert alle ``enabled``-
+    Einträge ab, prüft Fälligkeit anhand ``last_posted_at + interval_s``,
+    ruft :class:`meshcore_companion.homeassistant.HomeAssistantClient`,
+    formatiert das Ergebnis und postet via ``send_channel``.
+
+    Bewusst kein UniqueConstraint auf (identity_id, channel_id): der User
+    könnte z.B. zwei Wetterstationen auf denselben Channel mit
+    unterschiedlichen Intervallen posten wollen.
+    """
+
+    __tablename__ = "companion_weather_posts"
+
+    id: Mapped[UUID] = mapped_column(_UUIDBlob, primary_key=True, default=uuid4)
+    identity_id: Mapped[UUID] = mapped_column(
+        _UUIDBlob, ForeignKey("companion_identities.id"), nullable=False
+    )
+    channel_id: Mapped[UUID] = mapped_column(
+        _UUIDBlob, ForeignKey("companion_channels.id"), nullable=False
+    )
+    ha_entity_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    """Z.B. ``weather.home`` oder ``weather.wetterstation_balkon``."""
+    interval_s: Mapped[int] = mapped_column(Integer, nullable=False, default=21_600)
+    """Sekunden zwischen zwei Posts. Default 6 h = 21600."""
+    location_label: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    """Optionaler Ort/Prefix, der vor der Wetter-Zeile erscheint (z.B.
+    ``"Bonn"``). Wenn ``None``, fällt das Format auf einen prefix-losen
+    Output zurück."""
+    enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="1", default=True
+    )
+    last_posted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    __table_args__ = (
+        Index("ix_companion_weather_posts_identity", "identity_id"),
+        Index("ix_companion_weather_posts_due", "enabled", "last_posted_at"),
+    )
