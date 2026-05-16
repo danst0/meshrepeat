@@ -543,16 +543,33 @@ async def list_identity_threads(
     if not await _user_owns_identity(db, ctx.user.id, identity_id):
         raise HTTPException(status_code=404)
 
-    # Top 100 Kontakte (mit Pubkey, sortiert nach last_seen DESC) — die
-    # zeigen wir auch ohne aktiven Thread in der Sidebar, damit man neue
-    # DMs direkt anstossen kann.
+    # Sidebar zeigt nur Kontakte, mit denen wirklich Verkehr stattgefunden
+    # hat (mindestens eine DM in beide Richtungen) ODER die als Favorit
+    # markiert sind. Archivierte Kontakte sind ausgeblendet — die kommen
+    # über /search wieder. Adverts allein reichen nicht; sonst flutet die
+    # Liste mit zufälligen Nachbarknoten.
+    msg_peers_subq = (
+        select(CompanionMessage.peer_pubkey)
+        .where(
+            CompanionMessage.identity_id == identity_id,
+            CompanionMessage.peer_pubkey.is_not(None),
+        )
+        .distinct()
+        .subquery()
+    )
     contact_rows = list(
         (
             await db.execute(
                 select(CompanionContact)
-                .where(CompanionContact.identity_id == identity_id)
+                .where(
+                    CompanionContact.identity_id == identity_id,
+                    CompanionContact.archived_at.is_(None),
+                    or_(
+                        CompanionContact.favorite.is_(True),
+                        CompanionContact.peer_pubkey.in_(select(msg_peers_subq)),
+                    ),
+                )
                 .order_by(desc(CompanionContact.last_seen_at))
-                .limit(100)
             )
         ).scalars()
     )
@@ -806,6 +823,44 @@ async def toggle_contact_favorite_rest(
     contact.favorite = not contact.favorite
     await db.commit()
     return {"id": str(contact.id), "favorite": contact.favorite}
+
+
+@router.post(
+    "/identities/{identity_id}/contacts/{peer_pubkey_hex}/archive",
+    response_model=None,
+)
+async def toggle_contact_archived_rest(
+    identity_id: UUID,
+    peer_pubkey_hex: str,
+    ctx: CompanionAuth = Depends(companion_auth),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Setzt ``archived_at`` (Toggle). Archivierte Kontakte fallen aus
+    der Sidebar-Liste raus, bleiben aber via /search auffindbar.
+    Eingehende DMs setzen den Wert in service.py wieder auf NULL.
+
+    Peer-basiert (statt contact_id), damit das Frontend nicht erst die
+    Kontakt-UUID nachschlagen muss — der Pubkey-Hex ist im DM-Kontext
+    immer vorhanden."""
+    ctx.require_scope("admin")
+    ctx.require_identity(identity_id)
+    peer = await _validate_peer_for_request(db, ctx.user.id, identity_id, peer_pubkey_hex)
+    contact = (
+        await db.execute(
+            select(CompanionContact).where(
+                CompanionContact.identity_id == identity_id,
+                CompanionContact.peer_pubkey == peer,
+            )
+        )
+    ).scalar_one_or_none()
+    if contact is None:
+        raise HTTPException(status_code=404, detail="contact not found")
+    contact.archived_at = None if contact.archived_at else datetime.now(UTC)
+    await db.commit()
+    return {
+        "id": str(contact.id),
+        "archived_at": _ts_iso(contact.archived_at),
+    }
 
 
 async def _validate_peer_for_request(

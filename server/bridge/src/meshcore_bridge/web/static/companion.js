@@ -1120,6 +1120,40 @@
   if (btnStatus) btnStatus.addEventListener("click", () => requestDmAction("status"));
   const btnTele = document.getElementById("btn-telemetry");
   if (btnTele) btnTele.addEventListener("click", () => requestDmAction("telemetry"));
+  const btnArchive = document.getElementById("btn-archive");
+  if (btnArchive) btnArchive.addEventListener("click", async () => {
+    if (!active || active.kind !== "dm") return;
+    const peer = active.peer;
+    btnArchive.disabled = true;
+    try {
+      const r = await fetch(`${API}/identities/${IDENTITY_ID}/contacts/${peer}/archive`,
+        {method: "POST", credentials: "same-origin"});
+      if (!r.ok) {
+        alert("Archivieren fehlgeschlagen (HTTP " + r.status + ")");
+        return;
+      }
+      // Konversation schließen + Liste neu laden — der Kontakt fällt
+      // bei archived_at != null aus /threads raus. Suche findet ihn weiter.
+      active = null;
+      document.getElementById("conv-messages").innerHTML = "";
+      document.getElementById("conv-compose").style.display = "none";
+      document.getElementById("conv-actions").hidden = true;
+      updateConvHeader("Wähle einen Chat oder starte einen DM.");
+      // Hash + Storage zurücksetzen (sonst springt der Reload-Restore
+      // gleich wieder in den archivierten Chat).
+      const h = parseHash();
+      delete h.conv;
+      h.tab = "chats";
+      writeHash(h);
+      persistConv(null);
+      if (MQ_MOBILE.matches) setMobileView("threads");
+      await loadThreads();
+    } catch (e) {
+      alert("Archivieren fehlgeschlagen: " + (e && e.message || e));
+    } finally {
+      btnArchive.disabled = false;
+    }
+  });
 
   // ---------- Map ----------
   let mapInstance = null;

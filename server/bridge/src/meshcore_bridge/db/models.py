@@ -239,6 +239,11 @@ class CompanionContact(Base):
     out_path_updated_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # Vom User aus der Sidebar verbannt. NULL = aktiv. Eingehende DMs
+    # setzen den Wert in service.py wieder auf NULL zurück.
+    archived_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

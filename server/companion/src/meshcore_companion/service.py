@@ -29,6 +29,7 @@ from uuid import UUID
 
 import structlog
 from sqlalchemy import or_, select
+from sqlalchemy import update as sa_update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meshcore_companion.coords import is_valid_coord
@@ -1697,6 +1698,18 @@ class CompanionService:
                         ts=msg_ts,
                     )
                     db.add(new_msg)
+                    # Eingehende DM holt den Kontakt aus dem Archiv zurück —
+                    # sonst bleibt eine neue Konversation versteckt, obwohl
+                    # der Peer sich wieder gemeldet hat.
+                    await db.execute(
+                        sa_update(CompanionContact)
+                        .where(
+                            CompanionContact.identity_id == loaded.id,
+                            CompanionContact.peer_pubkey == decoded.sender_pubkey,
+                            CompanionContact.archived_at.is_not(None),
+                        )
+                        .values(archived_at=None)
+                    )
                     await db.commit()
                     await self._emit(
                         loaded.id,

@@ -35,6 +35,7 @@ _COLUMN_PATCHES: tuple[tuple[str, str, str], ...] = (
     ("companion_contacts", "node_type", "INTEGER NULL"),
     ("companion_contacts", "out_path", "BLOB NULL"),
     ("companion_contacts", "out_path_updated_at", "DATETIME NULL"),
+    ("companion_contacts", "archived_at", "DATETIME NULL"),
     ("companion_messages", "room_sender_pubkey", "BLOB NULL"),
     ("companion_messages", "language", "VARCHAR(8) NULL"),
     ("companion_messages", "translated_text", "TEXT NULL"),
