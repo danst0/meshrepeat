@@ -14,6 +14,11 @@
   // SSE liefert Push-Updates; Polling ist nur noch Fallback (zähe Verbindung,
   // verschluckte Events).
   const POLL_THREADS_FALLBACK_MS = 120000;
+  // Konvo-Fallback: aktive DM/Channel periodisch nachladen, falls SSE
+  // dichthält (Reverse-Proxy-Timeout, Browser-Sleep, etc.). 30 s ist
+  // kurz genug, dass eine verlorene Antwort nicht "nur beim nächsten
+  // Senden" auftaucht, aber lang genug, um die Bridge nicht zu hämmern.
+  const POLL_ACTIVE_CONV_FALLBACK_MS = 30000;
   const PAGE_LIMIT = 50;
 
   const LS_KEY = `meshcore.companion.${IDENTITY_ID}.lastConv`;
@@ -1618,22 +1623,74 @@
     dot.title = state === "connected" ? "Live verbunden" : state === "error" ? "Verbindung weg — versuche neu" : "verbinde…";
   }
 
+  // Manueller Reconnect: der EventSource-Default versucht zwar selbst
+  // wieder zu verbinden, gibt aber bei manchen Fehler-Codes (5xx mit
+  // Body, Reverse-Proxy-Close) still auf. Deshalb schließen wir bei
+  // jedem onerror explizit und starten mit Backoff neu.
+  let _sseEs = null;
+  let _sseReconnectTimer = null;
+  let _sseReconnectDelayMs = 1000;
+  const _SSE_RECONNECT_MAX_MS = 30000;
+
+  function _scheduleSseReconnect() {
+    if (_sseReconnectTimer) return;
+    const delay = _sseReconnectDelayMs;
+    _sseReconnectDelayMs = Math.min(_SSE_RECONNECT_MAX_MS, delay * 2);
+    _sseReconnectTimer = setTimeout(() => {
+      _sseReconnectTimer = null;
+      startSse();
+    }, delay);
+  }
+
   function startSse() {
+    if (_sseEs) {
+      try { _sseEs.close(); } catch (_) { /* ignore */ }
+      _sseEs = null;
+    }
     let es;
     try {
       es = new EventSource(`${API}/identities/${IDENTITY_ID}/stream`, {withCredentials: true});
     } catch (e) {
       console.warn("EventSource init failed", e);
+      _scheduleSseReconnect();
       return;
     }
-    es.onopen = () => setSseDot("connected");
-    es.onerror = () => setSseDot("error");
+    _sseEs = es;
+    es.onopen = () => {
+      _sseReconnectDelayMs = 1000;
+      setSseDot("connected");
+    };
+    es.onerror = () => {
+      setSseDot("error");
+      // Browser-Reconnect ist unzuverlässig (Traefik2/HTTP/2 schließt
+      // manchmal "sauber" → EventSource gibt auf). Selber neu aufbauen.
+      try { es.close(); } catch (_) { /* ignore */ }
+      if (_sseEs === es) _sseEs = null;
+      _scheduleSseReconnect();
+    };
     es.onmessage = (ev) => {
       let evt;
       try { evt = JSON.parse(ev.data); } catch (e) { return; }
       handleSseEvent(evt);
     };
     return es;
+  }
+
+  // Fallback-Refresh: die aktive Konvo alle 30 s nachladen, falls SSE
+  // gerade Events verschluckt. Threads-Sidebar hat ihren eigenen Poll
+  // (120 s); hier geht's um die Chat-Bubbles.
+  async function refreshActiveConv() {
+    if (!active) return;
+    if (document.hidden) return;
+    try {
+      if (active.kind === "dm") {
+        await loadDmMessages(active.peer, {replace: true});
+      } else if (active.kind === "channel") {
+        await loadChannelMessages(active.channel_id, {replace: true});
+      }
+    } catch (e) {
+      // Netz-Hänger sind erwartbar während SSE-Outages — still ignorieren.
+    }
   }
 
   function handleSseEvent(evt) {
@@ -1991,6 +2048,7 @@
   });
 
   setInterval(loadThreads, POLL_THREADS_FALLBACK_MS);
+  setInterval(refreshActiveConv, POLL_ACTIVE_CONV_FALLBACK_MS);
   restoreState();
   startSse();
   window.addEventListener("hashchange", () => {
