@@ -290,13 +290,24 @@ async def test_handle_query_happy_path(db_setup, monkeypatch: pytest.MonkeyPatch
 
 
 @pytest.mark.asyncio
-async def test_handle_query_no_route_sends_hint(db_setup, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_handle_query_no_route_chat_fallback(
+    db_setup, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Kein Entity-Treffer → der Chat-Fallback-LLM-Call liefert eine
+    freie Antwort, die ans Mesh geht (kein HA-Read)."""
     sessionmaker, identity_id = db_setup
 
     def ollama_handler(req: httpx.Request) -> httpx.Response:
+        body = json.loads(req.content.decode("utf-8"))
+        # Erster Call läuft mit format=json (Routing), zweiter ohne.
+        if body.get("format") == "json":
+            return httpx.Response(
+                200,
+                json={"message": {"content": json.dumps({"entities": [], "reason": ""})}},
+            )
         return httpx.Response(
             200,
-            json={"message": {"content": json.dumps({"entities": [], "reason": ""})}},
+            json={"message": {"content": "Da habe ich gerade keine Daten."}},
         )
 
     _patch_ollama_handler(monkeypatch, ollama_handler)
@@ -320,6 +331,49 @@ async def test_handle_query_no_route_sends_hint(db_setup, monkeypatch: pytest.Mo
         identity_id=identity_id,
         sender_pubkey=b"\xbb" * 32,
         question="frag das wetter auf dem Mars",
+        send_dm=send_dm,
+    )
+    await ha.aclose()
+    assert sent == ["Da habe ich gerade keine Daten."]
+
+
+@pytest.mark.asyncio
+async def test_handle_query_no_route_chat_fallback_failure(
+    db_setup, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Kein Entity-Treffer und Chat-Fallback-Call schlägt fehl →
+    fällt auf die statische Hinweismeldung zurück."""
+    sessionmaker, identity_id = db_setup
+
+    def ollama_handler(req: httpx.Request) -> httpx.Response:
+        body = json.loads(req.content.decode("utf-8"))
+        if body.get("format") == "json":
+            return httpx.Response(
+                200,
+                json={"message": {"content": json.dumps({"entities": [], "reason": ""})}},
+            )
+        return httpx.Response(503, json={})
+
+    _patch_ollama_handler(monkeypatch, ollama_handler)
+
+    def ha_handler(req: httpx.Request) -> httpx.Response:
+        raise AssertionError("HA should not be queried on no-route")
+
+    ha = _ha_client(ha_handler)
+    runner = HaBridgeRunner(ollama_base_url="http://stub-ollama.local")
+    sent: list[str] = []
+
+    async def send_dm(ident: UUID, peer: bytes, text: str) -> bool:
+        sent.append(text)
+        return True
+
+    await handle_query(
+        runner=runner,
+        sessionmaker=sessionmaker,
+        ha_client=ha,
+        identity_id=identity_id,
+        sender_pubkey=b"\xbb" * 32,
+        question="hallo",
         send_dm=send_dm,
     )
     await ha.aclose()
@@ -415,17 +469,26 @@ async def test_handle_query_hallucinated_entity_filtered(
     db_setup, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Modell halluziniert eine Entity, die nicht im Katalog ist →
-    wird gefiltert, kein Route → hint-Antwort, HA gar nicht gerufen."""
+    wird gefiltert, kein Route → Chat-Fallback liefert freie Antwort,
+    HA gar nicht gerufen."""
     sessionmaker, identity_id = db_setup
 
     def ollama_handler(req: httpx.Request) -> httpx.Response:
+        body = json.loads(req.content.decode("utf-8"))
+        if body.get("format") == "json":
+            return httpx.Response(
+                200,
+                json={
+                    "message": {
+                        "content": json.dumps(
+                            {"entities": ["sensor.zimmer_temp"], "reason": ""}
+                        )
+                    }
+                },
+            )
         return httpx.Response(
             200,
-            json={
-                "message": {
-                    "content": json.dumps({"entities": ["sensor.zimmer_temp"], "reason": ""})
-                }
-            },
+            json={"message": {"content": "Dazu habe ich keinen Sensor."}},
         )
 
     _patch_ollama_handler(monkeypatch, ollama_handler)
@@ -451,5 +514,4 @@ async def test_handle_query_hallucinated_entity_filtered(
         send_dm=send_dm,
     )
     await ha.aclose()
-    assert len(sent) == 1
-    assert "keine passenden" in sent[0]
+    assert sent == ["Dazu habe ich keinen Sensor."]

@@ -12,8 +12,9 @@ Datenfluss (eine DM → eine Antwort-DM):
 
    * Rate-Limit pro Sender-Pubkey prüfen (Token-Bucket im Speicher).
    * Routing-Call gegen Ollama → JSON ``{"entities":[…], "reason":…}``.
-   * HA-Reads parallel.
-   * Formulierungs-Call → Antworttext.
+   * Trifft das Routing keine Entity → Chat-Fallback-Prompt für eine
+     natürliche freie Antwort (kein HA-Read, kein Halluzinieren).
+   * Sonst: HA-Reads parallel → Formulierungs-Call → Antworttext.
    * Hard-Trim auf 200 Bytes (UTF-8-safe), Send-DM zurück.
 
 Fehler-Pfade sind bewusst lax: jeder unerwartete Fehler endet in einem
@@ -53,9 +54,9 @@ _log = structlog.get_logger("companion.ha_bridge")
 # Luft haben. Reicht für 1-2 ganze deutsche Sätze.
 MAX_REPLY_BYTES = 200
 
-# Wenn das Modell keine passende Entity findet, schicken wir diesen
-# kurzen Hinweis — sonst wirkt es, als hätte der Bot keine Antwort
-# bekommen.
+# Letzter Notnagel, wenn auch der Chat-Fallback-LLM-Call scheitert.
+# Im Normalfall versucht der Bot bei „keine Entity gefunden" eine
+# freie Antwort über :func:`_build_chat_prompt` zu formulieren.
 _NO_ROUTE_MESSAGE = "(keine passenden Sensoren gefunden)"
 
 # Sicherheits-Cap: auch wenn der LLM-Router mehr Entities zurückgibt als
@@ -261,6 +262,34 @@ def _build_answer_prompt(
         "Deutsche (z.B. 'läuft'/'aus', 'zu Hause'/'unterwegs'). Wenn "
         "keine Daten geliefert wurden, sag 'keine Daten verfügbar'.\n\n"
         f"Daten:\n{data_block}"
+    )
+    return [
+        {"role": "system", "content": system},
+        {"role": "user", "content": question},
+    ]
+
+
+def _build_chat_prompt(
+    *,
+    question: str,
+    entities: Sequence[tuple[str, str, str | None]],
+) -> list[dict[str, str]]:
+    """Fallback-Prompt für Fragen, zu denen das Routing keine Entity
+    findet: freie Antwort auf Deutsch, ggf. mit Hinweis auf vorhandene
+    Sensoren — damit der User weiß, wonach er fragen kann.
+    """
+    lines = [f"- {alias}" + (f" ({hint})" if hint else "") for _ent, alias, hint in entities]
+    catalog = "\n".join(lines) if lines else "(keine)"
+    system = (
+        "Du bist ein freundlicher Smart-Home-Assistent in einem LoRa-Mesh. "
+        "Antworte auf Deutsch in höchstens 180 Zeichen, ein bis zwei ganze "
+        "Sätze, natürlich und ohne Floskeln. Zu dieser Frage hast du KEINE "
+        "Live-Daten aus dem Smart Home — erfinde keine Werte. Wenn die "
+        "Frage nicht zum Smart Home passt (Begrüßung, Smalltalk), antworte "
+        "passend kurz. Wenn der User offenbar einen Sensor-Wert wollte, "
+        "den du nicht hast, sag das knapp und nenne ggf. einen passenden "
+        "Sensor aus der Liste, sofern einer thematisch nahe liegt.\n\n"
+        f"Verfügbare Sensoren (nur als Hinweis, keine Werte!):\n{catalog}"
     )
     return [
         {"role": "system", "content": system},
@@ -474,7 +503,19 @@ async def _handle_query_inner(
             sender_prefix=sender_pubkey[:4].hex(),
             question_preview=question[:60],
         )
-        await _safe_send(send_dm, identity_id, sender_pubkey, _NO_ROUTE_MESSAGE)
+        chat_msgs = _build_chat_prompt(question=question, entities=ctx.entities)
+        chat_reply = await _ollama_chat_text(
+            base_url=runner.ollama_base_url,
+            model=ctx.ollama_model,
+            messages=chat_msgs,
+            timeout_s=runner.timeout_s,
+        )
+        await _safe_send(
+            send_dm,
+            identity_id,
+            sender_pubkey,
+            trim_to_bytes(chat_reply) if chat_reply else _NO_ROUTE_MESSAGE,
+        )
         return
 
     # Cap auf max_pick — falls das Modell trotz Prompt-Regel mehr liefert.
