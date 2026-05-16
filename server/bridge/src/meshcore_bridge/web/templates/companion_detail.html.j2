@@ -314,8 +314,13 @@
           <div style="display:flex;flex-wrap:wrap;gap:.75rem;align-items:flex-end">
             <label style="margin:0">Kanal
               <select name="channel_id">
-                {% for ch in channels if not ch.archived_at %}
-                  <option value="{{ ch.id }}"{% if ch.id == wp.channel_id %} selected{% endif %}>#{{ ch.name }}</option>
+                {# Bestehender Post: den zugewiesenen Channel auch dann zeigen,
+                   wenn er archiviert wurde — sonst bleibt das Dropdown leer
+                   und der POST geht ohne channel_id raus. #}
+                {% for ch in channels %}
+                  {% if not ch.archived_at or ch.id == wp.channel_id %}
+                    <option value="{{ ch.id }}"{% if ch.id == wp.channel_id %} selected{% endif %}>#{{ ch.name }}{% if ch.archived_at %} (archiviert){% endif %}</option>
+                  {% endif %}
                 {% endfor %}
               </select>
             </label>
@@ -374,12 +379,13 @@
       </div>
 
       <h3 style="margin-top:1rem">Neuer Wetter-Auto-Post</h3>
+      {% set _active_channels = channels | rejectattr('archived_at') | list %}
       <form id="weather-create-form" onsubmit="return false"
             style="display:flex;flex-direction:column;gap:.75rem">
         <div style="display:flex;flex-wrap:wrap;gap:.75rem;align-items:flex-end">
           <label style="margin:0">Kanal
-            <select name="channel_id" required>
-              {% for ch in channels if not ch.archived_at %}
+            <select name="channel_id" required{% if not _active_channels %} disabled{% endif %}>
+              {% for ch in _active_channels %}
                 <option value="{{ ch.id }}"{% if ch.name == 'wetter' %} selected{% endif %}>#{{ ch.name }}</option>
               {% endfor %}
             </select>
@@ -414,9 +420,15 @@
                   style="margin:0;padding:.25rem .75rem">+ Sensor</button>
         </div>
         <div>
-          <button type="submit" style="margin:0">Anlegen</button>
+          <button type="submit" style="margin:0"{% if not _active_channels %} disabled{% endif %}>Anlegen</button>
         </div>
       </form>
+      {% if not _active_channels %}
+        <p style="color:var(--warn,#a60);font-size:.9em;margin:.5rem 0 0">
+          Alle Kanäle archiviert — oben einen Kanal wiederherstellen oder neu
+          anlegen, um einen neuen Wetter-Auto-Post zu erstellen.
+        </p>
+      {% endif %}
       <div id="weather-error" style="margin-top:.5rem;color:var(--danger)" hidden></div>
       <p style="font-size:.85em;color:var(--muted);margin:.75rem 0 0">
         Tipp: HA-Entwicklertools → Zustände → nach <code>weather.</code>
@@ -426,6 +438,151 @@
         Format-Builder fasst alle gefundenen Werte zu einer Channel-Zeile
         zusammen (z.B. <code>🌡18.4 °C · 💧62% · 💨12 km/h</code>).
       </p>
+    </div>
+
+    {# ---------- Home-Assistant-Bridge (LLM-Router auf DMs) ---------- #}
+    <div class="card" id="ha-bridge-card">
+      <h2>Home Assistant Bridge</h2>
+      <p style="font-size:.9em;color:var(--muted);margin:0 0 .75rem">
+        Wenn aktiviert, beantwortet diese Identität DMs von freigegebenen
+        Pubkeys aus dem kuratierten HA-Sensor-Katalog. Der eingehende Text
+        geht an ein lokales Ollama-Modell, das passende Entities auswählt;
+        die HA-REST-API liest die Werte, und das Modell formuliert eine
+        kurze Antwort zurück als DM.
+        {% if not weather_ha_enabled %}
+          <br><strong style="color:var(--warn,#a60)">HA-Adapter ist nicht
+          aktiv</strong> — Settings können bereits gepflegt werden, der
+          Antwort-Pfad läuft aber erst, wenn
+          <code>homeassistant.enabled=true</code> +
+          <code>MESHCORE_HA_TOKEN_FILE</code> gesetzt sind.
+        {% endif %}
+      </p>
+
+      {% set _bridge = ha_bridge %}
+      <form id="ha-bridge-form" onsubmit="return false"
+            style="display:flex;flex-wrap:wrap;gap:.75rem;align-items:flex-end;margin-bottom:1rem">
+        <label style="margin:0;display:inline-flex;gap:.4rem;align-items:center">
+          <input type="checkbox" name="enabled"
+                 {% if _bridge and _bridge.enabled %}checked{% endif %}>
+          aktiv
+        </label>
+        <label style="margin:0">Ollama-Modell
+          <input name="ollama_model" maxlength="128"
+                 value="{{ _bridge.ollama_model if _bridge else 'llama3.1:8b' }}">
+        </label>
+        <label style="margin:0">Max. Entities/Anfrage
+          <input name="max_entities_per_query" type="number" min="1" max="5"
+                 value="{{ _bridge.max_entities_per_query if _bridge else 3 }}"
+                 style="width:5rem">
+        </label>
+        <label style="margin:0">Limit (Anfragen/min · pro Pubkey)
+          <input name="rate_limit_per_min" type="number" min="1" max="60"
+                 value="{{ _bridge.rate_limit_per_min if _bridge else 5 }}"
+                 style="width:5rem">
+        </label>
+        <button type="button" id="ha-bridge-save" style="margin:0">Speichern</button>
+      </form>
+      <div id="ha-bridge-error" style="margin-bottom:.75rem;color:var(--danger)" hidden></div>
+
+      <h3 style="margin-top:1rem">Freigegebene Pubkeys (Whitelist)</h3>
+      <p style="font-size:.85em;color:var(--muted);margin:0 0 .5rem">
+        Nur DMs von diesen Pubkeys werden vom LLM-Pfad bearbeitet. Alle
+        anderen DMs laufen wie gewohnt (Übersetzer/Persistenz). Pubkey
+        als 64-Zeichen-Hex (32 Byte Ed25519).
+      </p>
+      <table id="ha-allowed-table">
+        <thead>
+          <tr><th>Label</th><th>Pubkey</th><th>Hinzugefügt</th><th></th></tr>
+        </thead>
+        <tbody>
+        {% for p in ha_allowed_pubkeys %}
+          <tr data-allowed-id="{{ p.id }}">
+            <td>{{ p.label or '' }}</td>
+            <td><code title="{{ p.pubkey.hex() }}">{{ p.pubkey.hex()[:16] }}…</code></td>
+            <td>{{ p.created_at | localtime }}</td>
+            <td>
+              <button type="button" class="ha-allowed-delete"
+                      style="margin:0;padding:.25rem .6rem;background:var(--danger)">
+                löschen
+              </button>
+            </td>
+          </tr>
+        {% endfor %}
+        {% if not ha_allowed_pubkeys %}
+          <tr id="ha-allowed-empty"><td colspan="4" style="color:var(--muted)">Noch kein Pubkey freigegeben.</td></tr>
+        {% endif %}
+        </tbody>
+      </table>
+      <form id="ha-allowed-create-form" onsubmit="return false"
+            style="display:flex;flex-wrap:wrap;gap:.75rem;align-items:flex-end;margin-top:.75rem">
+        <label style="margin:0;flex:1;min-width:24rem">Pubkey (hex)
+          <input name="pubkey_hex" required maxlength="64" pattern="[0-9a-fA-F]{64}"
+                 placeholder="64 Hex-Zeichen" style="font-family:monospace">
+        </label>
+        <label style="margin:0">Label (optional)
+          <input name="label" maxlength="64" placeholder="z.B. mein Phone">
+        </label>
+        <button type="submit" style="margin:0">Hinzufügen</button>
+      </form>
+
+      <h3 style="margin-top:1.25rem">Sensor-Katalog</h3>
+      <p style="font-size:.85em;color:var(--muted);margin:0 0 .5rem">
+        Diese Entities sieht das LLM beim Routing. Klein halten (≤30): je
+        kürzer der Katalog, desto präziser die Auswahl. <code>alias</code>
+        ist der menschenlesbare Name im Prompt; <code>hint</code> kann
+        Einheit/Wertebereich enthalten.
+      </p>
+      <div id="ha-entities-list">
+      {% for e in ha_exposed_entities %}
+        <form class="ha-entity-row" data-entity-id="{{ e.id }}" onsubmit="return false"
+              style="border:1px solid var(--border);border-radius:.25rem;padding:.5rem .75rem;margin-bottom:.5rem">
+          <div style="display:flex;flex-wrap:wrap;gap:.75rem;align-items:flex-end">
+            <label style="margin:0;flex:1;min-width:14rem">Entity
+              <input value="{{ e.entity_id }}" disabled
+                     style="font-family:monospace;width:100%">
+            </label>
+            <label style="margin:0">Alias
+              <input name="alias" maxlength="64" value="{{ e.alias }}">
+            </label>
+            <label style="margin:0;flex:1;min-width:14rem">Hint
+              <input name="hint" maxlength="255" value="{{ e.hint or '' }}"
+                     placeholder="z.B. Einheit °C">
+            </label>
+            <label style="margin:0">Sort
+              <input name="sort_order" type="number" value="{{ e.sort_order }}"
+                     style="width:4rem">
+            </label>
+          </div>
+          <div style="margin-top:.4rem;display:flex;gap:.5rem;flex-wrap:wrap;align-items:center">
+            <button type="button" class="ha-entity-save" style="margin:0;padding:.25rem .75rem">Speichern</button>
+            <button type="button" class="ha-entity-delete"
+                    style="margin:0;padding:.25rem .75rem;background:var(--danger)">löschen</button>
+            <span class="ha-entity-preview" style="font-size:.85em;color:var(--muted)"></span>
+          </div>
+        </form>
+      {% endfor %}
+      {% if not ha_exposed_entities %}
+        <p id="ha-entities-empty" style="color:var(--muted)">Noch keine Entity im Katalog.</p>
+      {% endif %}
+      </div>
+
+      <form id="ha-entity-create-form" onsubmit="return false"
+            style="display:flex;flex-wrap:wrap;gap:.75rem;align-items:flex-end;margin-top:.75rem;border-top:1px dashed var(--border);padding-top:.75rem">
+        <label style="margin:0;flex:1;min-width:14rem">Entity-ID
+          <input name="entity_id" required maxlength="255"
+                 placeholder="sensor.balkon_temperatur"
+                 style="font-family:monospace;width:100%">
+        </label>
+        <label style="margin:0">Alias
+          <input name="alias" required maxlength="64" placeholder="Temp Balkon">
+        </label>
+        <label style="margin:0;flex:1;min-width:14rem">Hint (optional)
+          <input name="hint" maxlength="255" placeholder="°C, ~60 s Update">
+        </label>
+        <button type="submit" style="margin:0">Hinzufügen</button>
+        <span id="ha-entity-suggest" style="font-size:.85em;color:var(--muted);flex-basis:100%"></span>
+      </form>
+      <div id="ha-entity-error" style="margin-top:.5rem;color:var(--danger)" hidden></div>
     </div>
 
     {# ---------- API-Tokens ---------- #}
@@ -829,6 +986,211 @@
             location.reload();
           } catch (e) {
             wpShowError(String(e), errEl);
+          }
+        });
+      });
+    })();
+  </script>
+
+  {# ---------- Home-Assistant-Bridge UI-Logik ---------- #}
+  <script>
+    (() => {
+      const IDENT = "{{ identity.id }}";
+      const card = document.getElementById("ha-bridge-card");
+      if (!card) return;
+
+      const errBridge = document.getElementById("ha-bridge-error");
+      const errAllowed = null;
+      const errEntity = document.getElementById("ha-entity-error");
+
+      function showErr(el, msg) {
+        if (!el) return;
+        el.textContent = msg;
+        el.hidden = false;
+      }
+      function clearErr(el) {
+        if (!el) return;
+        el.textContent = "";
+        el.hidden = true;
+      }
+
+      // Bridge-Settings speichern.
+      const bridgeForm = document.getElementById("ha-bridge-form");
+      document.getElementById("ha-bridge-save").addEventListener("click", async () => {
+        clearErr(errBridge);
+        const fd = new FormData();
+        fd.append("enabled", bridgeForm.querySelector("input[name=enabled]").checked ? "true" : "false");
+        fd.append("ollama_model", bridgeForm.querySelector("input[name=ollama_model]").value.trim());
+        fd.append("max_entities_per_query", bridgeForm.querySelector("input[name=max_entities_per_query]").value);
+        fd.append("rate_limit_per_min", bridgeForm.querySelector("input[name=rate_limit_per_min]").value);
+        try {
+          const r = await fetch(`/api/v1/companion/identities/${IDENT}/ha_bridge`,
+            {method: "PATCH", credentials: "same-origin", body: fd});
+          if (!r.ok) {
+            const j = await r.json().catch(() => ({}));
+            showErr(errBridge, j.detail || `HTTP ${r.status}`);
+            return;
+          }
+        } catch (e) {
+          showErr(errBridge, String(e));
+        }
+      });
+
+      // Whitelist: Eintrag hinzufügen.
+      const allowedForm = document.getElementById("ha-allowed-create-form");
+      allowedForm.querySelector("button[type=submit]").addEventListener("click", async () => {
+        const pubkey = allowedForm.querySelector("input[name=pubkey_hex]").value.trim();
+        const label = allowedForm.querySelector("input[name=label]").value.trim();
+        if (!/^[0-9a-fA-F]{64}$/.test(pubkey)) {
+          alert("Pubkey muss 64 Hex-Zeichen sein");
+          return;
+        }
+        const fd = new FormData();
+        fd.append("pubkey_hex", pubkey);
+        if (label) fd.append("label", label);
+        try {
+          const r = await fetch(`/api/v1/companion/identities/${IDENT}/ha_bridge/allowed`,
+            {method: "POST", credentials: "same-origin", body: fd});
+          if (!r.ok) {
+            const j = await r.json().catch(() => ({}));
+            alert(j.detail || `HTTP ${r.status}`);
+            return;
+          }
+          location.reload();
+        } catch (e) {
+          alert(String(e));
+        }
+      });
+
+      // Whitelist: Eintrag löschen.
+      document.querySelectorAll(".ha-allowed-delete").forEach(btn => {
+        btn.addEventListener("click", async () => {
+          if (!confirm("Pubkey von Whitelist entfernen?")) return;
+          const id = btn.closest("tr").dataset.allowedId;
+          try {
+            const r = await fetch(`/api/v1/companion/ha_bridge/allowed/${id}`,
+              {method: "DELETE", credentials: "same-origin"});
+            if (!r.ok) {
+              alert(`Löschen fehlgeschlagen (HTTP ${r.status})`);
+              return;
+            }
+            location.reload();
+          } catch (e) {
+            alert(String(e));
+          }
+        });
+      });
+
+      // Entity-Katalog: Live-Preview (Friendly-Name) während des Tippens.
+      const entCreateForm = document.getElementById("ha-entity-create-form");
+      const entIdInput = entCreateForm.querySelector("input[name=entity_id]");
+      const entAliasInput = entCreateForm.querySelector("input[name=alias]");
+      const entSuggest = document.getElementById("ha-entity-suggest");
+      let entSuggestTimer = null;
+      entIdInput.addEventListener("input", () => {
+        const v = entIdInput.value.trim();
+        if (entSuggestTimer) clearTimeout(entSuggestTimer);
+        entSuggest.textContent = "";
+        if (!v) return;
+        entSuggestTimer = setTimeout(async () => {
+          try {
+            const r = await fetch(`/api/v1/companion/ha/preview?entity_ids=${encodeURIComponent(v)}`,
+              {credentials: "same-origin"});
+            if (!r.ok) {
+              entSuggest.textContent = `Preview-HTTP ${r.status}`;
+              return;
+            }
+            const arr = await r.json();
+            const item = Array.isArray(arr) ? arr[0] : null;
+            if (!item || !item.ok) {
+              entSuggest.textContent = item && item.error
+                ? `⚠ ${item.error}` : "⚠ keine Daten";
+              return;
+            }
+            entSuggest.textContent = `${item.friendly_name || "(kein friendly_name)"} · ${item.formatted}`;
+            // Alias-Suggest, wenn Feld leer.
+            if (!entAliasInput.value && item.friendly_name) {
+              entAliasInput.placeholder = item.friendly_name;
+            }
+          } catch (e) {
+            entSuggest.textContent = String(e);
+          }
+        }, 600);
+      });
+
+      // Entity hinzufügen.
+      entCreateForm.querySelector("button[type=submit]").addEventListener("click", async () => {
+        clearErr(errEntity);
+        const fd = new FormData();
+        fd.append("entity_id", entIdInput.value.trim());
+        // Alias-Fallback auf den Suggest, falls leer.
+        const aliasVal = entAliasInput.value.trim()
+          || (entAliasInput.placeholder || "").trim();
+        fd.append("alias", aliasVal);
+        const hint = entCreateForm.querySelector("input[name=hint]").value.trim();
+        if (hint) fd.append("hint", hint);
+        try {
+          const r = await fetch(`/api/v1/companion/identities/${IDENT}/ha_bridge/entities`,
+            {method: "POST", credentials: "same-origin", body: fd});
+          if (!r.ok) {
+            const j = await r.json().catch(() => ({}));
+            showErr(errEntity, j.detail || `HTTP ${r.status}`);
+            return;
+          }
+          location.reload();
+        } catch (e) {
+          showErr(errEntity, String(e));
+        }
+      });
+
+      // Entity-Row: Speichern + Löschen.
+      document.querySelectorAll(".ha-entity-row").forEach(row => {
+        const id = row.dataset.entityId;
+        const preview = row.querySelector(".ha-entity-preview");
+        const entityId = row.querySelector("input[disabled]").value;
+
+        // Live-Preview einmal beim Laden.
+        (async () => {
+          try {
+            const r = await fetch(`/api/v1/companion/ha/preview?entity_ids=${encodeURIComponent(entityId)}`,
+              {credentials: "same-origin"});
+            if (!r.ok) return;
+            const arr = await r.json();
+            const item = Array.isArray(arr) ? arr[0] : null;
+            if (item && item.ok) preview.textContent = `→ ${item.formatted}`;
+            else if (item) preview.textContent = `⚠ ${item.error || "no data"}`;
+          } catch (_e) { /* ignore */ }
+        })();
+
+        row.querySelector(".ha-entity-save").addEventListener("click", async () => {
+          const fd = new FormData();
+          fd.append("alias", row.querySelector("input[name=alias]").value);
+          fd.append("hint", row.querySelector("input[name=hint]").value);
+          fd.append("sort_order", row.querySelector("input[name=sort_order]").value);
+          try {
+            const r = await fetch(`/api/v1/companion/ha_bridge/entities/${id}`,
+              {method: "PATCH", credentials: "same-origin", body: fd});
+            if (!r.ok) {
+              const j = await r.json().catch(() => ({}));
+              alert(j.detail || `HTTP ${r.status}`);
+              return;
+            }
+          } catch (e) {
+            alert(String(e));
+          }
+        });
+        row.querySelector(".ha-entity-delete").addEventListener("click", async () => {
+          if (!confirm(`Entity ${entityId} aus Katalog entfernen?`)) return;
+          try {
+            const r = await fetch(`/api/v1/companion/ha_bridge/entities/${id}`,
+              {method: "DELETE", credentials: "same-origin"});
+            if (!r.ok) {
+              alert(`Löschen fehlgeschlagen (HTTP ${r.status})`);
+              return;
+            }
+            location.reload();
+          } catch (e) {
+            alert(String(e));
           }
         });
       });

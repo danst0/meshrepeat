@@ -39,6 +39,15 @@ from meshcore_companion.crypto import (
     LocalIdentity,
     derive_channel_secret,
 )
+from meshcore_companion.ha_bridge import (
+    HaBridgeRunner,
+)
+from meshcore_companion.ha_bridge import (
+    handle_query as ha_bridge_handle_query,
+)
+from meshcore_companion.ha_bridge import (
+    should_run_bridge as ha_bridge_should_run,
+)
 from meshcore_companion.homeassistant import HomeAssistantClient, HomeAssistantError
 from meshcore_companion.node import (
     ADV_TYPE_CHAT,
@@ -243,6 +252,11 @@ class CompanionService:
     # Loop nach fälligen Posts sucht — der konfigurierte Abstand zwischen
     # zwei Posts steht in ``CompanionWeatherPost.interval_s``.
     weather_check_interval_s: int = 60
+    # HA-LLM-Bridge: beantwortet DMs von freigegebenen Pubkeys per Ollama
+    # aus dem kuratierten Sensor-Katalog. ``None`` = Bridge global aus
+    # (z.B. weil keine Ollama-URL konfiguriert ist). Pro Identity wird
+    # zusätzlich via DB-Setting ``CompanionHaBridge.enabled`` aktiviert.
+    ha_bridge_runner: HaBridgeRunner | None = None
 
     _by_id: dict[UUID, LoadedIdentity] = field(default_factory=dict)
     _by_pubkey: dict[bytes, LoadedIdentity] = field(default_factory=dict)
@@ -286,6 +300,8 @@ class CompanionService:
     # Hintergrund-Tasks für Auto-Übersetzungen. Refs damit GC sie nicht
     # killt; werden self-removing per Callback nach Abschluss.
     _translation_tasks: set[asyncio.Task[None]] = field(default_factory=set)
+    # HA-Bridge-Background-Tasks. Refs damit GC sie nicht killt.
+    _ha_bridge_tasks: set[asyncio.Task[None]] = field(default_factory=set)
 
     # Echo-Rate-Limit-Parameter. Reply 1 → Cooldown 5 s,
     # 2 → 10, 3 → 20 … gedeckelt bei 300 s. Nach 600 s ohne Reply
@@ -364,9 +380,7 @@ class CompanionService:
             },
         )
 
-    def _schedule_translation_fanout(
-        self, *, targets: list[tuple[UUID, UUID]], text: str
-    ) -> None:
+    def _schedule_translation_fanout(self, *, targets: list[tuple[UUID, UUID]], text: str) -> None:
         """Wie :meth:`_schedule_translation`, aber translate-mal-1 für N Rows:
         ein einziger Ollama-Roundtrip, Ergebnis wird auf alle ``(identity_id,
         msg_id)``-Paare angewendet. Spart pro Inbound-Channel-Post (N-1)
@@ -421,6 +435,55 @@ class CompanionService:
                     "translated_text": result.translated_text,
                 },
             )
+
+    async def _maybe_run_ha_bridge(
+        self, *, identity_id: UUID, sender_pubkey: bytes, text: str
+    ) -> None:
+        """Whitelist + Bridge-Enable in *einer* DB-Session prüfen, und bei
+        Treffer einen Hintergrund-Task starten.
+
+        Aufgerufen aus :meth:`_handle_inbound_dm`. Der Aufrufer hat schon
+        sichergestellt, dass es eine echte Inbound-DM (kein Self-Talk,
+        kein Echo-Bot, nicht dedupliziert) ist.
+        """
+        if self.ha_bridge_runner is None or self.homeassistant is None:
+            return
+        try:
+            allowed = await ha_bridge_should_run(
+                sessionmaker=self.sessionmaker,
+                identity_id=identity_id,
+                sender_pubkey=sender_pubkey,
+            )
+        except Exception:
+            _log.exception(
+                "ha_bridge_should_run_failed",
+                identity_id=str(identity_id),
+                sender_prefix=sender_pubkey[:4].hex(),
+            )
+            return
+        if not allowed:
+            return
+
+        async def _send(ident: UUID, peer: bytes, reply_text: str) -> bool:
+            return await self.send_dm(identity_id=ident, peer_pubkey=peer, text=reply_text)
+
+        # Locals fassen die not-None-Garantie des oberen Early-Returns
+        # zusammen — mypy würde sonst beim await-Aufruf warnen.
+        runner = self.ha_bridge_runner
+        ha_client = self.homeassistant
+        task = asyncio.create_task(
+            ha_bridge_handle_query(
+                runner=runner,
+                sessionmaker=self.sessionmaker,
+                ha_client=ha_client,
+                identity_id=identity_id,
+                sender_pubkey=sender_pubkey,
+                question=text,
+                send_dm=_send,
+            )
+        )
+        self._ha_bridge_tasks.add(task)
+        task.add_done_callback(self._ha_bridge_tasks.discard)
 
     async def start(self) -> None:
         """DB → Identitäten laden, Advert-Loop starten."""
@@ -1893,6 +1956,25 @@ class CompanionService:
                     )
                 except Exception:
                     _log.exception("echo_bot_reply_failed", identity=loaded.name)
+
+            # HA-Bridge: Pubkey auf Whitelist + Bridge aktiv → DM an LLM
+            # routen und Antwort zurückschicken. Hard-skip wenn der
+            # Sender selbst eine unserer Identities ist (verhindert
+            # Self-Talk) oder der Echo-Bot dieselbe DM gerade beantwortet
+            # hat (dann reicht das Echo).
+            if (
+                existing is None
+                and self.ha_bridge_runner is not None
+                and self.homeassistant is not None
+                and not sender_is_echo
+                and not loaded.is_echo
+            ):
+                await self._maybe_run_ha_bridge(
+                    identity_id=loaded.id,
+                    sender_pubkey=decoded.sender_pubkey,
+                    text=decoded.text,
+                )
+
             return  # erste Identity, die's lesen kann, gewinnt
 
     async def _handle_room_push(
@@ -2087,9 +2169,7 @@ class CompanionService:
                 )
                 translation_targets.append((target.identity_id, new_msg.id))
         if translation_targets:
-            self._schedule_translation_fanout(
-                targets=translation_targets, text=decoded.text
-            )
+            self._schedule_translation_fanout(targets=translation_targets, text=decoded.text)
 
     async def _handle_inbound_response(self, *, pkt: Packet, scope: str) -> None:
         """RESPONSE auf einen unserer REQs (DIRECT-Variante)."""
@@ -2637,9 +2717,7 @@ class CompanionService:
 
         try:
             try:
-                await asyncio.wait_for(
-                    self._stop.wait(), timeout=self.weather_check_interval_s
-                )
+                await asyncio.wait_for(self._stop.wait(), timeout=self.weather_check_interval_s)
             except TimeoutError:
                 pass
             while not self._stop.is_set():
@@ -2678,9 +2756,7 @@ class CompanionService:
                         pass
 
                 try:
-                    await asyncio.wait_for(
-                        self._stop.wait(), timeout=self.weather_check_interval_s
-                    )
+                    await asyncio.wait_for(self._stop.wait(), timeout=self.weather_check_interval_s)
                 except TimeoutError:
                     pass
         except asyncio.CancelledError:

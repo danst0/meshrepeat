@@ -26,6 +26,9 @@ from meshcore_bridge.db import (
     CompanionApiToken,
     CompanionChannel,
     CompanionContact,
+    CompanionHaAllowedPubkey,
+    CompanionHaBridge,
+    CompanionHaExposedEntity,
     CompanionIdentity,
     CompanionLinkProbe,
     CompanionMessage,
@@ -679,6 +682,354 @@ async def delete_weather_post(
     await db.delete(post)
     await db.commit()
     return {"id": str(post_id), "deleted": True}
+
+
+# ---------- Home-Assistant-Bridge (LLM-Router auf DMs) ----------
+
+
+# Caps. Begrenzen Prompt-Größe und Kosten/Latenz pro Anfrage.
+# Ein kleines Ollama-Modell (7-8B) bringt mit >30 Entities im Katalog
+# kaum noch zuverlässig die richtige Auswahl, und ``max_entities`` über 5
+# kollidiert mit dem ~140-Byte-Limit der Antwort-DM.
+_HA_BRIDGE_MAX_ENTITIES_CAP = 5
+_HA_BRIDGE_RATE_LIMIT_CAP = 60
+_HA_BRIDGE_EXPOSED_CAP = 30
+
+
+def _ha_bridge_dict(b: CompanionHaBridge) -> dict[str, Any]:
+    return {
+        "identity_id": str(b.identity_id),
+        "enabled": bool(b.enabled),
+        "ollama_model": b.ollama_model,
+        "max_entities_per_query": b.max_entities_per_query,
+        "rate_limit_per_min": b.rate_limit_per_min,
+        "created_at": _ts_iso(b.created_at),
+        "updated_at": _ts_iso(b.updated_at),
+    }
+
+
+def _ha_allowed_dict(p: CompanionHaAllowedPubkey) -> dict[str, Any]:
+    return {
+        "id": str(p.id),
+        "identity_id": str(p.identity_id),
+        "pubkey_hex": p.pubkey.hex(),
+        "label": p.label,
+        "created_at": _ts_iso(p.created_at),
+    }
+
+
+def _ha_entity_dict(e: CompanionHaExposedEntity) -> dict[str, Any]:
+    return {
+        "id": str(e.id),
+        "identity_id": str(e.identity_id),
+        "entity_id": e.entity_id,
+        "alias": e.alias,
+        "hint": e.hint,
+        "sort_order": e.sort_order,
+        "created_at": _ts_iso(e.created_at),
+    }
+
+
+async def _get_or_create_bridge(
+    db: AsyncSession, identity_id: UUID
+) -> CompanionHaBridge:
+    """Lazy-Anlage: das Bridge-Row existiert erst, sobald der User
+    irgendetwas an den Settings ändert. Vermeidet leere Default-Rows für
+    jede Identity, die HA gar nicht nutzt."""
+    bridge = await db.get(CompanionHaBridge, identity_id)
+    if bridge is None:
+        bridge = CompanionHaBridge(identity_id=identity_id)
+        db.add(bridge)
+        await db.flush()
+    return bridge
+
+
+@router.get("/identities/{identity_id}/ha_bridge", response_model=None)
+async def get_ha_bridge(
+    identity_id: UUID,
+    ctx: CompanionAuth = Depends(companion_auth),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Bridge-Settings einer Identity (inkl. Whitelist + Entity-Katalog).
+
+    Liefert auch dann ein konsistentes Objekt, wenn der Bridge-Row noch
+    nicht existiert — dann sind alle Felder defaultet und die Listen
+    leer. So muss die UI nicht zwischen "fehlt" und "leer" unterscheiden.
+    """
+    ctx.require_scope("read")
+    ctx.require_identity(identity_id)
+    if not await _user_owns_identity(db, ctx.user.id, identity_id):
+        raise HTTPException(status_code=404)
+    bridge = await db.get(CompanionHaBridge, identity_id)
+    if bridge is None:
+        # Echo des Default-Profils ohne DB-Schreibvorgang.
+        default_dict = {
+            "identity_id": str(identity_id),
+            "enabled": False,
+            "ollama_model": "llama3.1:8b",
+            "max_entities_per_query": 3,
+            "rate_limit_per_min": 5,
+            "created_at": None,
+            "updated_at": None,
+        }
+        return {"bridge": default_dict, "allowed_pubkeys": [], "entities": []}
+    allowed_rows = list(
+        (
+            await db.execute(
+                select(CompanionHaAllowedPubkey)
+                .where(CompanionHaAllowedPubkey.identity_id == identity_id)
+                .order_by(CompanionHaAllowedPubkey.created_at)
+            )
+        ).scalars()
+    )
+    entity_rows = list(
+        (
+            await db.execute(
+                select(CompanionHaExposedEntity)
+                .where(CompanionHaExposedEntity.identity_id == identity_id)
+                .order_by(
+                    CompanionHaExposedEntity.sort_order,
+                    CompanionHaExposedEntity.alias,
+                )
+            )
+        ).scalars()
+    )
+    return {
+        "bridge": _ha_bridge_dict(bridge),
+        "allowed_pubkeys": [_ha_allowed_dict(r) for r in allowed_rows],
+        "entities": [_ha_entity_dict(r) for r in entity_rows],
+    }
+
+
+@router.patch("/identities/{identity_id}/ha_bridge", response_model=None)
+async def update_ha_bridge(
+    identity_id: UUID,
+    enabled: Annotated[bool | None, Form()] = None,
+    ollama_model: Annotated[str | None, Form()] = None,
+    max_entities_per_query: Annotated[int | None, Form()] = None,
+    rate_limit_per_min: Annotated[int | None, Form()] = None,
+    ctx: CompanionAuth = Depends(companion_auth),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Bridge-Settings partiell ändern. Legt den Row beim ersten Aufruf
+    automatisch an."""
+    ctx.require_scope("admin")
+    ctx.require_identity(identity_id)
+    if not await _user_owns_identity(db, ctx.user.id, identity_id):
+        raise HTTPException(status_code=404)
+    bridge = await _get_or_create_bridge(db, identity_id)
+    if enabled is not None:
+        bridge.enabled = enabled
+    if ollama_model is not None:
+        model = ollama_model.strip()
+        if not model:
+            raise HTTPException(
+                status_code=400, detail="ollama_model darf nicht leer sein"
+            )
+        bridge.ollama_model = model
+    if max_entities_per_query is not None:
+        if not (1 <= max_entities_per_query <= _HA_BRIDGE_MAX_ENTITIES_CAP):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"max_entities_per_query muss zwischen 1 und "
+                    f"{_HA_BRIDGE_MAX_ENTITIES_CAP} liegen"
+                ),
+            )
+        bridge.max_entities_per_query = max_entities_per_query
+    if rate_limit_per_min is not None:
+        if not (1 <= rate_limit_per_min <= _HA_BRIDGE_RATE_LIMIT_CAP):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"rate_limit_per_min muss zwischen 1 und "
+                    f"{_HA_BRIDGE_RATE_LIMIT_CAP} liegen"
+                ),
+            )
+        bridge.rate_limit_per_min = rate_limit_per_min
+    await db.commit()
+    await db.refresh(bridge)
+    return _ha_bridge_dict(bridge)
+
+
+@router.post("/identities/{identity_id}/ha_bridge/allowed", response_model=None)
+async def add_ha_allowed_pubkey(
+    identity_id: UUID,
+    pubkey_hex: Annotated[str, Form()],
+    label: Annotated[str, Form()] = "",
+    ctx: CompanionAuth = Depends(companion_auth),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Whitelist-Eintrag hinzufügen."""
+    ctx.require_scope("admin")
+    ctx.require_identity(identity_id)
+    if not await _user_owns_identity(db, ctx.user.id, identity_id):
+        raise HTTPException(status_code=404)
+    raw = pubkey_hex.strip().lower()
+    try:
+        pubkey = bytes.fromhex(raw)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400, detail="pubkey_hex ist kein gültiges Hex"
+        ) from exc
+    if len(pubkey) != 32:  # Ed25519
+        raise HTTPException(
+            status_code=400, detail="pubkey_hex muss genau 32 Byte (64 Hex) lang sein"
+        )
+    await _get_or_create_bridge(db, identity_id)
+    existing = (
+        await db.execute(
+            select(CompanionHaAllowedPubkey).where(
+                CompanionHaAllowedPubkey.identity_id == identity_id,
+                CompanionHaAllowedPubkey.pubkey == pubkey,
+            )
+        )
+    ).scalar_one_or_none()
+    if existing is not None:
+        return _ha_allowed_dict(existing)
+    entry = CompanionHaAllowedPubkey(
+        identity_id=identity_id,
+        pubkey=pubkey,
+        label=(label.strip() or None),
+    )
+    db.add(entry)
+    await db.commit()
+    await db.refresh(entry)
+    return _ha_allowed_dict(entry)
+
+
+@router.delete("/ha_bridge/allowed/{entry_id}", response_model=None)
+async def delete_ha_allowed_pubkey(
+    entry_id: UUID,
+    ctx: CompanionAuth = Depends(companion_auth),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Whitelist-Eintrag löschen."""
+    ctx.require_scope("admin")
+    entry = await db.get(CompanionHaAllowedPubkey, entry_id)
+    if entry is None:
+        raise HTTPException(status_code=404)
+    ctx.require_identity(entry.identity_id)
+    if not await _user_owns_identity(db, ctx.user.id, entry.identity_id):
+        raise HTTPException(status_code=404)
+    await db.delete(entry)
+    await db.commit()
+    return {"id": str(entry_id), "deleted": True}
+
+
+@router.post("/identities/{identity_id}/ha_bridge/entities", response_model=None)
+async def add_ha_exposed_entity(
+    identity_id: UUID,
+    entity_id: Annotated[str, Form()],
+    alias: Annotated[str, Form()],
+    hint: Annotated[str, Form()] = "",
+    sort_order: Annotated[int, Form()] = 0,
+    ctx: CompanionAuth = Depends(companion_auth),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Entity zum LLM-Katalog dieser Identity hinzufügen."""
+    ctx.require_scope("admin")
+    ctx.require_identity(identity_id)
+    if not await _user_owns_identity(db, ctx.user.id, identity_id):
+        raise HTTPException(status_code=404)
+    ent = entity_id.strip()
+    al = alias.strip()
+    if not ent:
+        raise HTTPException(status_code=400, detail="entity_id darf nicht leer sein")
+    if not al:
+        raise HTTPException(status_code=400, detail="alias darf nicht leer sein")
+    await _get_or_create_bridge(db, identity_id)
+    count = (
+        await db.execute(
+            select(sa_func.count())
+            .select_from(CompanionHaExposedEntity)
+            .where(CompanionHaExposedEntity.identity_id == identity_id)
+        )
+    ).scalar_one()
+    if count >= _HA_BRIDGE_EXPOSED_CAP:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"max. {_HA_BRIDGE_EXPOSED_CAP} Entities pro Identity — "
+                "bestehende erst löschen"
+            ),
+        )
+    existing = (
+        await db.execute(
+            select(CompanionHaExposedEntity).where(
+                CompanionHaExposedEntity.identity_id == identity_id,
+                CompanionHaExposedEntity.entity_id == ent,
+            )
+        )
+    ).scalar_one_or_none()
+    if existing is not None:
+        raise HTTPException(
+            status_code=409, detail=f"entity {ent!r} ist schon im Katalog"
+        )
+    row = CompanionHaExposedEntity(
+        identity_id=identity_id,
+        entity_id=ent,
+        alias=al,
+        hint=(hint.strip() or None),
+        sort_order=sort_order,
+    )
+    db.add(row)
+    await db.commit()
+    await db.refresh(row)
+    return _ha_entity_dict(row)
+
+
+@router.patch("/ha_bridge/entities/{entry_id}", response_model=None)
+async def update_ha_exposed_entity(
+    entry_id: UUID,
+    alias: Annotated[str | None, Form()] = None,
+    hint: Annotated[str | None, Form()] = None,
+    sort_order: Annotated[int | None, Form()] = None,
+    ctx: CompanionAuth = Depends(companion_auth),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Entity-Katalog-Eintrag bearbeiten (entity_id selbst ist immutable —
+    bei Tippfehler löschen + neu anlegen)."""
+    ctx.require_scope("admin")
+    row = await db.get(CompanionHaExposedEntity, entry_id)
+    if row is None:
+        raise HTTPException(status_code=404)
+    ctx.require_identity(row.identity_id)
+    if not await _user_owns_identity(db, ctx.user.id, row.identity_id):
+        raise HTTPException(status_code=404)
+    if alias is not None:
+        al = alias.strip()
+        if not al:
+            raise HTTPException(
+                status_code=400, detail="alias darf nicht leer sein"
+            )
+        row.alias = al
+    if hint is not None:
+        row.hint = hint.strip() or None
+    if sort_order is not None:
+        row.sort_order = sort_order
+    await db.commit()
+    await db.refresh(row)
+    return _ha_entity_dict(row)
+
+
+@router.delete("/ha_bridge/entities/{entry_id}", response_model=None)
+async def delete_ha_exposed_entity(
+    entry_id: UUID,
+    ctx: CompanionAuth = Depends(companion_auth),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Entity-Katalog-Eintrag löschen."""
+    ctx.require_scope("admin")
+    row = await db.get(CompanionHaExposedEntity, entry_id)
+    if row is None:
+        raise HTTPException(status_code=404)
+    ctx.require_identity(row.identity_id)
+    if not await _user_owns_identity(db, ctx.user.id, row.identity_id):
+        raise HTTPException(status_code=404)
+    await db.delete(row)
+    await db.commit()
+    return {"id": str(entry_id), "deleted": True}
 
 
 @router.post("/messages/channel", response_model=None)
@@ -2133,6 +2484,29 @@ async def companion_detail(
         getattr(request.app.state, "homeassistant_client", None) is not None
     )
 
+    ha_bridge_row = await db.get(CompanionHaBridge, identity_id)
+    ha_allowed_rows = list(
+        (
+            await db.execute(
+                select(CompanionHaAllowedPubkey)
+                .where(CompanionHaAllowedPubkey.identity_id == identity_id)
+                .order_by(CompanionHaAllowedPubkey.created_at)
+            )
+        ).scalars()
+    )
+    ha_entity_rows = list(
+        (
+            await db.execute(
+                select(CompanionHaExposedEntity)
+                .where(CompanionHaExposedEntity.identity_id == identity_id)
+                .order_by(
+                    CompanionHaExposedEntity.sort_order,
+                    CompanionHaExposedEntity.alias,
+                )
+            )
+        ).scalars()
+    )
+
     return _templates(request).TemplateResponse(
         request,
         "companion_detail.html.j2",
@@ -2144,6 +2518,9 @@ async def companion_detail(
             "api_tokens": api_tokens,
             "weather_posts": weather_posts,
             "weather_ha_enabled": weather_ha_enabled,
+            "ha_bridge": ha_bridge_row,
+            "ha_allowed_pubkeys": ha_allowed_rows,
+            "ha_exposed_entities": ha_entity_rows,
             "flash": None,
         },
     )

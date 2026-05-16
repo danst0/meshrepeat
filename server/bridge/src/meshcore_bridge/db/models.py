@@ -444,3 +444,123 @@ class CompanionWeatherPost(Base):
         Index("ix_companion_weather_posts_identity", "identity_id"),
         Index("ix_companion_weather_posts_due", "enabled", "last_posted_at"),
     )
+
+
+class CompanionHaBridge(Base):
+    """Home-Assistant-Bridge-Settings pro Companion-Identity (1:1).
+
+    Wenn ``enabled`` und der Sender-Pubkey einer DM auf der zugehörigen
+    Whitelist (:class:`CompanionHaAllowedPubkey`) steht, übergibt der
+    Companion den Text an einen LLM-Router (Ollama), wählt aus dem
+    kuratierten Entity-Katalog (:class:`CompanionHaExposedEntity`) bis zu
+    ``max_entities_per_query`` Sensoren, liest sie über die HA-REST-API
+    und schickt eine kurze Antwort als DM zurück.
+    """
+
+    __tablename__ = "companion_ha_bridges"
+
+    identity_id: Mapped[UUID] = mapped_column(
+        _UUIDBlob,
+        ForeignKey("companion_identities.id"),
+        primary_key=True,
+    )
+    enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="0", default=False
+    )
+    ollama_model: Mapped[str] = mapped_column(
+        String(128), nullable=False, server_default="llama3.1:8b", default="llama3.1:8b"
+    )
+    """Modell-Name für den Ollama-Call. Default deckt sich mit dem
+    Translator. Bei Bedarf pro Identity überschreibbar (z.B. ``gemma3:4b``
+    für schwächere Hardware)."""
+    max_entities_per_query: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="3", default=3
+    )
+    """Wie viele Entities der LLM-Router maximal auswählen darf — Schutz
+    gegen "lies alles" und gegen Mesh-Antworten, die nicht mehr ins
+    140-Byte-Limit passen."""
+    rate_limit_per_min: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="5", default=5
+    )
+    """Token-Bucket pro Sender-Pubkey. Verhindert, dass ein Whitelisted-
+    Pubkey Ollama+HA dauerhaft belastet."""
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
+class CompanionHaAllowedPubkey(Base):
+    """Whitelist von Sender-Pubkeys, die die HA-Bridge einer Identity
+    benutzen dürfen.
+
+    Hart enforced im Inbound-Pfad (nicht per Prompt-Suggestion). ``label``
+    ist optionaler Klartext für die UI, ``pubkey`` ist der volle 32-Byte
+    Ed25519-Public-Key wie auch in :class:`CompanionContact`.
+    """
+
+    __tablename__ = "companion_ha_allowed_pubkeys"
+
+    id: Mapped[UUID] = mapped_column(_UUIDBlob, primary_key=True, default=uuid4)
+    identity_id: Mapped[UUID] = mapped_column(
+        _UUIDBlob,
+        ForeignKey("companion_ha_bridges.identity_id"),
+        nullable=False,
+    )
+    pubkey: Mapped[bytes] = mapped_column(BLOB, nullable=False)  # 32 Byte
+    label: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "identity_id", "pubkey", name="uq_companion_ha_allowed_pubkey"
+        ),
+        Index("ix_companion_ha_allowed_identity", "identity_id"),
+    )
+
+
+class CompanionHaExposedEntity(Base):
+    """Kuratierter HA-Entity-Katalog, den der LLM-Router je Identity sieht.
+
+    Bewusst klein halten (≤30 Stück pro Identity, hart begrenzt durch
+    ``max_entities_per_query`` im Routing-Schritt). Kleines Ollama hat
+    sonst keine Chance, den richtigen Sensor zu finden, und der Prompt
+    explodiert. ``alias`` ist der menschenlesbare Name, der im
+    LLM-Prompt steht; ``hint`` ist optionaler Zusatzkontext ("Einheit °C,
+    Update alle 60 s").
+    """
+
+    __tablename__ = "companion_ha_exposed_entities"
+
+    id: Mapped[UUID] = mapped_column(_UUIDBlob, primary_key=True, default=uuid4)
+    identity_id: Mapped[UUID] = mapped_column(
+        _UUIDBlob,
+        ForeignKey("companion_ha_bridges.identity_id"),
+        nullable=False,
+    )
+    entity_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    """HA-Entity-ID wie ``sensor.balkon_temperature``."""
+    alias: Mapped[str] = mapped_column(String(64), nullable=False)
+    """Klartextname für den LLM-Prompt (z.B. ``Temperatur Balkon``)."""
+    hint: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    """Optionaler Hinweis fürs LLM (Einheit, Domain, Wertebereich)."""
+    sort_order: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="0", default=0
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "identity_id", "entity_id", name="uq_companion_ha_exposed_entity"
+        ),
+        Index("ix_companion_ha_exposed_identity", "identity_id", "sort_order"),
+    )

@@ -45,6 +45,7 @@ from meshcore_bridge.web import (
     repeater_routes,
 )
 from meshcore_bridge.wire import Packet as WirePacket
+from meshcore_companion.ha_bridge import HaBridgeRunner
 from meshcore_companion.homeassistant import HomeAssistantClient, HomeAssistantConfig
 from meshcore_companion.packet import Packet as MCPacket
 from meshcore_companion.service import CompanionService
@@ -204,6 +205,19 @@ def build_app(cfg: AppConfig) -> FastAPI:
             # Companion-UI offen hat (oder gerade hatte — Grace-Period).
             # Sonst holt der Batch-Loop sie alle ``batch_interval_s`` nach.
             grace_s = cfg.translation.live_grace_s
+            # HA-LLM-Bridge nutzt dieselbe Ollama-Instanz wie der Translator
+            # (lokales 7-8B-Modell). Wir aktivieren sie nur, wenn auch ein
+            # HA-Client da ist — ohne HA-Reads bringt der LLM-Pfad nichts.
+            ha_bridge_runner: HaBridgeRunner | None = None
+            if ha_client is not None and cfg.translation.base_url:
+                ha_bridge_runner = HaBridgeRunner(
+                    ollama_base_url=cfg.translation.base_url,
+                    timeout_s=cfg.translation.timeout_s,
+                )
+                log.info(
+                    "ha_bridge_runner_enabled",
+                    ollama_base_url=cfg.translation.base_url,
+                )
             companion_service = CompanionService(
                 master_key=cfg.db_key,
                 sessionmaker=get_session,
@@ -214,6 +228,7 @@ def build_app(cfg: AppConfig) -> FastAPI:
                 translation=translation_cfg,
                 is_listener_active=lambda: companion_events.has_active_listener(grace_s),
                 homeassistant=ha_client,
+                ha_bridge_runner=ha_bridge_runner,
             )
             await companion_service.start()
             app.state.companion_service = companion_service

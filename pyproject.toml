@@ -49,6 +49,8 @@ extend-immutable-calls = [
 "**/web/bridge_ws.py" = ["PLR0911", "PLR0912", "PLR0915", "S110", "SIM105"]
 # CompanionService importiert meshcore_bridge.db lokal (Circular-Vermeidung)
 "**/meshcore_companion/service.py" = ["PLC0415", "S110", "SIM105", "PLR0915", "PLR0912", "RUF001"]
+# HA-Bridge importiert meshcore_bridge.db lokal (Circular-Vermeidung)
+"**/meshcore_companion/ha_bridge.py" = ["PLC0415", "PLR0911", "PLR2004"]
 # App-Lifespan integriert viele Subsysteme — flache Statementliste OK
 "**/web/app.py" = ["PLR0915", "S110", "SIM105"]
 # Companion-Routes greifen via app.state — Type-Annotation für Service kommt später
