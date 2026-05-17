@@ -4,7 +4,18 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}MeshCore Spiegel{% endblock %}</title>
+  <script>
+    (function(){
+      try {
+        var t = localStorage.getItem('meshcore.theme');
+        if (t === 'light' || t === 'dark') {
+          document.documentElement.setAttribute('data-theme', t);
+        }
+      } catch(e){}
+    })();
+  </script>
   <link rel="stylesheet" href="/static/app.css?v={{ asset_version }}">
+  <script defer src="/static/theme.js?v={{ asset_version }}"></script>
   {% block head_extra %}{% endblock %}
 </head>
 <body>
@@ -17,12 +28,14 @@
         <a href="/repeaters">Repeater</a>
         <a href="/companion/">Companion</a>
         {% if user.role == 'admin' %}<a href="/admin/">Admin</a>{% endif %}
+        <button type="button" class="theme-toggle" data-theme-toggle aria-label="Theme umschalten">◑</button>
         <form method="post" action="/logout" style="display:inline">
           <button type="submit" style="margin:0; padding:0.3rem 0.7rem;">Logout</button>
         </form>
       {% else %}
         <a href="/login">Login</a>
         <a href="/signup">Registrieren</a>
+        <button type="button" class="theme-toggle" data-theme-toggle aria-label="Theme umschalten">◑</button>
       {% endif %}
     </nav>
   </header>

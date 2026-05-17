@@ -19,15 +19,15 @@
   .stats-table th { text-align: left; color: var(--muted); font-weight: 500; }
   .stats-table td.num { text-align: right; font-variant-numeric: tabular-nums; }
   .stats-table td.bar { width: 130px; padding-left: .6rem; }
-  .stats-bar-svg rect.b-fill { fill: rgba(255,200,90,.55); }
-  .stats-bar-svg rect.b-track { fill: rgba(130,170,255,.06); }
-  .stats-bar-svg rect.b-route { fill: rgba(120,210,140,.55); }
-  .stats-bar-svg rect.b-site { fill: rgba(130,170,255,.45); }
-  .stats-bar-svg rect.b-drop { fill: rgba(255,88,116,.55); }
+  .stats-bar-svg rect.b-fill { fill: var(--chart-warn); }
+  .stats-bar-svg rect.b-track { fill: var(--chart-track); }
+  .stats-bar-svg rect.b-route { fill: var(--chart-ok); }
+  .stats-bar-svg rect.b-site { fill: var(--chart-info); }
+  .stats-bar-svg rect.b-drop { fill: var(--chart-danger); }
   .stats-empty { color: var(--muted); padding: 1.5rem; text-align: center; }
   .pill {
     display: inline-block; padding: 1px 6px; border-radius: 8px;
-    font-size: .75rem; background: rgba(130,170,255,.12); color: var(--accent);
+    font-size: .75rem; background: var(--accent-soft); color: var(--accent);
   }
 </style>
 {% endblock %}
@@ -164,7 +164,7 @@ function renderSite(rows) {
   elSite.innerHTML = rows.map(r => {
     const label = r.site_name || (r.site_id || '').slice(0, 8);
     const dropped = r.dropped
-      ? '<span class="pill" style="background:rgba(255,88,116,.15);color:var(--danger)">' + fmtNum(r.dropped) + '</span>'
+      ? '<span class="pill" style="background:var(--danger-soft);color:var(--danger)">' + fmtNum(r.dropped) + '</span>'
       : '0';
     return '<tr><td>' + escape(label) + '</td>'
       + '<td><span class="pill">' + escape(r.scope) + '</span></td>'

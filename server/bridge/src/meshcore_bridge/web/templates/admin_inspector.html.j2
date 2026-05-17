@@ -18,16 +18,16 @@
   .insp-list {
     max-height: 70vh;
     overflow-y: auto;
-    border: 1px solid var(--border, #1f2630);
+    border: 1px solid var(--border);
     border-radius: 6px;
   }
   .insp-list table { font-size: .85rem; }
   .insp-list th { position: sticky; top: 0; background: var(--bg); z-index: 1; }
   .insp-list tr { cursor: pointer; }
-  .insp-list tr.selected td { background: rgba(130,170,255,.18); }
+  .insp-list tr.selected td { background: var(--accent-soft); }
   .insp-list tr.dropped td { opacity: .55; }
   .insp-detail {
-    border: 1px solid var(--border, #1f2630);
+    border: 1px solid var(--border);
     border-radius: 6px;
     padding: 1rem;
     overflow-x: auto;
@@ -40,7 +40,7 @@
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     font-size: .82rem;
     line-height: 1.35;
-    background: rgba(130,170,255,.04);
+    background: var(--bg-soft);
     padding: .6rem;
     border-radius: 4px;
     white-space: pre;
@@ -53,10 +53,10 @@
   .insp-empty { color: var(--muted); padding: 2rem; text-align: center; }
   .pill {
     display: inline-block; padding: 1px 6px; border-radius: 8px;
-    font-size: .75rem; background: rgba(130,170,255,.12); color: var(--accent);
+    font-size: .75rem; background: var(--accent-soft); color: var(--accent);
     margin-right: .25rem;
   }
-  .pill.drop { background: rgba(255,88,116,.15); color: var(--danger); }
+  .pill.drop { background: var(--danger-soft); color: var(--danger); }
 </style>
 {% endblock %}
 {% block content %}
