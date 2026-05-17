@@ -35,6 +35,8 @@ import structlog
 
 _log = structlog.get_logger("companion.translator")
 
+HTTP_SERVER_ERROR = 500
+
 
 @dataclass(frozen=True, slots=True)
 class Translation:
@@ -63,6 +65,20 @@ class TranslatorConfig:
     # Tickrate des Batch-Loops in Sekunden, der noch nicht übersetzte Rows
     # nachholt. ``0`` = Batch aus (nur live übersetzen).
     batch_interval_s: int = 3600
+    # Pause zwischen zwei aufeinanderfolgenden Batch-Calls. Schützt
+    # Ollama vor Burst-Traffic, wenn der Backlog groß ist.
+    per_call_delay_s: float = 0.3
+    # Wie viele Transient-Fehler in Folge ein Batch-Run schluckt, bevor
+    # er abgebrochen wird (erst nächste Tickrate probiert es neu).
+    max_consecutive_errors: int = 5
+    # Timeout des Pre-flight Health-Checks (GET /api/tags) — kurz, damit
+    # ein hängendes Ollama nicht den Loop blockiert.
+    health_check_timeout_s: float = 2.0
+
+
+class TranslatorTransientError(Exception):
+    """Ollama war erreichbar, hat aber transient gestört (5xx, Timeout,
+    Connection-Refused). Aufrufer kann darauf mit Backoff reagieren."""
 
 
 # Kleine ISO-639-1 → Klartext-Map für den Re-Versuch-Prompt. gemma4 und
@@ -233,17 +249,38 @@ async def _translate_once(
             resp = await client.post(url, json=payload)
             resp.raise_for_status()
             data = resp.json()
-    except httpx.TimeoutException:
+    except httpx.TimeoutException as exc:
         _log.warning("translate_timeout", url=url, timeout_s=cfg.timeout_s)
-        return None
+        raise TranslatorTransientError(f"timeout after {cfg.timeout_s}s") from exc
     except httpx.HTTPError as exc:
         _log.warning("translate_http_error", url=url, error=str(exc))
-        return None
+        raise TranslatorTransientError(str(exc)) from exc
     except ValueError as exc:  # ungültiges JSON-Top-Level
         _log.warning("translate_bad_response", url=url, error=str(exc))
         return None
 
     return _parse_ollama_response(data)
+
+
+async def probe_health(cfg: TranslatorConfig) -> bool:
+    """Schneller Liveness-Probe gegen Ollama.
+
+    ``GET {base_url}/api/tags`` ist billig (kein Model-Load) und liefert
+    200 wenn der Server prinzipiell antwortet. Wir behandeln *alles*
+    < 500 als gesund — 404 wäre ein Fehlkonfigurations-Signal, aber
+    immer noch besser als blind die Chat-API zu fluten. Bei Connection-
+    Refused/Timeout: ``False``.
+    """
+    url = cfg.base_url.rstrip("/") + "/api/tags"
+    try:
+        async with httpx.AsyncClient(timeout=cfg.health_check_timeout_s) as client:
+            resp = await client.get(url)
+    except httpx.HTTPError:
+        return False
+    # < 500: 200 ist normal, 4xx wäre Fehlkonfiguration aber immer noch
+    # ein lebendiger Server — nur 5xx zählt als „besser nicht weiter
+    # nachtreten".
+    return resp.status_code < HTTP_SERVER_ERROR
 
 
 async def translate(text: str, cfg: TranslatorConfig) -> Translation | None:  # noqa: PLR0911
@@ -274,9 +311,7 @@ async def translate(text: str, cfg: TranslatorConfig) -> Translation | None:  # 
     if _should_skip(payload, min_chars=cfg.min_chars, max_chars=cfg.max_chars):
         return None
 
-    first = await _translate_once(
-        payload, cfg, _build_prompt(payload, cfg.target_lang_label)
-    )
+    first = await _translate_once(payload, cfg, _build_prompt(payload, cfg.target_lang_label))
     if first is None:
         return None
     lang, translated = first

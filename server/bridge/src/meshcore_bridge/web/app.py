@@ -200,6 +200,9 @@ def build_app(cfg: AppConfig) -> FastAPI:
                     min_chars=cfg.translation.min_chars,
                     max_chars=cfg.translation.max_chars,
                     batch_interval_s=cfg.translation.batch_interval_s,
+                    per_call_delay_s=cfg.translation.per_call_delay_s,
+                    max_consecutive_errors=cfg.translation.max_consecutive_errors,
+                    health_check_timeout_s=cfg.translation.health_check_timeout_s,
                 )
             # Live-Gate: Übersetzung läuft sofort, wenn ein Browser-Tab das
             # Companion-UI offen hat (oder gerade hatte — Grace-Period).

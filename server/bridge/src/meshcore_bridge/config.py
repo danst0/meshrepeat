@@ -116,6 +116,15 @@ class TranslationConfig(BaseModel):
     # SSE-Disconnect, damit Reload/Tab-Wechsel die Übersetzung nicht
     # in den Batch-Modus kippt.
     live_grace_s: float = 120.0
+    # Pause zwischen zwei aufeinanderfolgenden Batch-Calls, damit ein
+    # großer Backlog Ollama nicht in Burst-Modus zwingt.
+    per_call_delay_s: float = 0.3
+    # Nach N aufeinanderfolgenden Transient-Fehlern (5xx/Timeout) bricht
+    # der Batch-Run ab und probiert es beim nächsten Tick neu.
+    max_consecutive_errors: int = 5
+    # Timeout des Pre-flight Health-Checks (GET /api/tags) vor jedem
+    # Batch-Run. Ein hängendes Ollama soll den Loop nicht blockieren.
+    health_check_timeout_s: float = 2.0
 
 
 class HomeAssistantSettings(BaseModel):

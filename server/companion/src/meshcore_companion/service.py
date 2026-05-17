@@ -68,7 +68,13 @@ from meshcore_companion.node import (
 )
 from meshcore_companion.packet import Packet, PayloadType, RouteType
 from meshcore_companion.storage import decrypt_seed, encrypt_seed
-from meshcore_companion.translator import Translation, TranslatorConfig, translate
+from meshcore_companion.translator import (
+    Translation,
+    TranslatorConfig,
+    TranslatorTransientError,
+    probe_health,
+    translate,
+)
 from meshcore_companion.weather import format_weather_line, format_weather_line_multi
 
 if TYPE_CHECKING:
@@ -349,36 +355,21 @@ class CompanionService:
 
     async def _translate_and_publish(self, identity_id: UUID, msg_id: UUID, text: str) -> None:
         """Translator anstoßen, Ergebnis persistieren, SSE-Event schicken."""
-        from meshcore_bridge.db import CompanionMessage
-
         cfg = self.translation
         if cfg is None:
             return
         try:
             result: Translation | None = await translate(text, cfg)
+        except TranslatorTransientError:
+            # Ollama transient down — Translator hat schon geloggt, keine
+            # Eskalation nötig. Der Batch-Loop holt die Row nach.
+            return
         except Exception:
             _log.exception("translate_unhandled", msg_id=str(msg_id))
             return
         if result is None:
             return
-        async with self.sessionmaker() as db:
-            row = await db.get(CompanionMessage, msg_id)
-            if row is None:
-                _log.warning("translate_missing_row", msg_id=str(msg_id))
-                return
-            row.language = result.language
-            row.translated_text = result.translated_text
-            row.translated_at = datetime.now(UTC)
-            await db.commit()
-        await self._emit(
-            identity_id,
-            {
-                "type": "message_translated",
-                "id": str(msg_id),
-                "language": result.language,
-                "translated_text": result.translated_text,
-            },
-        )
+        await self._persist_translation(identity_id, msg_id, result)
 
     def _schedule_translation_fanout(self, *, targets: list[tuple[UUID, UUID]], text: str) -> None:
         """Wie :meth:`_schedule_translation`, aber translate-mal-1 für N Rows:
@@ -407,6 +398,8 @@ class CompanionService:
             return
         try:
             result: Translation | None = await translate(text, cfg)
+        except TranslatorTransientError:
+            return
         except Exception:
             _log.exception("translate_unhandled_fanout", count=len(targets))
             return
@@ -2642,14 +2635,23 @@ class CompanionService:
         haben, der Batch fängt den Backlog ein Intervall später ab.
 
         Läuft strikt sequentiell durch die Rows, damit Ollama nicht mit
-        N parallelen Anfragen geflutet wird. ``_translate_and_publish``
-        kümmert sich um Persistierung und SSE.
+        N parallelen Anfragen geflutet wird. Drei Schutzmaßnahmen, die
+        einen down-Ollama nicht in Dauerfeuer ummünzen:
+
+        - Pre-flight Health-Check (``probe_health``). Wenn Ollama nicht
+          antwortet, überspringen wir den Run komplett und warten bis
+          zum nächsten Tick.
+        - Per-Call-Pause (``per_call_delay_s``) zwischen zwei Rows.
+        - Consecutive-Error-Cutoff: nach
+          ``max_consecutive_errors`` aufeinanderfolgenden
+          ``TranslatorTransientError`` brechen wir den Run ab.
         """
         from meshcore_bridge.db import CompanionMessage
 
         if self.translation is None:
             return
-        interval = self.translation.batch_interval_s
+        cfg = self.translation
+        interval = cfg.batch_interval_s
         try:
             # Initial-Pause: nicht direkt beim Start feuern.
             try:
@@ -2657,6 +2659,13 @@ class CompanionService:
             except TimeoutError:
                 pass
             while not self._stop.is_set():
+                if not await probe_health(cfg):
+                    _log.info("translate_batch_skipped_unhealthy", base_url=cfg.base_url)
+                    try:
+                        await asyncio.wait_for(self._stop.wait(), timeout=interval)
+                    except TimeoutError:
+                        pass
+                    continue
                 async with self.sessionmaker() as db:
                     rows = list(
                         (
@@ -2676,23 +2685,80 @@ class CompanionService:
                     )
                 if rows:
                     _log.info("translate_batch_start", pending=len(rows))
+                consecutive_errors = 0
+                processed = 0
+                aborted = False
                 for msg_id, identity_id, text in rows:
                     if self._stop.is_set():
                         return
                     if not text:
                         continue
                     try:
-                        await self._translate_and_publish(identity_id, msg_id, text)
+                        result: Translation | None = await translate(text, cfg)
+                    except TranslatorTransientError:
+                        consecutive_errors += 1
+                        if consecutive_errors >= cfg.max_consecutive_errors:
+                            _log.warning(
+                                "translate_batch_aborted",
+                                consecutive_errors=consecutive_errors,
+                                processed=processed,
+                                remaining=len(rows) - processed,
+                            )
+                            aborted = True
+                            break
                     except Exception:
                         _log.exception("translate_batch_row_failed", msg_id=str(msg_id))
-                if rows:
-                    _log.info("translate_batch_done", processed=len(rows))
+                        consecutive_errors = 0
+                    else:
+                        consecutive_errors = 0
+                        if result is not None:
+                            await self._persist_translation(identity_id, msg_id, result)
+                    processed += 1
+                    # Per-Call-Pause: Stop-aware, damit Shutdown nicht
+                    # erst nach Backlog-Ende greift.
+                    if cfg.per_call_delay_s > 0:
+                        try:
+                            await asyncio.wait_for(self._stop.wait(), timeout=cfg.per_call_delay_s)
+                        except TimeoutError:
+                            pass
+                if rows and not aborted:
+                    _log.info("translate_batch_done", processed=processed)
                 try:
                     await asyncio.wait_for(self._stop.wait(), timeout=interval)
                 except TimeoutError:
                     pass
         except asyncio.CancelledError:
             return
+
+    async def _persist_translation(
+        self, identity_id: UUID, msg_id: UUID, result: Translation
+    ) -> None:
+        """Schreibt das Ergebnis in ``companion_messages`` und emittiert
+        das ``message_translated``-SSE-Event. Extracted aus
+        ``_translate_and_publish`` damit der Batch-Loop dieselbe
+        Persistenz-Logik nutzen kann, ohne das Translator-Result nochmal
+        zu errechnen.
+        """
+        from meshcore_bridge.db import CompanionMessage
+
+        async with self.sessionmaker() as db:
+            row = await db.get(CompanionMessage, msg_id)
+            if row is None:
+                _log.warning("translate_missing_row", msg_id=str(msg_id))
+                return
+            row.language = result.language
+            row.translated_text = result.translated_text
+            row.translated_at = datetime.now(UTC)
+            await db.commit()
+        await self._emit(
+            identity_id,
+            {
+                "type": "message_translated",
+                "id": str(msg_id),
+                "language": result.language,
+                "translated_text": result.translated_text,
+            },
+        )
 
     async def _weather_loop(self) -> None:
         """Postet Wetter-Updates aus Home Assistant auf konfigurierte Channels.

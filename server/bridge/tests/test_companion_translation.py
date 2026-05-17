@@ -15,7 +15,11 @@ from meshcore_bridge.db import CompanionContact, CompanionMessage
 from meshcore_companion import service as svc_mod
 from meshcore_companion.crypto import LocalIdentity
 from meshcore_companion.node import CompanionNode
-from meshcore_companion.translator import Translation, TranslatorConfig
+from meshcore_companion.translator import (
+    Translation,
+    TranslatorConfig,
+    TranslatorTransientError,
+)
 
 
 def _cfg() -> TranslatorConfig:
@@ -228,6 +232,11 @@ async def test_batch_loop_translates_pending_rows(
 
     monkeypatch.setattr(svc_mod, "translate", fake_translate)
 
+    async def fake_probe_health(cfg):  # type: ignore[no-untyped-def]
+        return True
+
+    monkeypatch.setattr(svc_mod, "probe_health", fake_probe_health)
+
     events: list[tuple] = []
 
     async def notify(identity_id, event):  # type: ignore[no-untyped-def]
@@ -306,3 +315,125 @@ async def test_batch_loop_translates_pending_rows(
 
     types = [evt.get("type") for _, evt in events]
     assert types.count("message_translated") == 2
+
+
+@pytest.mark.asyncio
+async def test_batch_loop_skips_run_when_unhealthy(
+    service_env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Wenn ``probe_health`` False liefert, darf der Batch keinen einzigen
+    ``translate``-Call absetzen — sonst hämmern wir Ollama bei Ausfall."""
+    svc, sessionmaker, user_id, _sent = service_env
+
+    translate_calls = 0
+
+    async def fake_translate(text, cfg):  # type: ignore[no-untyped-def]
+        nonlocal translate_calls
+        translate_calls += 1
+        return Translation(language="nl", translated_text=f"DE:{text}")
+
+    async def fake_probe_health(cfg):  # type: ignore[no-untyped-def]
+        return False
+
+    monkeypatch.setattr(svc_mod, "translate", fake_translate)
+    monkeypatch.setattr(svc_mod, "probe_health", fake_probe_health)
+
+    svc.translation = _cfg()
+    svc.is_listener_active = lambda: False
+
+    me = await svc.add_identity(user_id=user_id, name="Antonia", scope="public")
+    sender = CompanionNode(LocalIdentity.generate())
+    await _add_contact(sessionmaker, me.id, sender.pub_key)
+
+    pkt = sender.make_dm(peer_pubkey=me.pubkey, text="Wie is de baas?", timestamp=int(time.time()))
+    await svc.on_inbound_packet(raw=pkt.encode(), scope="public")
+    await _wait_translation_tasks(svc)
+
+    svc.translation = TranslatorConfig(
+        base_url="http://stub.local",
+        model="stub",
+        target_lang="de",
+        target_lang_label="Deutsch",
+        timeout_s=5.0,
+        min_chars=3,
+        max_chars=800,
+        batch_interval_s=1,
+        per_call_delay_s=0.0,
+    )
+    task = asyncio.create_task(svc._translation_batch_loop())
+    await asyncio.sleep(1.5)
+    svc._stop.set()
+    try:
+        await asyncio.wait_for(task, timeout=2.0)
+    except TimeoutError:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+    finally:
+        svc._stop.clear()
+
+    assert translate_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_batch_loop_aborts_after_consecutive_errors(
+    service_env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Bei N aufeinanderfolgenden ``TranslatorTransientError`` bricht der
+    Batch-Run ab, statt die ganze Pending-Liste durchzuhauen."""
+    svc, sessionmaker, user_id, _sent = service_env
+
+    translate_calls = 0
+
+    async def fake_translate(text, cfg):  # type: ignore[no-untyped-def]
+        nonlocal translate_calls
+        translate_calls += 1
+        raise TranslatorTransientError("503 busy")
+
+    async def fake_probe_health(cfg):  # type: ignore[no-untyped-def]
+        return True
+
+    monkeypatch.setattr(svc_mod, "translate", fake_translate)
+    monkeypatch.setattr(svc_mod, "probe_health", fake_probe_health)
+
+    svc.translation = _cfg()
+    svc.is_listener_active = lambda: False
+
+    me = await svc.add_identity(user_id=user_id, name="Antonia", scope="public")
+    sender = CompanionNode(LocalIdentity.generate())
+    await _add_contact(sessionmaker, me.id, sender.pub_key)
+
+    # 8 Pending-Rows: bei max_consecutive_errors=3 sollen nur 3 versucht werden.
+    base_ts = int(time.time())
+    texts = [f"bericht nummer {i}" for i in range(8)]
+    for offset, txt in enumerate(texts):
+        pkt = sender.make_dm(peer_pubkey=me.pubkey, text=txt, timestamp=base_ts + offset)
+        await svc.on_inbound_packet(raw=pkt.encode(), scope="public")
+    await _wait_translation_tasks(svc)
+
+    svc.translation = TranslatorConfig(
+        base_url="http://stub.local",
+        model="stub",
+        target_lang="de",
+        target_lang_label="Deutsch",
+        timeout_s=5.0,
+        min_chars=3,
+        max_chars=800,
+        batch_interval_s=1,
+        per_call_delay_s=0.0,
+        max_consecutive_errors=3,
+    )
+    task = asyncio.create_task(svc._translation_batch_loop())
+    await asyncio.sleep(1.8)
+    svc._stop.set()
+    try:
+        await asyncio.wait_for(task, timeout=2.0)
+    except TimeoutError:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+    finally:
+        svc._stop.clear()
+
+    # Exakt max_consecutive_errors Versuche, dann Cutoff.
+    assert translate_calls == 3

@@ -11,7 +11,13 @@ import httpx
 import pytest
 
 from meshcore_companion import translator as trmod
-from meshcore_companion.translator import Translation, TranslatorConfig, translate
+from meshcore_companion.translator import (
+    Translation,
+    TranslatorConfig,
+    TranslatorTransientError,
+    probe_health,
+    translate,
+)
 
 
 def _cfg(**overrides: object) -> TranslatorConfig:
@@ -94,12 +100,13 @@ async def test_translate_already_target_language(monkeypatch: pytest.MonkeyPatch
     assert await translate("Guten Morgen!", _cfg()) is None
 
 
-async def test_translate_http_5xx_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_translate_http_5xx_raises_transient(monkeypatch: pytest.MonkeyPatch) -> None:
     def handler(req: httpx.Request) -> httpx.Response:
         return httpx.Response(503, text="busy")
 
     _patch_httpx(monkeypatch, handler)
-    assert await translate("Wie is de baas?", _cfg()) is None
+    with pytest.raises(TranslatorTransientError):
+        await translate("Wie is de baas?", _cfg())
 
 
 async def test_translate_invalid_inner_json(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -113,12 +120,40 @@ async def test_translate_invalid_inner_json(monkeypatch: pytest.MonkeyPatch) -> 
     assert await translate("Wie is de baas?", _cfg()) is None
 
 
-async def test_translate_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_translate_timeout_raises_transient(monkeypatch: pytest.MonkeyPatch) -> None:
     def handler(req: httpx.Request) -> httpx.Response:
         raise httpx.ReadTimeout("slow", request=req)
 
     _patch_httpx(monkeypatch, handler)
-    assert await translate("Wie is de baas?", _cfg()) is None
+    with pytest.raises(TranslatorTransientError):
+        await translate("Wie is de baas?", _cfg())
+
+
+async def test_probe_health_ok(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(req: httpx.Request) -> httpx.Response:
+        assert req.url.path == "/api/tags"
+        return httpx.Response(200, json={"models": []})
+
+    _patch_httpx(monkeypatch, handler)
+    assert await probe_health(_cfg()) is True
+
+
+async def test_probe_health_5xx_is_unhealthy(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(503, text="busy")
+
+    _patch_httpx(monkeypatch, handler)
+    assert await probe_health(_cfg()) is False
+
+
+async def test_probe_health_connect_error_is_unhealthy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def handler(req: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("refused", request=req)
+
+    _patch_httpx(monkeypatch, handler)
+    assert await probe_health(_cfg()) is False
 
 
 async def test_translate_dropped_when_lang_equals_target(
@@ -224,9 +259,7 @@ async def test_translate_strips_mentions_before_llm(
     def handler(req: httpx.Request) -> httpx.Response:
         body = json.loads(req.content)
         seen_inputs.append(body["messages"][-1]["content"])
-        return httpx.Response(
-            200, json=_ollama_response("en", "Guten Abend aus Ost-NL")
-        )
+        return httpx.Response(200, json=_ollama_response("en", "Guten Abend aus Ost-NL"))
 
     _patch_httpx(monkeypatch, handler)
 
@@ -260,9 +293,7 @@ async def test_translate_does_not_duplicate_mention(
     """Mention bereits in Übersetzung enthalten → keine Doppelung."""
 
     def handler(req: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            200, json=_ollama_response("en", "@[CJWinty] Nachmittag")
-        )
+        return httpx.Response(200, json=_ollama_response("en", "@[CJWinty] Nachmittag"))
 
     _patch_httpx(monkeypatch, handler)
 
