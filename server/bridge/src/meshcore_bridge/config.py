@@ -127,6 +127,49 @@ class TranslationConfig(BaseModel):
     health_check_timeout_s: float = 2.0
 
 
+class AiAgentConfig(BaseModel):
+    """Globale Defaults und Hard-Limits für den KI-Agent pro Companion.
+
+    Pro Identity aktivierbar über die DB-Tabelle ``companion_ai_agents``
+    und das UI auf der Companion-Detail-Seite. Diese Config setzt nur
+    den Rahmen (Limits, Tick-Rate, Ollama-Endpoint), den die UI-Validierung
+    und der Service-Loop einhalten müssen.
+
+    Ollama-URL fällt per Default auf den :class:`TranslationConfig`-Endpoint
+    zurück (``ollama_base_url=None``) — fast immer das gleiche lokale
+    Ollama, kein Grund, es doppelt zu konfigurieren.
+    """
+
+    enabled: bool = True
+    """Master-Schalter. Wenn ``False``, wird der Service-Loop nie gestartet,
+    egal was in der DB steht."""
+    min_interval_s: int = 3600
+    """Unteres Limit für ``CompanionAiAgent.interval_s`` — Schutz vor
+    versehentlichem Hochfrequenz-Posting (Spam-Wirkung im Mesh)."""
+    max_interval_s: int = 86_400
+    """Oberes Limit (1x/Tag). Größere Intervalle wären kein Bug, geben aber
+    dem Slider in der UI eine sinnvolle Skala."""
+    max_prompt_chars: int = 2000
+    """Hard-Cap auf ``system_prompt``. Ollama-Tokens werden gegen das Modell-
+    Context-Window gerechnet; 2 k Zeichen ≈ 600 Tokens bei deutscher Mischung
+    und lassen genug Raum für die Channel-History."""
+    max_message_chars: int = 140
+    """LoRa-pragmatisches Byte-Limit für die generierte Antwort. Wird vom
+    Sanitizer hart durchgesetzt."""
+    dm_rate_cap_per_hour: int = 30
+    """Absolutes Maximum für ``CompanionAiAgent.dm_rate_per_hour``. Auch
+    wenn der User in der UI mehr eintippen würde, kappen wir hier."""
+    tick_granularity_s: int = 60
+    """Schritt des ``_ai_agent_loop``. Bestimmt, wie schnell der Loop auf
+    Config-Änderungen (DB-Updates aus dem UI) reagiert."""
+    ollama_base_url: str | None = None
+    """Optionaler Override. ``None`` = ``translation.base_url`` benutzen."""
+    ollama_model_default: str = "llama3.1:8b"
+    """Default-Modell, das die UI als Platzhalter zeigt, wenn die Identity
+    noch keine eigene Modell-Auswahl hat."""
+    ollama_timeout_s: float = 30.0
+
+
 class HomeAssistantSettings(BaseModel):
     """Lese-Zugang zur Home-Assistant-REST-API.
 
@@ -170,6 +213,7 @@ class AppConfig(BaseSettings):
     web: WebConfig = WebConfig()
     companion: CompanionConfig = CompanionConfig()
     translation: TranslationConfig = TranslationConfig()
+    ai_agent: AiAgentConfig = AiAgentConfig()
     homeassistant: HomeAssistantSettings = HomeAssistantSettings()
     storage: StorageConfig = StorageConfig()
     logging: LoggingConfig = LoggingConfig()

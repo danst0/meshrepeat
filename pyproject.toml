@@ -48,13 +48,13 @@ extend-immutable-calls = [
 # WebSocket-Handler ist linear lang, splittet aber schlechter als er ist
 "**/web/bridge_ws.py" = ["PLR0911", "PLR0912", "PLR0915", "S110", "SIM105"]
 # CompanionService importiert meshcore_bridge.db lokal (Circular-Vermeidung)
-"**/meshcore_companion/service.py" = ["PLC0415", "S110", "SIM105", "PLR0915", "PLR0912", "RUF001"]
+"**/meshcore_companion/service.py" = ["PLC0415", "S110", "S311", "SIM105", "PLR0915", "PLR0912", "PLR0911", "RUF001"]
 # HA-Bridge importiert meshcore_bridge.db lokal (Circular-Vermeidung)
 "**/meshcore_companion/ha_bridge.py" = ["PLC0415", "PLR0911", "PLR2004"]
 # App-Lifespan integriert viele Subsysteme — flache Statementliste OK
-"**/web/app.py" = ["PLR0915", "S110", "SIM105"]
+"**/web/app.py" = ["PLR0912", "PLR0915", "S110", "SIM105"]
 # Companion-Routes greifen via app.state — Type-Annotation für Service kommt später
-"**/web/companion_routes.py" = ["PLR2004"]
+"**/web/companion_routes.py" = ["PLR2004", "S311"]
 # Admin-Routes nutzen Header-Bit-Magicvalues beim Paket-Decoder
 "**/web/admin_routes.py" = ["PLR2004", "PLR0912"]
 # CLI-Tools sind lineare prozedurale Skripten

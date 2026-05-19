@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import html
 import json
+import random
 import time
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
@@ -24,6 +25,7 @@ from sqlalchemy import text as sql_text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meshcore_bridge.db import (
+    CompanionAiAgent,
     CompanionApiToken,
     CompanionChannel,
     CompanionContact,
@@ -1031,6 +1033,261 @@ async def delete_ha_exposed_entity(
     await db.delete(row)
     await db.commit()
     return {"id": str(entry_id), "deleted": True}
+
+
+# ---------- KI-Agent ----------
+
+
+def _ai_agent_dict(row: CompanionAiAgent) -> dict[str, Any]:
+    return {
+        "identity_id": str(row.identity_id),
+        "enabled": bool(row.enabled),
+        "system_prompt": row.system_prompt,
+        "interval_s": row.interval_s,
+        "channel_id": str(row.channel_id) if row.channel_id is not None else None,
+        "respond_on_mention": bool(row.respond_on_mention),
+        "respond_to_dms": bool(row.respond_to_dms),
+        "dm_rate_per_hour": row.dm_rate_per_hour,
+        "dm_min_delay_s": row.dm_min_delay_s,
+        "dm_max_delay_s": row.dm_max_delay_s,
+        "blocked_peer_names": row.blocked_peer_names,
+        "ollama_model": row.ollama_model,
+        "lookback_minutes": row.lookback_minutes,
+        "last_post_at": _ts_iso(row.last_post_at),
+        "next_post_at": _ts_iso(row.next_post_at),
+        "created_at": _ts_iso(row.created_at),
+        "updated_at": _ts_iso(row.updated_at),
+    }
+
+
+def _ai_agent_defaults(identity_id: UUID, *, default_model: str) -> dict[str, Any]:
+    return {
+        "identity_id": str(identity_id),
+        "enabled": False,
+        "system_prompt": "",
+        "interval_s": 14_400,
+        "channel_id": None,
+        "respond_on_mention": True,
+        "respond_to_dms": True,
+        "dm_rate_per_hour": 6,
+        "dm_min_delay_s": 10,
+        "dm_max_delay_s": 60,
+        "blocked_peer_names": "",
+        "ollama_model": default_model,
+        "lookback_minutes": 60,
+        "last_post_at": None,
+        "next_post_at": None,
+        "created_at": None,
+        "updated_at": None,
+    }
+
+
+def _ai_agent_caps(request: Request) -> dict[str, Any]:
+    """Aktuelle Hard-Limits aus :class:`AiAgentConfig` für die UI-Validierung.
+    Wird neben dem Agent-Row mitgeschickt, damit das Slider-Maximum nicht
+    hartcodiert in der Template-Datei lebt."""
+    cfg = getattr(request.app.state, "config", None)
+    if cfg is None:
+        return {
+            "min_interval_s": 3600,
+            "max_interval_s": 86_400,
+            "max_prompt_chars": 2000,
+            "max_message_chars": 140,
+            "dm_rate_cap_per_hour": 30,
+        }
+    a = cfg.ai_agent
+    return {
+        "min_interval_s": a.min_interval_s,
+        "max_interval_s": a.max_interval_s,
+        "max_prompt_chars": a.max_prompt_chars,
+        "max_message_chars": a.max_message_chars,
+        "dm_rate_cap_per_hour": a.dm_rate_cap_per_hour,
+    }
+
+
+@router.get("/identities/{identity_id}/ai_agent", response_model=None)
+async def get_ai_agent(
+    request: Request,
+    identity_id: UUID,
+    ctx: CompanionAuth = Depends(companion_auth),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """KI-Agent-Konfiguration einer Identity (lazy, mit Defaults wenn
+    noch keine Row existiert). Liefert zusätzlich die Liste der Channels
+    der Identity, damit das UI den Channel-Select befüllen kann."""
+    ctx.require_scope("read")
+    ctx.require_identity(identity_id)
+    if not await _user_owns_identity(db, ctx.user.id, identity_id):
+        raise HTTPException(status_code=404)
+    caps = _ai_agent_caps(request)
+    default_model = "llama3.1:8b"
+    cfg = getattr(request.app.state, "config", None)
+    if cfg is not None:
+        default_model = cfg.ai_agent.ollama_model_default
+    row = await db.get(CompanionAiAgent, identity_id)
+    agent_dict = (
+        _ai_agent_dict(row)
+        if row is not None
+        else _ai_agent_defaults(identity_id, default_model=default_model)
+    )
+    channels = list(
+        (
+            await db.execute(
+                select(CompanionChannel)
+                .where(
+                    CompanionChannel.identity_id == identity_id,
+                    CompanionChannel.archived_at.is_(None),
+                )
+                .order_by(CompanionChannel.name)
+            )
+        ).scalars()
+    )
+    return {
+        "agent": agent_dict,
+        "caps": caps,
+        "channels": [
+            {"id": str(ch.id), "name": ch.name, "favorite": bool(ch.favorite)}
+            for ch in channels
+        ],
+    }
+
+
+async def _get_or_create_ai_agent(
+    db: AsyncSession, identity_id: UUID, *, default_model: str
+) -> CompanionAiAgent:
+    row = await db.get(CompanionAiAgent, identity_id)
+    if row is None:
+        row = CompanionAiAgent(
+            identity_id=identity_id,
+            ollama_model=default_model,
+        )
+        db.add(row)
+        await db.flush()
+    return row
+
+
+@router.patch("/identities/{identity_id}/ai_agent", response_model=None)
+async def update_ai_agent(  # noqa: PLR0912, PLR0915
+    request: Request,
+    identity_id: UUID,
+    enabled: Annotated[bool | None, Form()] = None,
+    system_prompt: Annotated[str | None, Form()] = None,
+    interval_s: Annotated[int | None, Form()] = None,
+    channel_id: Annotated[str | None, Form()] = None,
+    respond_on_mention: Annotated[bool | None, Form()] = None,
+    respond_to_dms: Annotated[bool | None, Form()] = None,
+    dm_rate_per_hour: Annotated[int | None, Form()] = None,
+    dm_min_delay_s: Annotated[int | None, Form()] = None,
+    dm_max_delay_s: Annotated[int | None, Form()] = None,
+    blocked_peer_names: Annotated[str | None, Form()] = None,
+    ollama_model: Annotated[str | None, Form()] = None,
+    lookback_minutes: Annotated[int | None, Form()] = None,
+    ctx: CompanionAuth = Depends(companion_auth),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Partial-Update der Agent-Settings. Legt den Row beim ersten Aufruf
+    automatisch an. Bei Wechsel von ``enabled=False`` → ``True`` wird
+    ``next_post_at`` mit einer kurzen Initial-Wartezeit gesetzt, damit der
+    Agent nicht sofort im selben Tick postet."""
+    ctx.require_scope("admin")
+    ctx.require_identity(identity_id)
+    if not await _user_owns_identity(db, ctx.user.id, identity_id):
+        raise HTTPException(status_code=404)
+    caps = _ai_agent_caps(request)
+    default_model = "llama3.1:8b"
+    cfg = getattr(request.app.state, "config", None)
+    if cfg is not None:
+        default_model = cfg.ai_agent.ollama_model_default
+
+    row = await _get_or_create_ai_agent(db, identity_id, default_model=default_model)
+    was_enabled = bool(row.enabled)
+
+    if system_prompt is not None:
+        if len(system_prompt) > caps["max_prompt_chars"]:
+            raise HTTPException(
+                status_code=400,
+                detail=f"system_prompt darf max. {caps['max_prompt_chars']} Zeichen lang sein",
+            )
+        row.system_prompt = system_prompt
+    if interval_s is not None:
+        if not (caps["min_interval_s"] <= interval_s <= caps["max_interval_s"]):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"interval_s muss zwischen {caps['min_interval_s']} und "
+                    f"{caps['max_interval_s']} liegen"
+                ),
+            )
+        row.interval_s = interval_s
+    if channel_id is not None:
+        if channel_id == "":
+            row.channel_id = None
+        else:
+            try:
+                ch_uuid = UUID(channel_id)
+            except ValueError as exc:
+                raise HTTPException(
+                    status_code=400, detail="channel_id ist keine gültige UUID"
+                ) from exc
+            channel = await db.get(CompanionChannel, ch_uuid)
+            if channel is None or channel.identity_id != identity_id:
+                raise HTTPException(
+                    status_code=400, detail="channel_id gehört nicht zu dieser Identity"
+                )
+            row.channel_id = ch_uuid
+    if respond_on_mention is not None:
+        row.respond_on_mention = respond_on_mention
+    if respond_to_dms is not None:
+        row.respond_to_dms = respond_to_dms
+    if dm_rate_per_hour is not None:
+        if not (0 <= dm_rate_per_hour <= caps["dm_rate_cap_per_hour"]):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"dm_rate_per_hour muss zwischen 0 und "
+                    f"{caps['dm_rate_cap_per_hour']} liegen"
+                ),
+            )
+        row.dm_rate_per_hour = dm_rate_per_hour
+    if dm_min_delay_s is not None:
+        if dm_min_delay_s < 0:
+            raise HTTPException(status_code=400, detail="dm_min_delay_s darf nicht negativ sein")
+        row.dm_min_delay_s = dm_min_delay_s
+    if dm_max_delay_s is not None:
+        if dm_max_delay_s < 0:
+            raise HTTPException(status_code=400, detail="dm_max_delay_s darf nicht negativ sein")
+        row.dm_max_delay_s = dm_max_delay_s
+    if row.dm_min_delay_s > row.dm_max_delay_s:
+        raise HTTPException(
+            status_code=400, detail="dm_min_delay_s darf nicht größer als dm_max_delay_s sein"
+        )
+    if blocked_peer_names is not None:
+        row.blocked_peer_names = blocked_peer_names
+    if ollama_model is not None:
+        cleaned_model = ollama_model.strip()
+        if not cleaned_model:
+            raise HTTPException(status_code=400, detail="ollama_model darf nicht leer sein")
+        row.ollama_model = cleaned_model
+    if lookback_minutes is not None:
+        if not (1 <= lookback_minutes <= 1440):
+            raise HTTPException(
+                status_code=400, detail="lookback_minutes muss zwischen 1 und 1440 liegen"
+            )
+        row.lookback_minutes = lookback_minutes
+
+    if enabled is not None:
+        row.enabled = enabled
+        if enabled and not was_enabled:
+            # Initial-Tick zwischen 30% und 100% des Intervalls — der Agent
+            # postet nicht sofort beim Aktivieren, aber auch nicht erst in
+            # einem vollen Intervall.
+            row.next_post_at = datetime.now(UTC) + timedelta(
+                seconds=row.interval_s * random.uniform(0.3, 1.0)
+            )
+
+    await db.commit()
+    await db.refresh(row)
+    return _ai_agent_dict(row)
 
 
 @router.post("/messages/channel", response_model=None)
@@ -2522,6 +2779,13 @@ async def companion_detail(
         ).scalars()
     )
 
+    ai_agent_row = await db.get(CompanionAiAgent, identity_id)
+    ai_agent_caps = _ai_agent_caps(request)
+    ai_agent_global_enabled = (
+        getattr(request.app.state, "companion_service", None) is not None
+        and getattr(request.app.state.companion_service, "ai_agent", None) is not None
+    )
+
     return _templates(request).TemplateResponse(
         request,
         "companion_detail.html.j2",
@@ -2536,6 +2800,9 @@ async def companion_detail(
             "ha_bridge": ha_bridge_row,
             "ha_allowed_pubkeys": ha_allowed_rows,
             "ha_exposed_entities": ha_entity_rows,
+            "ai_agent": ai_agent_row,
+            "ai_agent_caps": ai_agent_caps,
+            "ai_agent_global_enabled": ai_agent_global_enabled,
             "flash": None,
         },
     )

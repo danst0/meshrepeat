@@ -45,6 +45,7 @@ from meshcore_bridge.web import (
     repeater_routes,
 )
 from meshcore_bridge.wire import Packet as WirePacket
+from meshcore_companion.ai_agent import AiAgentClient, AiAgentClientConfig
 from meshcore_companion.ha_bridge import HaBridgeRunner
 from meshcore_companion.homeassistant import HomeAssistantClient, HomeAssistantConfig
 from meshcore_companion.packet import Packet as MCPacket
@@ -128,6 +129,14 @@ def build_app(cfg: AppConfig) -> FastAPI:
                 log.exception("policy_reload_failed")
                 return
             policy.update(new_cfg.bridge.policy)
+            app.state.config = new_cfg
+            svc = getattr(app.state, "companion_service", None)
+            if svc is not None:
+                svc.ai_agent_min_interval_s = new_cfg.ai_agent.min_interval_s
+                svc.ai_agent_max_interval_s = new_cfg.ai_agent.max_interval_s
+                svc.ai_agent_max_bytes = new_cfg.ai_agent.max_message_chars
+                svc.ai_agent_dm_rate_cap = new_cfg.ai_agent.dm_rate_cap_per_hour
+                svc.ai_agent_tick_s = new_cfg.ai_agent.tick_granularity_s
 
         try:
             loop = asyncio.get_running_loop()
@@ -221,6 +230,24 @@ def build_app(cfg: AppConfig) -> FastAPI:
                     "ha_bridge_runner_enabled",
                     ollama_base_url=cfg.translation.base_url,
                 )
+            ai_agent_client: AiAgentClient | None = None
+            if cfg.ai_agent.enabled:
+                ai_base_url = cfg.ai_agent.ollama_base_url or cfg.translation.base_url
+                if ai_base_url:
+                    ai_agent_client = AiAgentClient(
+                        AiAgentClientConfig(
+                            base_url=ai_base_url,
+                            model=cfg.ai_agent.ollama_model_default,
+                            timeout_s=cfg.ai_agent.ollama_timeout_s,
+                        )
+                    )
+                    log.info(
+                        "ai_agent_enabled",
+                        base_url=ai_base_url,
+                        model=cfg.ai_agent.ollama_model_default,
+                    )
+                else:
+                    log.warning("ai_agent_disabled_no_ollama_url")
             companion_service = CompanionService(
                 master_key=cfg.db_key,
                 sessionmaker=get_session,
@@ -232,6 +259,12 @@ def build_app(cfg: AppConfig) -> FastAPI:
                 is_listener_active=lambda: companion_events.has_active_listener(grace_s),
                 homeassistant=ha_client,
                 ha_bridge_runner=ha_bridge_runner,
+                ai_agent=ai_agent_client,
+                ai_agent_min_interval_s=cfg.ai_agent.min_interval_s,
+                ai_agent_max_interval_s=cfg.ai_agent.max_interval_s,
+                ai_agent_max_bytes=cfg.ai_agent.max_message_chars,
+                ai_agent_dm_rate_cap=cfg.ai_agent.dm_rate_cap_per_hour,
+                ai_agent_tick_s=cfg.ai_agent.tick_granularity_s,
             )
             await companion_service.start()
             app.state.companion_service = companion_service

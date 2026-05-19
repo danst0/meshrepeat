@@ -19,7 +19,9 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import random
 import time
+from collections import deque
 from collections.abc import Awaitable, Callable
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field
@@ -32,6 +34,13 @@ from sqlalchemy import or_, select
 from sqlalchemy import update as sa_update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meshcore_companion.ai_agent import (
+    AiAgentClient,
+    HistoryFilter,
+    jittered_interval_s,
+    mentions_identity,
+    parse_blocked_peer_names,
+)
 from meshcore_companion.coords import is_valid_coord
 from meshcore_companion.crypto import (
     PATH_HASH_SIZE,
@@ -263,6 +272,18 @@ class CompanionService:
     # (z.B. weil keine Ollama-URL konfiguriert ist). Pro Identity wird
     # zusätzlich via DB-Setting ``CompanionHaBridge.enabled`` aktiviert.
     ha_bridge_runner: HaBridgeRunner | None = None
+    # KI-Agent pro Companion-Identity. ``None`` = Feature global aus
+    # (kein Ollama konfiguriert oder ``ai_agent.enabled=False``). Pro
+    # Identity zusätzlich über DB-Tabelle ``companion_ai_agents`` aktiviert.
+    ai_agent: AiAgentClient | None = None
+    # Hard-Limits, die der Loop und die Hooks gegen die DB-Config prüfen
+    # — gespiegelt aus :class:`meshcore_bridge.config.AiAgentConfig`. Wird
+    # vom Lifespan beim Start gesetzt; SIGHUP aktualisiert es im Service.
+    ai_agent_min_interval_s: int = 3600
+    ai_agent_max_interval_s: int = 86_400
+    ai_agent_max_bytes: int = 140
+    ai_agent_dm_rate_cap: int = 30
+    ai_agent_tick_s: int = 60
 
     _by_id: dict[UUID, LoadedIdentity] = field(default_factory=dict)
     _by_pubkey: dict[bytes, LoadedIdentity] = field(default_factory=dict)
@@ -308,6 +329,17 @@ class CompanionService:
     _translation_tasks: set[asyncio.Task[None]] = field(default_factory=set)
     # HA-Bridge-Background-Tasks. Refs damit GC sie nicht killt.
     _ha_bridge_tasks: set[asyncio.Task[None]] = field(default_factory=set)
+    # KI-Agent: Loop + Hintergrund-Replies (Mention/DM). Halten wir als
+    # Set-of-Tasks, damit Shutdown sie sauber canceln kann.
+    _ai_agent_task: asyncio.Task[None] | None = None
+    _ai_agent_reply_tasks: set[asyncio.Task[None]] = field(default_factory=set)
+    # Sliding-Window-Rate-Limit pro (identity, peer_pubkey) für DM-Replies.
+    # Deque enthält Timestamps (UTC) der letzten Antworten — älteste werden
+    # bei jedem Check entfernt.
+    _ai_dm_history: dict[tuple[UUID, bytes], deque[datetime]] = field(default_factory=dict)
+    # Cooldown nach Mention-Reply pro (identity, channel). Sperrt weitere
+    # Mention-Antworten bis nach diesem Zeitstempel.
+    _ai_mention_cooldown: dict[tuple[UUID, UUID], datetime] = field(default_factory=dict)
 
     # Echo-Rate-Limit-Parameter. Reply 1 → Cooldown 5 s,
     # 2 → 10, 3 → 20 … gedeckelt bei 300 s. Nach 600 s ohne Reply
@@ -325,6 +357,18 @@ class CompanionService:
     # Wartefrist für Link-Probes. Etwas großzügiger als _REQ_TIMEOUT_S, damit
     # Multi-Hop-FLOOD-Probes nicht fälschlich als "loss" gewertet werden.
     _PROBE_TIMEOUT_S: ClassVar[float] = 30.0
+
+    # Mention-Reply-Cooldown pro (identity, channel). Schützt vor schnellem
+    # Hin-und-Her, wenn mehrere Teilnehmer kurz hintereinander erwähnen.
+    _AI_MENTION_COOLDOWN_S: ClassVar[float] = 60.0
+    # Wieviele DM-Verlauf-Zeilen wir maximal in den Prompt geben.
+    _AI_DM_HISTORY_LIMIT: ClassVar[int] = 10
+    # Wieviele Channel-Verlauf-Zeilen wir maximal in den Prompt geben.
+    _AI_CHANNEL_HISTORY_LIMIT: ClassVar[int] = 30
+    # Random-Delay-Bereich für Mention-Replies (Sekunden) — entzerrt
+    # mehrere Companions, die denselben Mention sehen.
+    _AI_MENTION_MIN_DELAY_S: ClassVar[float] = 5.0
+    _AI_MENTION_MAX_DELAY_S: ClassVar[float] = 20.0
 
     async def _emit(self, identity_id: UUID, event: dict[str, object]) -> None:
         if self.notify is None:
@@ -518,6 +562,8 @@ class CompanionService:
             self._translation_batch_task = asyncio.create_task(self._translation_batch_loop())
         if self.homeassistant is not None:
             self._weather_task = asyncio.create_task(self._weather_loop())
+        if self.ai_agent is not None:
+            self._ai_agent_task = asyncio.create_task(self._ai_agent_loop())
 
     async def stop(self) -> None:
         self._stop.set()
@@ -526,6 +572,7 @@ class CompanionService:
             self._probe_task,
             self._translation_batch_task,
             self._weather_task,
+            self._ai_agent_task,
         ):
             if t is not None:
                 t.cancel()
@@ -538,6 +585,13 @@ class CompanionService:
         for ttask in list(self._translation_tasks):
             try:
                 await ttask
+            except (asyncio.CancelledError, Exception):
+                pass
+        for atask in list(self._ai_agent_reply_tasks):
+            atask.cancel()
+        for atask in list(self._ai_agent_reply_tasks):
+            try:
+                await atask
             except (asyncio.CancelledError, Exception):
                 pass
 
@@ -1968,6 +2022,23 @@ class CompanionService:
                     text=decoded.text,
                 )
 
+            # KI-Agent: bei aktivem Agent + freiem Rate-Limit eine
+            # Hintergrund-Reply schedulen. Self-Talk und Echo-Bot-Replies
+            # filtern wir explizit, sonst sprechen zwei Agenten unbegrenzt
+            # miteinander.
+            if (
+                existing is None
+                and self.ai_agent is not None
+                and not sender_is_echo
+                and not loaded.is_echo
+            ):
+                self._maybe_schedule_ai_dm_reply(
+                    loaded=loaded,
+                    peer_pubkey=decoded.sender_pubkey,
+                    peer_name=peer_name,
+                    text=decoded.text,
+                )
+
             return  # erste Identity, die's lesen kann, gewinnt
 
     async def _handle_room_push(
@@ -2161,6 +2232,13 @@ class CompanionService:
                     },
                 )
                 translation_targets.append((target.identity_id, new_msg.id))
+            self._maybe_schedule_ai_mention_reply(
+                loaded=loaded,
+                channel_id=target.id,
+                channel_name=target.name,
+                sender_name=decoded.sender_name or None,
+                text=decoded.text,
+            )
         if translation_targets:
             self._schedule_translation_fanout(targets=translation_targets, text=decoded.text)
 
@@ -2828,7 +2906,7 @@ class CompanionService:
         except asyncio.CancelledError:
             return
 
-    async def _run_weather_post(self, post_id: UUID) -> None:  # noqa: PLR0911
+    async def _run_weather_post(self, post_id: UUID) -> None:
         """Genau ein Wetter-Post-Zyklus: HA lesen → formatieren → senden →
         ``last_posted_at`` fortschreiben. Idempotent gegen Race-Conditions
         (Row könnte zwischen Auswahl und Execute deaktiviert/gelöscht
@@ -2918,6 +2996,470 @@ class CompanionService:
             post_id=str(post_id),
             entity=ha_entity_id,
             chars=len(text),
+        )
+
+    # ------------------------------------------------------------------
+    # KI-Agent
+    # ------------------------------------------------------------------
+
+    async def _ai_agent_loop(self) -> None:
+        """Stellt periodisch fällige Public-Posts pro Identity zu.
+
+        Tick-Granularität: ``ai_agent_tick_s`` (Default 60 s). Pro Tick:
+        Liste der Identities holen, pro Identity die zugehörige
+        ``CompanionAiAgent``-Row laden, und bei ``enabled`` + abgelaufenem
+        ``next_post_at`` :meth:`_run_ai_agent_post` aufrufen. Anschließend
+        ``next_post_at`` mit Jitter neu setzen. Mention- und DM-Replies
+        laufen NICHT in diesem Loop, sondern als Hintergrund-Tasks aus den
+        Inbound-Hooks.
+        """
+        from meshcore_bridge.db import CompanionAiAgent
+
+        if self.ai_agent is None:
+            return
+        try:
+            # Initial-Pause: lass die ersten Adverts raus und gib der UI
+            # Zeit, Identities zu provisionieren — und respektiere
+            # ``next_post_at``, falls schon gesetzt.
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=self.ai_agent_tick_s)
+            except TimeoutError:
+                pass
+            while not self._stop.is_set():
+                now = datetime.now(UTC)
+                for identity_id in list(self._by_id.keys()):
+                    if self._stop.is_set():
+                        return
+                    loaded = self._by_id.get(identity_id)
+                    if loaded is None:
+                        continue
+                    async with self.sessionmaker() as db:
+                        agent_row = await db.get(CompanionAiAgent, identity_id)
+                    if agent_row is None or not agent_row.enabled:
+                        continue
+                    next_at = agent_row.next_post_at
+                    if next_at is not None and next_at.tzinfo is None:
+                        next_at = next_at.replace(tzinfo=UTC)
+                    if next_at is not None and next_at > now:
+                        continue
+                    try:
+                        await self._run_ai_agent_post(loaded, agent_row)
+                    except Exception:
+                        _log.exception("ai_agent_post_failed", identity=loaded.name)
+                    await self._reschedule_ai_agent(identity_id, agent_row.interval_s)
+                try:
+                    await asyncio.wait_for(self._stop.wait(), timeout=self.ai_agent_tick_s)
+                except TimeoutError:
+                    pass
+        except asyncio.CancelledError:
+            return
+
+    async def _reschedule_ai_agent(self, identity_id: UUID, interval_s: int) -> None:
+        """Setzt ``next_post_at`` nach einem Tick neu — auch wenn der Post
+        wegen leerer Filter-Ergebnisse übersprungen wurde, damit der Loop
+        nicht in jedem Tick erneut versucht und Ollama-Calls verheizt."""
+        from meshcore_bridge.db import CompanionAiAgent
+
+        safe_interval = max(
+            self.ai_agent_min_interval_s,
+            min(self.ai_agent_max_interval_s, interval_s),
+        )
+        next_at = datetime.now(UTC) + timedelta(seconds=jittered_interval_s(safe_interval))
+        async with self.sessionmaker() as db:
+            await db.execute(
+                sa_update(CompanionAiAgent)
+                .where(CompanionAiAgent.identity_id == identity_id)
+                .values(next_post_at=next_at)
+            )
+            await db.commit()
+
+    def _build_history_filter(self, agent_row: object) -> HistoryFilter:
+        """Sammle alle lokal bekannten Companion-Pubkeys und die UI-Blacklist."""
+        blocked_raw = getattr(agent_row, "blocked_peer_names", "") or ""
+        return HistoryFilter(
+            own_pubkeys=frozenset(self._by_pubkey.keys()),
+            blocked_names=parse_blocked_peer_names(blocked_raw),
+        )
+
+    async def _resolve_agent_channel(
+        self, loaded: LoadedIdentity, channel_id: UUID | None
+    ) -> CompanionChannel | None:
+        """Liefert den Channel, in den der Agent posten soll.
+
+        ``channel_id`` aus der DB-Config bevorzugt; wenn ``None`` oder die
+        Row gehört zu einer anderen Identity, falle auf den Default-Public-
+        Channel der Identity zurück.
+        """
+        from meshcore_bridge.db import CompanionChannel
+
+        async with self.sessionmaker() as db:
+            if channel_id is not None:
+                ch = await db.get(CompanionChannel, channel_id)
+                if ch is not None and ch.identity_id == loaded.id and ch.archived_at is None:
+                    return ch
+            return (
+                await db.execute(
+                    select(CompanionChannel).where(
+                        CompanionChannel.identity_id == loaded.id,
+                        CompanionChannel.name == PUBLIC_CHANNEL_NAME,
+                        CompanionChannel.archived_at.is_(None),
+                    )
+                )
+            ).scalar_one_or_none()
+
+    async def _run_ai_agent_post(self, loaded: LoadedIdentity, agent_row: object) -> None:
+        """Lädt den jüngsten Channel-Verlauf, ruft Ollama, postet die Antwort.
+
+        Wenn nach Anti-Loop-Filter keine relevante History übrig bleibt
+        oder Ollama leer/Fehler zurückgibt, wird nichts gepostet — der
+        nächste Tick versucht es erneut (mit neuem Jitter)."""
+        from meshcore_bridge.db import CompanionMessage
+
+        if self.ai_agent is None:
+            return
+
+        channel_id_raw = getattr(agent_row, "channel_id", None)
+        channel = await self._resolve_agent_channel(loaded, channel_id_raw)
+        if channel is None:
+            _log.info("ai_agent_no_channel", identity=loaded.name)
+            return
+
+        lookback_min = max(1, int(getattr(agent_row, "lookback_minutes", 60)))
+        cutoff = datetime.now(UTC) - timedelta(minutes=lookback_min)
+        async with self.sessionmaker() as db:
+            rows = list(
+                (
+                    await db.execute(
+                        select(CompanionMessage)
+                        .where(
+                            CompanionMessage.identity_id == loaded.id,
+                            CompanionMessage.payload_type == int(PayloadType.GRP_TXT),
+                            CompanionMessage.channel_name == channel.name,
+                            CompanionMessage.direction == "in",
+                            CompanionMessage.ts >= cutoff,
+                        )
+                        .order_by(CompanionMessage.ts.asc())
+                        .limit(self._AI_CHANNEL_HISTORY_LIMIT)
+                    )
+                ).scalars()
+            )
+        hist_filter = self._build_history_filter(agent_row)
+        history: list[dict[str, str]] = []
+        for row in rows:
+            if not row.text:
+                continue
+            if not hist_filter.allows(peer_pubkey=row.peer_pubkey, peer_name=row.peer_name):
+                continue
+            label = row.peer_name or "unbekannt"
+            history.append({"role": "user", "content": f"{label}: {row.text}"})
+        if not history:
+            await self._emit(
+                loaded.id,
+                {"type": "ai_agent_action", "kind": "skipped", "reason": "no_history"},
+            )
+            return
+
+        system_prompt = (getattr(agent_row, "system_prompt", "") or "").strip()
+        if not system_prompt:
+            return
+        model_override = getattr(agent_row, "ollama_model", None) or None
+        reply = await self.ai_agent.generate(
+            system_prompt=system_prompt,
+            history=history,
+            max_bytes=self.ai_agent_max_bytes,
+            model_override=model_override,
+        )
+        if not reply:
+            await self._emit(
+                loaded.id,
+                {"type": "ai_agent_action", "kind": "skipped", "reason": "empty_reply"},
+            )
+            return
+        ok = await self.send_channel(
+            identity_id=loaded.id,
+            channel_id=channel.id,
+            text=reply,
+        )
+        if not ok:
+            return
+        from meshcore_bridge.db import CompanionAiAgent
+
+        async with self.sessionmaker() as db:
+            await db.execute(
+                sa_update(CompanionAiAgent)
+                .where(CompanionAiAgent.identity_id == loaded.id)
+                .values(last_post_at=datetime.now(UTC))
+            )
+            await db.commit()
+        await self._emit(
+            loaded.id,
+            {
+                "type": "ai_agent_action",
+                "kind": "channel_post",
+                "channel_id": str(channel.id),
+                "channel_name": channel.name,
+                "text": reply,
+            },
+        )
+        _log.info(
+            "ai_agent_posted",
+            identity=loaded.name,
+            channel=channel.name,
+            chars=len(reply),
+        )
+
+    def _maybe_schedule_ai_mention_reply(
+        self,
+        *,
+        loaded: LoadedIdentity,
+        channel_id: UUID,
+        channel_name: str,
+        sender_name: str | None,
+        text: str,
+    ) -> None:
+        """Schedule a mention-reply, wenn Agent aktiv, Mention erkannt,
+        Cooldown frei und Anti-Loop-Filter OK. Sync-Funktion — sie startet
+        nur einen Hintergrund-Task. Der eigentliche LLM-Call läuft in
+        :meth:`_run_ai_mention_reply`."""
+        if self.ai_agent is None:
+            return
+        if not mentions_identity(text, loaded.name):
+            return
+        now = datetime.now(UTC)
+        cooldown_key = (loaded.id, channel_id)
+        cd = self._ai_mention_cooldown.get(cooldown_key)
+        if cd is not None and cd > now:
+            return
+        # Cooldown sofort setzen, damit zwei kurz hintereinanderfolgende
+        # Mentions nicht zwei Tasks anlegen.
+        self._ai_mention_cooldown[cooldown_key] = now + timedelta(
+            seconds=self._AI_MENTION_COOLDOWN_S
+        )
+        task = asyncio.create_task(
+            self._run_ai_mention_reply(
+                loaded=loaded,
+                channel_id=channel_id,
+                channel_name=channel_name,
+                sender_name=sender_name,
+                text=text,
+            )
+        )
+        self._ai_agent_reply_tasks.add(task)
+        task.add_done_callback(self._ai_agent_reply_tasks.discard)
+
+    async def _run_ai_mention_reply(
+        self,
+        *,
+        loaded: LoadedIdentity,
+        channel_id: UUID,
+        channel_name: str,
+        sender_name: str | None,
+        text: str,
+    ) -> None:
+        from meshcore_bridge.db import CompanionAiAgent
+
+        if self.ai_agent is None:
+            return
+        # Random-Delay vor dem Reply, damit mehrere Mention-Empfänger
+        # nicht uhrzeitgleich antworten.
+        delay = random.uniform(self._AI_MENTION_MIN_DELAY_S, self._AI_MENTION_MAX_DELAY_S)
+        try:
+            await asyncio.wait_for(self._stop.wait(), timeout=delay)
+            return  # Shutdown
+        except TimeoutError:
+            pass
+
+        async with self.sessionmaker() as db:
+            agent_row = await db.get(CompanionAiAgent, loaded.id)
+        if (
+            agent_row is None
+            or not agent_row.enabled
+            or not agent_row.respond_on_mention
+        ):
+            return
+        hist_filter = self._build_history_filter(agent_row)
+        if not hist_filter.allows(peer_pubkey=None, peer_name=sender_name):
+            return
+        prompt = (agent_row.system_prompt or "").strip()
+        if not prompt:
+            return
+        history = [
+            {
+                "role": "user",
+                "content": (
+                    f"Du bist im Channel '{channel_name}' direkt von "
+                    f"{sender_name or 'jemandem'} angesprochen worden: {text}"
+                ),
+            }
+        ]
+        reply = await self.ai_agent.generate(
+            system_prompt=prompt,
+            history=history,
+            max_bytes=self.ai_agent_max_bytes,
+            model_override=agent_row.ollama_model or None,
+        )
+        if not reply:
+            return
+        await self.send_channel(identity_id=loaded.id, channel_id=channel_id, text=reply)
+        await self._emit(
+            loaded.id,
+            {
+                "type": "ai_agent_action",
+                "kind": "mention_reply",
+                "channel_id": str(channel_id),
+                "channel_name": channel_name,
+                "peer_name": sender_name,
+                "text": reply,
+            },
+        )
+
+    def _maybe_schedule_ai_dm_reply(
+        self,
+        *,
+        loaded: LoadedIdentity,
+        peer_pubkey: bytes,
+        peer_name: str | None,
+        text: str,
+    ) -> None:
+        """Schedule eine DM-Antwort des KI-Agenten. Rate-Limit-Check
+        gegen Pro-Peer-Sliding-Window. Anti-Loop-Filter ist hart: Sender,
+        die selbst Companion-Identitäten sind, werden vorher schon vom
+        Aufrufer (``sender_is_echo``-Check) abgefangen — hier prüfen wir
+        zusätzlich gegen die UI-Blacklist."""
+        if self.ai_agent is None:
+            return
+        if peer_pubkey in self._by_pubkey:
+            return
+        task = asyncio.create_task(
+            self._run_ai_dm_reply(
+                loaded=loaded,
+                peer_pubkey=peer_pubkey,
+                peer_name=peer_name,
+                incoming_text=text,
+            )
+        )
+        self._ai_agent_reply_tasks.add(task)
+        task.add_done_callback(self._ai_agent_reply_tasks.discard)
+
+    def _ai_dm_rate_allows(
+        self, *, identity_id: UUID, peer_pubkey: bytes, rate_per_hour: int
+    ) -> bool:
+        """Prüft das Sliding-Window — und schreibt den Treffer-Timestamp
+        ein. Side-effect auf demselben Pfad, damit der Check atomar ist."""
+        if rate_per_hour <= 0:
+            return False
+        cap = min(rate_per_hour, self.ai_agent_dm_rate_cap)
+        key = (identity_id, peer_pubkey)
+        now = datetime.now(UTC)
+        cutoff = now - timedelta(hours=1)
+        history = self._ai_dm_history.setdefault(key, deque())
+        while history and history[0] < cutoff:
+            history.popleft()
+        if len(history) >= cap:
+            return False
+        history.append(now)
+        return True
+
+    async def _run_ai_dm_reply(
+        self,
+        *,
+        loaded: LoadedIdentity,
+        peer_pubkey: bytes,
+        peer_name: str | None,
+        incoming_text: str,
+    ) -> None:
+        from meshcore_bridge.db import CompanionAiAgent, CompanionMessage
+
+        if self.ai_agent is None:
+            return
+        async with self.sessionmaker() as db:
+            agent_row = await db.get(CompanionAiAgent, loaded.id)
+        if (
+            agent_row is None
+            or not agent_row.enabled
+            or not agent_row.respond_to_dms
+            or agent_row.dm_rate_per_hour <= 0
+        ):
+            return
+        hist_filter = self._build_history_filter(agent_row)
+        if not hist_filter.allows(peer_pubkey=peer_pubkey, peer_name=peer_name):
+            return
+        if not self._ai_dm_rate_allows(
+            identity_id=loaded.id,
+            peer_pubkey=peer_pubkey,
+            rate_per_hour=agent_row.dm_rate_per_hour,
+        ):
+            await self._emit(
+                loaded.id,
+                {
+                    "type": "ai_agent_action",
+                    "kind": "skipped",
+                    "reason": "dm_rate_limited",
+                    "peer_pubkey_hex": peer_pubkey.hex(),
+                },
+            )
+            return
+        prompt = (agent_row.system_prompt or "").strip()
+        if not prompt:
+            return
+        # Random-Delay, damit die Antwort nicht „uhrzeitgleich" zurückkommt.
+        min_delay = max(0, int(agent_row.dm_min_delay_s))
+        max_delay = max(min_delay, int(agent_row.dm_max_delay_s))
+        delay = random.uniform(min_delay, max_delay) if max_delay > 0 else 0.0
+        if delay > 0:
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=delay)
+                return  # Shutdown
+            except TimeoutError:
+                pass
+
+        async with self.sessionmaker() as db:
+            history_rows = list(
+                (
+                    await db.execute(
+                        select(CompanionMessage)
+                        .where(
+                            CompanionMessage.identity_id == loaded.id,
+                            CompanionMessage.payload_type == int(PayloadType.TXT_MSG),
+                            CompanionMessage.peer_pubkey == peer_pubkey,
+                        )
+                        .order_by(CompanionMessage.ts.desc())
+                        .limit(self._AI_DM_HISTORY_LIMIT)
+                    )
+                ).scalars()
+            )
+        history: list[dict[str, str]] = []
+        # In chronologischer Reihenfolge in den Prompt — der LLM liest
+        # natürlicher von alt nach neu.
+        for row in reversed(history_rows):
+            if not row.text:
+                continue
+            role = "assistant" if row.direction == "out" else "user"
+            history.append({"role": role, "content": row.text})
+        # Sicherheitsnetz: wenn die aktuelle DM noch nicht in der History
+        # ist (z.B. weil sie unter ``existing`` deduped wurde), explizit
+        # voranstellen.
+        if not history or history[-1]["content"] != incoming_text:
+            history.append({"role": "user", "content": incoming_text})
+
+        reply = await self.ai_agent.generate(
+            system_prompt=prompt,
+            history=history,
+            max_bytes=self.ai_agent_max_bytes,
+            model_override=agent_row.ollama_model or None,
+        )
+        if not reply:
+            return
+        await self.send_dm(identity_id=loaded.id, peer_pubkey=peer_pubkey, text=reply)
+        await self._emit(
+            loaded.id,
+            {
+                "type": "ai_agent_action",
+                "kind": "dm_reply",
+                "peer_pubkey_hex": peer_pubkey.hex(),
+                "peer_name": peer_name,
+                "text": reply,
+            },
         )
 
     async def _send_advert(self, loaded: LoadedIdentity) -> None:

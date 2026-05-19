@@ -1,5 +1,6 @@
 from meshcore_bridge.db.models import (
     Base,
+    CompanionAiAgent,
     CompanionApiToken,
     CompanionChannel,
     CompanionContact,
@@ -20,6 +21,7 @@ from meshcore_bridge.db.session import close_engine, get_session, init_engine
 
 __all__ = [
     "Base",
+    "CompanionAiAgent",
     "CompanionApiToken",
     "CompanionChannel",
     "CompanionContact",

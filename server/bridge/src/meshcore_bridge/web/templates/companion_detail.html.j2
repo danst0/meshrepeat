@@ -585,6 +585,128 @@
       <div id="ha-entity-error" style="margin-top:.5rem;color:var(--danger)" hidden></div>
     </div>
 
+    {# ---------- KI-Agent ---------- #}
+    <div class="card" id="ai-agent-card"
+         data-min-interval-s="{{ ai_agent_caps.min_interval_s }}"
+         data-max-interval-s="{{ ai_agent_caps.max_interval_s }}"
+         data-max-prompt-chars="{{ ai_agent_caps.max_prompt_chars }}"
+         data-dm-rate-cap="{{ ai_agent_caps.dm_rate_cap_per_hour }}">
+      <h2>KI-Agent</h2>
+      <p style="font-size:.9em;color:var(--muted);margin:0 0 .75rem">
+        Wenn aktiviert, postet diese Identität gemäß Aktivitätsgrad (mit
+        Jitter) im gewählten Channel und reagiert auf direkte Erwähnungen
+        sowie eingehende DMs. Anti-Loop: andere lokale Companion-
+        Identitäten werden hart ignoriert.
+        {% if not ai_agent_global_enabled %}
+          <br><strong style="color:var(--warn,#a60)">Ollama-Endpoint ist
+          nicht konfiguriert</strong> — Settings können bereits gepflegt
+          werden, der Loop läuft aber erst, wenn
+          <code>ai_agent.enabled=true</code> + eine Ollama-URL gesetzt
+          sind (Default aus <code>translation.base_url</code>).
+        {% endif %}
+      </p>
+
+      {% set _agent = ai_agent %}
+      {% set _agent_interval = _agent.interval_s if _agent else 14400 %}
+      {% set _agent_prompt = _agent.system_prompt if _agent else '' %}
+      {% set _agent_channel = (_agent.channel_id | string) if _agent and _agent.channel_id else '' %}
+      <form id="ai-agent-form" onsubmit="return false"
+            style="display:grid;grid-template-columns:1fr 1fr;gap:.75rem;align-items:start;margin-bottom:1rem">
+        <label style="grid-column:1/-1;margin:0;display:inline-flex;gap:.4rem;align-items:center">
+          <input type="checkbox" name="enabled"
+                 {% if _agent and _agent.enabled %}checked{% endif %}>
+          Agent aktiv
+        </label>
+
+        <label style="grid-column:1/-1;margin:0">
+          System-Prompt (Ziel des Agenten)
+          <textarea name="system_prompt"
+                    maxlength="{{ ai_agent_caps.max_prompt_chars }}"
+                    rows="4" style="width:100%;font-family:inherit"
+                    placeholder="Beispiel: Antworte freundlich auf Deutsch, max. 1 Satz. Halte dich an Funkamateur-Themen.">{{ _agent_prompt }}</textarea>
+          <span id="ai-agent-prompt-counter" style="font-size:.8em;color:var(--muted)"></span>
+        </label>
+
+        <label style="margin:0">Channel
+          <select name="channel_id" style="width:100%">
+            <option value="">Public (Default)</option>
+            {% for ch in channels %}
+              <option value="{{ ch.id }}"
+                      {% if _agent_channel == (ch.id | string) %}selected{% endif %}>
+                {{ ch.name }}
+              </option>
+            {% endfor %}
+          </select>
+        </label>
+
+        <label style="margin:0">Aktivität
+          <input name="interval_s" type="range"
+                 min="{{ ai_agent_caps.min_interval_s }}"
+                 max="{{ ai_agent_caps.max_interval_s }}"
+                 step="900" value="{{ _agent_interval }}"
+                 style="width:100%">
+          <span id="ai-agent-interval-label" style="font-size:.85em;color:var(--muted)"></span>
+        </label>
+
+        <label style="margin:0;display:inline-flex;gap:.4rem;align-items:center">
+          <input type="checkbox" name="respond_on_mention"
+                 {% if _agent is none or _agent.respond_on_mention %}checked{% endif %}>
+          Auf Erwähnung reagieren
+        </label>
+        <label style="margin:0;display:inline-flex;gap:.4rem;align-items:center">
+          <input type="checkbox" name="respond_to_dms"
+                 {% if _agent is none or _agent.respond_to_dms %}checked{% endif %}>
+          Auf DMs antworten
+        </label>
+
+        <label style="margin:0">DM-Antworten / h / Peer
+          <input name="dm_rate_per_hour" type="number" min="0"
+                 max="{{ ai_agent_caps.dm_rate_cap_per_hour }}"
+                 value="{{ _agent.dm_rate_per_hour if _agent else 6 }}"
+                 style="width:5rem">
+        </label>
+        <label style="margin:0">DM-Verzögerung (Sek.)
+          <span style="display:inline-flex;gap:.3rem;align-items:center">
+            <input name="dm_min_delay_s" type="number" min="0"
+                   value="{{ _agent.dm_min_delay_s if _agent else 10 }}"
+                   style="width:4.5rem">
+            <span style="color:var(--muted)">–</span>
+            <input name="dm_max_delay_s" type="number" min="0"
+                   value="{{ _agent.dm_max_delay_s if _agent else 60 }}"
+                   style="width:4.5rem">
+          </span>
+        </label>
+
+        <label style="margin:0">Ollama-Modell
+          <input name="ollama_model" maxlength="128"
+                 value="{{ _agent.ollama_model if _agent else 'llama3.1:8b' }}"
+                 style="width:100%">
+        </label>
+        <label style="margin:0">Lookback (Min.)
+          <input name="lookback_minutes" type="number" min="1" max="1440"
+                 value="{{ _agent.lookback_minutes if _agent else 60 }}"
+                 style="width:5rem">
+        </label>
+
+        <label style="grid-column:1/-1;margin:0">
+          Blacklist Sender-Namen (eine pro Zeile)
+          <textarea name="blocked_peer_names" rows="2"
+                    style="width:100%;font-family:inherit"
+                    placeholder="z.B. AnderesBot">{{ _agent.blocked_peer_names if _agent else '' }}</textarea>
+        </label>
+
+        <div style="grid-column:1/-1">
+          <button type="button" id="ai-agent-save" style="margin:0">Speichern</button>
+          <span id="ai-agent-status" style="margin-left:.75rem;font-size:.85em;color:var(--muted)">
+            {% if _agent and _agent.next_post_at %}
+              nächster Post: {{ _agent.next_post_at | localtime("%d.%m. %H:%M") }}
+            {% endif %}
+          </span>
+        </div>
+      </form>
+      <div id="ai-agent-error" style="margin-top:.5rem;color:var(--danger)" hidden></div>
+    </div>
+
     {# ---------- API-Tokens ---------- #}
     <div class="card">
       <h2>API-Tokens</h2>
@@ -1193,6 +1315,93 @@
             alert(String(e));
           }
         });
+      });
+    })();
+  </script>
+
+  <script>
+    // KI-Agent: Save + Slider-Label + Char-Counter + Inline-SSE-Log
+    (() => {
+      const IDENT = "{{ identity.id }}";
+      const card = document.getElementById("ai-agent-card");
+      if (!card) return;
+      const form = document.getElementById("ai-agent-form");
+      const err = document.getElementById("ai-agent-error");
+      const status = document.getElementById("ai-agent-status");
+
+      const slider = form.querySelector("input[name=interval_s]");
+      const label = document.getElementById("ai-agent-interval-label");
+      const promptArea = form.querySelector("textarea[name=system_prompt]");
+      const promptCounter = document.getElementById("ai-agent-prompt-counter");
+      const maxPromptChars = parseInt(card.dataset.maxPromptChars, 10) || 2000;
+
+      function formatInterval(seconds) {
+        const s = parseInt(seconds, 10);
+        if (!isFinite(s) || s < 60) return `${s} s`;
+        if (s < 3600) return `≈ alle ${Math.round(s / 60)} Min.`;
+        const hours = s / 3600;
+        if (hours < 1.5) return "≈ 1× pro Stunde";
+        if (hours < 24) return `≈ alle ${hours.toFixed(hours < 6 ? 1 : 0)} Std.`;
+        if (hours < 36) return "≈ 1× pro Tag";
+        const days = (hours / 24).toFixed(1);
+        return `≈ alle ${days} Tage`;
+      }
+
+      function updateLabel() {
+        label.textContent = formatInterval(slider.value);
+      }
+      slider.addEventListener("input", updateLabel);
+      updateLabel();
+
+      function updateCounter() {
+        const used = promptArea.value.length;
+        promptCounter.textContent = `${used} / ${maxPromptChars} Zeichen`;
+      }
+      promptArea.addEventListener("input", updateCounter);
+      updateCounter();
+
+      function showErr(msg) {
+        err.textContent = msg;
+        err.hidden = false;
+      }
+      function clearErr() {
+        err.textContent = "";
+        err.hidden = true;
+      }
+
+      document.getElementById("ai-agent-save").addEventListener("click", async () => {
+        clearErr();
+        const fd = new FormData();
+        fd.append("enabled", form.querySelector("input[name=enabled]").checked ? "true" : "false");
+        fd.append("system_prompt", form.querySelector("textarea[name=system_prompt]").value);
+        fd.append("interval_s", slider.value);
+        fd.append("channel_id", form.querySelector("select[name=channel_id]").value);
+        fd.append("respond_on_mention", form.querySelector("input[name=respond_on_mention]").checked ? "true" : "false");
+        fd.append("respond_to_dms", form.querySelector("input[name=respond_to_dms]").checked ? "true" : "false");
+        fd.append("dm_rate_per_hour", form.querySelector("input[name=dm_rate_per_hour]").value);
+        fd.append("dm_min_delay_s", form.querySelector("input[name=dm_min_delay_s]").value);
+        fd.append("dm_max_delay_s", form.querySelector("input[name=dm_max_delay_s]").value);
+        fd.append("blocked_peer_names", form.querySelector("textarea[name=blocked_peer_names]").value);
+        fd.append("ollama_model", form.querySelector("input[name=ollama_model]").value.trim());
+        fd.append("lookback_minutes", form.querySelector("input[name=lookback_minutes]").value);
+        try {
+          const r = await fetch(`/api/v1/companion/identities/${IDENT}/ai_agent`,
+            {method: "PATCH", credentials: "same-origin", body: fd});
+          if (!r.ok) {
+            const j = await r.json().catch(() => ({}));
+            showErr(j.detail || `HTTP ${r.status}`);
+            return;
+          }
+          const j = await r.json();
+          if (j.next_post_at) {
+            const dt = new Date(j.next_post_at);
+            status.textContent = `nächster Post: ${dt.toLocaleString()}`;
+          } else {
+            status.textContent = "gespeichert";
+          }
+        } catch (e) {
+          showErr(String(e));
+        }
       });
     })();
   </script>

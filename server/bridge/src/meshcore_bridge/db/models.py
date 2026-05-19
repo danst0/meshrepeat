@@ -526,6 +526,100 @@ class CompanionHaAllowedPubkey(Base):
     )
 
 
+class CompanionAiAgent(Base):
+    """KI-Agent-Konfiguration pro Companion-Identity (1:1).
+
+    Wenn ``enabled``, läuft im :class:`meshcore_companion.service.CompanionService`
+    ein Background-Loop, der pro Identity periodisch (Ziel-Mittelwert
+    ``interval_s`` mit Jitter ±30%) den jüngsten Public-Channel-Verlauf
+    an ein Ollama-Modell schickt und das Ergebnis via ``send_channel``
+    postet. Zusätzlich reagiert der Agent auf direkte Erwähnungen seines
+    Identity-Namens im Channel sowie auf eingehende DMs (mit eigener
+    Rate-Limit).
+
+    Anti-Loop: Sender, deren Pubkey einer lokal bekannten Companion-
+    Identity entspricht (``CompanionService._by_pubkey``), werden hart
+    gefiltert. ``blocked_peer_names`` erlaubt zusätzliche Black-Listing
+    in der UI (newline-separiert).
+    """
+
+    __tablename__ = "companion_ai_agents"
+
+    identity_id: Mapped[UUID] = mapped_column(
+        _UUIDBlob,
+        ForeignKey("companion_identities.id"),
+        primary_key=True,
+    )
+    enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="0", default=False
+    )
+    system_prompt: Mapped[str] = mapped_column(
+        String, nullable=False, server_default="", default=""
+    )
+    """Beschreibt das Ziel/Verhalten des Agenten. Wird als Ollama-System-
+    Message vorangestellt. Hard-Limit ``ai_agent.max_prompt_chars``."""
+    interval_s: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="14400", default=14_400
+    )
+    """Ziel-Mittelwert zwischen zwei Public-Posts. Hard-Range
+    ``[ai_agent.min_interval_s, ai_agent.max_interval_s]`` (3600..86400)."""
+    channel_id: Mapped[UUID | None] = mapped_column(
+        _UUIDBlob, ForeignKey("companion_channels.id"), nullable=True
+    )
+    """Ziel-Channel für Public-Posts. ``NULL`` = Default-Public-Channel
+    (Auto-Resolve über den Identity-Namen ``public``)."""
+    respond_on_mention: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="1", default=True
+    )
+    respond_to_dms: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="1", default=True
+    )
+    dm_rate_per_hour: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="6", default=6
+    )
+    """Maximale DM-Antworten pro Peer und Stunde. ``0`` = Antworten aus
+    (gleicher Effekt wie ``respond_to_dms=False``, aber explizit)."""
+    dm_min_delay_s: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="10", default=10
+    )
+    dm_max_delay_s: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="60", default=60
+    )
+    blocked_peer_names: Mapped[str] = mapped_column(
+        String, nullable=False, server_default="", default=""
+    )
+    """Newline-separierte Liste von Sender-Anzeigenamen, die ignoriert
+    werden (Anti-Loop)."""
+    ollama_model: Mapped[str] = mapped_column(
+        String(128), nullable=False, server_default="llama3.1:8b", default="llama3.1:8b"
+    )
+    lookback_minutes: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="60", default=60
+    )
+    """Wie weit zurück die Channel-History dem LLM-Prompt mitgegeben wird."""
+    last_post_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    next_post_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    """Geplanter Zeitpunkt des nächsten Public-Posts (mit Jitter). Der
+    Loop pollt diese Spalte und setzt sie nach jedem Tick neu."""
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    __table_args__ = (
+        Index("ix_companion_ai_agents_due", "enabled", "next_post_at"),
+    )
+
+
 class CompanionHaExposedEntity(Base):
     """Kuratierter HA-Entity-Katalog, den der LLM-Router je Identity sieht.
 
