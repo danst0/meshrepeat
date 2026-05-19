@@ -3073,11 +3073,53 @@ class CompanionService:
             )
             await db.commit()
 
-    def _build_history_filter(self, agent_row: object) -> HistoryFilter:
-        """Sammle alle lokal bekannten Companion-Pubkeys und die UI-Blacklist."""
+    async def _agent_active_pubkeys(self) -> frozenset[bytes]:
+        """Pubkeys aller lokalen Companions mit aktiviertem KI-Agent.
+
+        Wird beim Bauen des :class:`HistoryFilter` benutzt — wir wollen
+        verhindern, dass zwei KI-Agenten einander beantworten und sich in
+        eine Endlosschleife treiben, aber normale lokale Companions (z.B.
+        ein menschen-gesteuerter Account) sollen mit dem Agent reden
+        können. Loadbarkeit aus DB pro Tick ist OK: der Loop läuft alle
+        ``ai_agent_tick_s`` (Default 60 s), und der Bus ist warm.
+        """
+        from meshcore_bridge.db import CompanionAiAgent
+
+        async with self.sessionmaker() as db:
+            rows = list(
+                (
+                    await db.execute(
+                        select(CompanionAiAgent.identity_id).where(
+                            CompanionAiAgent.enabled.is_(True)
+                        )
+                    )
+                ).scalars()
+            )
+        pubkeys: set[bytes] = set()
+        for ident_id in rows:
+            li = self._by_id.get(ident_id)
+            if li is not None:
+                pubkeys.add(li.pubkey)
+        return frozenset(pubkeys)
+
+    async def _build_history_filter(
+        self, loaded: LoadedIdentity, agent_row: object
+    ) -> HistoryFilter:
+        """Baut den Anti-Loop-Filter für einen konkreten Agent-Lauf.
+
+        Geblockt werden:
+        - Die eigene Identity-Pubkey (sonst würde der LLM die eigenen
+          Outputs als Konversation interpretieren).
+        - Andere lokal aktive KI-Agenten (Anti-Pingpong).
+        - Per UI eingetragene Sender-Anzeigenamen (Blacklist).
+
+        Normale lokale Companions (kein Agent aktiv) gelten als legitime
+        Gesprächspartner und werden NICHT geblockt.
+        """
         blocked_raw = getattr(agent_row, "blocked_peer_names", "") or ""
+        agent_pubkeys = await self._agent_active_pubkeys()
         return HistoryFilter(
-            own_pubkeys=frozenset(self._by_pubkey.keys()),
+            own_pubkeys=frozenset({loaded.pubkey} | agent_pubkeys),
             blocked_names=parse_blocked_peer_names(blocked_raw),
         )
 
@@ -3143,7 +3185,7 @@ class CompanionService:
                     )
                 ).scalars()
             )
-        hist_filter = self._build_history_filter(agent_row)
+        hist_filter = await self._build_history_filter(loaded, agent_row)
         history: list[dict[str, str]] = []
         for row in rows:
             if not row.text:
@@ -3277,7 +3319,7 @@ class CompanionService:
             or not agent_row.respond_on_mention
         ):
             return
-        hist_filter = self._build_history_filter(agent_row)
+        hist_filter = await self._build_history_filter(loaded, agent_row)
         if not hist_filter.allows(peer_pubkey=None, peer_name=sender_name):
             return
         prompt = (agent_row.system_prompt or "").strip()
@@ -3322,13 +3364,12 @@ class CompanionService:
         text: str,
     ) -> None:
         """Schedule eine DM-Antwort des KI-Agenten. Rate-Limit-Check
-        gegen Pro-Peer-Sliding-Window. Anti-Loop-Filter ist hart: Sender,
-        die selbst Companion-Identitäten sind, werden vorher schon vom
-        Aufrufer (``sender_is_echo``-Check) abgefangen — hier prüfen wir
-        zusätzlich gegen die UI-Blacklist."""
+        gegen Pro-Peer-Sliding-Window. Anti-Loop läuft im async-Pfad
+        (:meth:`_build_history_filter`): Self-Talk hart hier blocken,
+        andere agent-aktive Companions kommen erst nach DB-Lookup raus."""
         if self.ai_agent is None:
             return
-        if peer_pubkey in self._by_pubkey:
+        if peer_pubkey == loaded.pubkey:
             return
         task = asyncio.create_task(
             self._run_ai_dm_reply(
@@ -3381,7 +3422,7 @@ class CompanionService:
             or agent_row.dm_rate_per_hour <= 0
         ):
             return
-        hist_filter = self._build_history_filter(agent_row)
+        hist_filter = await self._build_history_filter(loaded, agent_row)
         if not hist_filter.allows(peer_pubkey=peer_pubkey, peer_name=peer_name):
             return
         if not self._ai_dm_rate_allows(
