@@ -193,6 +193,11 @@ class AiAgentClient:
             "model": model_override or self._cfg.model,
             "messages": messages,
             "stream": False,
+            # Thinking-Modus aus: gemma4/qwen3 packen sonst die ganze Antwort
+            # ins ``thinking``-Feld und lassen ``content`` leer (Mesh-Chat hat
+            # keinen Platz für Reasoning-Dumps). Ältere Ollama-Versionen
+            # ignorieren den Key.
+            "think": False,
             "options": {"temperature": 0.7},
         }
         url = self._cfg.base_url.rstrip("/") + "/api/chat"
