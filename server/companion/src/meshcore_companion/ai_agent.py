@@ -241,7 +241,10 @@ class AiAgentClient:
         if data is None:
             return None
         raw_text = _extract_ollama_content(data)
-        return sanitize_reply(raw_text, max_bytes=max_bytes)
+        sanitized = sanitize_reply(raw_text, max_bytes=max_bytes)
+        if sanitized is None:
+            _log_sanitize_empty(raw_text, data)
+        return sanitized
 
 
 def _extract_ollama_content(data: object) -> str | None:
@@ -254,3 +257,20 @@ def _extract_ollama_content(data: object) -> str | None:
     if not isinstance(content, str):
         return None
     return content
+
+
+def _log_sanitize_empty(raw_text: str | None, data: object) -> None:
+    """Diagnose-Log, wenn Ollama-Response nach Sanitize leer ist."""
+    thinking_len = 0
+    if isinstance(data, dict):
+        msg = data.get("message")
+        if isinstance(msg, dict):
+            thinking = msg.get("thinking")
+            if isinstance(thinking, str):
+                thinking_len = len(thinking)
+    _log.info(
+        "ai_agent_sanitize_empty",
+        raw_len=len(raw_text or ""),
+        preview=(raw_text or "")[:120],
+        thinking_len=thinking_len,
+    )
