@@ -156,12 +156,16 @@ def test_history_filter_allows_unknown_no_name() -> None:
 # ---------- AiAgentClient.generate ----------
 
 
-def _cfg() -> AiAgentClientConfig:
-    return AiAgentClientConfig(
+def _cfg(**overrides: object) -> AiAgentClientConfig:
+    base: dict[str, object] = dict(
         base_url="http://stub.local",
         model="llama3.1:8b",
         timeout_s=5.0,
+        max_attempts=1,
+        retry_backoff_s=0.0,
     )
+    base.update(overrides)
+    return AiAgentClientConfig(**base)  # type: ignore[arg-type]
 
 
 async def test_generate_success(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -241,6 +245,44 @@ async def test_generate_model_override_propagates(monkeypatch: pytest.MonkeyPatc
         model_override="custom:7b",
     )
     assert captured["model"] == "custom:7b"
+
+
+async def test_generate_retry_recovers_after_500(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Zwei 5xx-Antworten, dann Erfolg — Retry-Loop muss durchkommen."""
+    state = {"calls": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        state["calls"] += 1
+        if state["calls"] < 3:
+            return httpx.Response(503, json={"error": "busy"})
+        return httpx.Response(200, json={"message": {"content": "recovered"}})
+
+    _patch_httpx(monkeypatch, handler)
+    client = AiAgentClient(_cfg(max_attempts=3, retry_backoff_s=0.0))
+    out = await client.generate(
+        system_prompt="x", history=[{"role": "user", "content": "hi"}]
+    )
+    assert out == "recovered"
+    assert state["calls"] == 3
+
+
+async def test_generate_retry_gives_up_after_max_attempts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bleibt es transient, gibt der Client nach max_attempts auf."""
+    state = {"calls": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        state["calls"] += 1
+        return httpx.Response(503, json={"error": "busy"})
+
+    _patch_httpx(monkeypatch, handler)
+    client = AiAgentClient(_cfg(max_attempts=2, retry_backoff_s=0.0))
+    out = await client.generate(
+        system_prompt="x", history=[{"role": "user", "content": "hi"}]
+    )
+    assert out is None
+    assert state["calls"] == 2
 
 
 # Ensure UUID import works (placeholder for downstream tests).

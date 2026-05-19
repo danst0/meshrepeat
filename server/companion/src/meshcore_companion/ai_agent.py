@@ -17,6 +17,7 @@ Designprinzipien:
 
 from __future__ import annotations
 
+import asyncio
 import random
 import re
 import unicodedata
@@ -50,6 +51,12 @@ class AiAgentClientConfig:
     base_url: str
     model: str
     timeout_s: float
+    max_attempts: int = 3
+    retry_backoff_s: float = 2.0
+
+
+# HTTP-Statuscode ab dem wir transient interpretieren (5xx).
+_HTTP_SERVER_ERROR = 500
 
 
 def jittered_interval_s(interval_s: int, *, rng: random.Random | None = None) -> float:
@@ -171,7 +178,13 @@ class AiAgentClient:
         """Liefert die sanitisierte Antwort des LLM oder ``None`` bei
         Skip/Fehler. ``history`` ist eine Liste von Ollama-Chat-Messages
         (jeweils ``{"role": "...", "content": "..."}``), ohne System-
-        Message — die hängt der Wrapper voran."""
+        Message — die hängt der Wrapper voran.
+
+        Retries: Timeouts und 5xx-Antworten werden bis zu
+        ``max_attempts``-mal wiederholt, mit exponentiellem Back-off
+        (``retry_backoff_s * 2**attempt``). 4xx-Antworten und JSON-Fehler
+        sind nicht-transient und brechen sofort ab.
+        """
         if not system_prompt.strip():
             return None
         messages: list[dict[str, str]] = [{"role": "system", "content": system_prompt}]
@@ -183,19 +196,49 @@ class AiAgentClient:
             "options": {"temperature": 0.7},
         }
         url = self._cfg.base_url.rstrip("/") + "/api/chat"
-        try:
-            async with httpx.AsyncClient(timeout=self._cfg.timeout_s) as client:
-                resp = await client.post(url, json=payload)
-                resp.raise_for_status()
-                data = resp.json()
-        except httpx.TimeoutException:
-            _log.warning("ai_agent_timeout", url=url, timeout_s=self._cfg.timeout_s)
-            return None
-        except httpx.HTTPError as exc:
-            _log.warning("ai_agent_http_error", url=url, error=str(exc))
-            return None
-        except ValueError as exc:
-            _log.warning("ai_agent_bad_json", url=url, error=str(exc))
+        attempts = max(1, self._cfg.max_attempts)
+        data: object | None = None
+        for attempt in range(attempts):
+            transient = False
+            try:
+                async with httpx.AsyncClient(timeout=self._cfg.timeout_s) as client:
+                    resp = await client.post(url, json=payload)
+                    if resp.status_code >= _HTTP_SERVER_ERROR:
+                        _log.warning(
+                            "ai_agent_http_error",
+                            url=url,
+                            status=resp.status_code,
+                            attempt=attempt + 1,
+                            of=attempts,
+                        )
+                        transient = True
+                    else:
+                        resp.raise_for_status()
+                        data = resp.json()
+                        break
+            except httpx.TimeoutException:
+                _log.warning(
+                    "ai_agent_timeout",
+                    url=url,
+                    timeout_s=self._cfg.timeout_s,
+                    attempt=attempt + 1,
+                    of=attempts,
+                )
+                transient = True
+            except httpx.HTTPError as exc:
+                _log.warning("ai_agent_http_error", url=url, error=str(exc))
+                return None
+            except ValueError as exc:
+                _log.warning("ai_agent_bad_json", url=url, error=str(exc))
+                return None
+
+            if not transient or attempt + 1 >= attempts:
+                return None
+            backoff = self._cfg.retry_backoff_s * (2**attempt)
+            _log.info("ai_agent_retry_backoff", url=url, backoff_s=backoff)
+            await asyncio.sleep(backoff)
+
+        if data is None:
             return None
         raw_text = _extract_ollama_content(data)
         return sanitize_reply(raw_text, max_bytes=max_bytes)

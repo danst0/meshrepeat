@@ -167,7 +167,15 @@ class AiAgentConfig(BaseModel):
     ollama_model_default: str = "llama3.1:8b"
     """Default-Modell, das die UI als Platzhalter zeigt, wenn die Identity
     noch keine eigene Modell-Auswahl hat."""
-    ollama_timeout_s: float = 30.0
+    ollama_timeout_s: float = 90.0
+    """Per-Versuch-Timeout für den Ollama-Call. Großzügig dimensioniert,
+    weil Cold-Loads eines 8B-Modells leicht 60 bis 80 s brauchen können."""
+    ollama_max_attempts: int = 3
+    """Gesamtanzahl Versuche pro LLM-Call (= 1 Initial + (n-1) Retries).
+    Greift bei Timeout und 5xx-Fehlern; 4xx fließt nicht in den Retry-Pfad."""
+    ollama_retry_backoff_s: float = 2.0
+    """Basis für exponentielles Back-off: Wartezeit zwischen Versuch ``i``
+    und ``i+1`` ist ``base * 2**i`` (z.B. 2 s, 4 s, 8 s …)."""
 
 
 class HomeAssistantSettings(BaseModel):

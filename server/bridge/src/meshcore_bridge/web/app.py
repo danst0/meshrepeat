@@ -239,6 +239,8 @@ def build_app(cfg: AppConfig) -> FastAPI:
                             base_url=ai_base_url,
                             model=cfg.ai_agent.ollama_model_default,
                             timeout_s=cfg.ai_agent.ollama_timeout_s,
+                            max_attempts=cfg.ai_agent.ollama_max_attempts,
+                            retry_backoff_s=cfg.ai_agent.ollama_retry_backoff_s,
                         )
                     )
                     log.info(
