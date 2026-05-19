@@ -3313,11 +3313,7 @@ class CompanionService:
 
         async with self.sessionmaker() as db:
             agent_row = await db.get(CompanionAiAgent, loaded.id)
-        if (
-            agent_row is None
-            or not agent_row.enabled
-            or not agent_row.respond_on_mention
-        ):
+        if agent_row is None or not agent_row.enabled or not agent_row.respond_on_mention:
             return
         hist_filter = await self._build_history_filter(loaded, agent_row)
         if not hist_filter.allows(peer_pubkey=None, peer_name=sender_name):
@@ -3368,9 +3364,28 @@ class CompanionService:
         (:meth:`_build_history_filter`): Self-Talk hart hier blocken,
         andere agent-aktive Companions kommen erst nach DB-Lookup raus."""
         if self.ai_agent is None:
+            _log.info(
+                "ai_dm_reply",
+                stage="skip_no_agent_client",
+                identity=loaded.name,
+                peer=peer_pubkey[:4].hex(),
+            )
             return
         if peer_pubkey == loaded.pubkey:
+            _log.info(
+                "ai_dm_reply",
+                stage="skip_self",
+                identity=loaded.name,
+                peer=peer_pubkey[:4].hex(),
+            )
             return
+        _log.info(
+            "ai_dm_reply",
+            stage="scheduled",
+            identity=loaded.name,
+            peer=peer_pubkey[:4].hex(),
+            peer_name=peer_name,
+        )
         task = asyncio.create_task(
             self._run_ai_dm_reply(
                 loaded=loaded,
@@ -3411,97 +3426,188 @@ class CompanionService:
     ) -> None:
         from meshcore_bridge.db import CompanionAiAgent, CompanionMessage
 
-        if self.ai_agent is None:
-            return
-        async with self.sessionmaker() as db:
-            agent_row = await db.get(CompanionAiAgent, loaded.id)
-        if (
-            agent_row is None
-            or not agent_row.enabled
-            or not agent_row.respond_to_dms
-            or agent_row.dm_rate_per_hour <= 0
-        ):
-            return
-        hist_filter = await self._build_history_filter(loaded, agent_row)
-        if not hist_filter.allows(peer_pubkey=peer_pubkey, peer_name=peer_name):
-            return
-        if not self._ai_dm_rate_allows(
-            identity_id=loaded.id,
-            peer_pubkey=peer_pubkey,
-            rate_per_hour=agent_row.dm_rate_per_hour,
-        ):
+        peer_hex = peer_pubkey[:4].hex()
+        try:
+            if self.ai_agent is None:
+                _log.info("ai_dm_reply", stage="run_skip_no_agent", peer=peer_hex)
+                return
+            async with self.sessionmaker() as db:
+                agent_row = await db.get(CompanionAiAgent, loaded.id)
+            if agent_row is None:
+                _log.info(
+                    "ai_dm_reply",
+                    stage="skip_no_row",
+                    identity=loaded.name,
+                    peer=peer_hex,
+                )
+                return
+            if not agent_row.enabled:
+                _log.info(
+                    "ai_dm_reply",
+                    stage="skip_disabled",
+                    identity=loaded.name,
+                    peer=peer_hex,
+                )
+                return
+            if not agent_row.respond_to_dms:
+                _log.info(
+                    "ai_dm_reply",
+                    stage="skip_dms_off",
+                    identity=loaded.name,
+                    peer=peer_hex,
+                )
+                return
+            if agent_row.dm_rate_per_hour <= 0:
+                _log.info(
+                    "ai_dm_reply",
+                    stage="skip_rate_zero",
+                    identity=loaded.name,
+                    peer=peer_hex,
+                )
+                return
+            hist_filter = await self._build_history_filter(loaded, agent_row)
+            if not hist_filter.allows(peer_pubkey=peer_pubkey, peer_name=peer_name):
+                _log.info(
+                    "ai_dm_reply",
+                    stage="skip_filtered",
+                    identity=loaded.name,
+                    peer=peer_hex,
+                    peer_name=peer_name,
+                    own_pubkeys=len(hist_filter.own_pubkeys),
+                    blocked=len(hist_filter.blocked_names),
+                )
+                return
+            if not self._ai_dm_rate_allows(
+                identity_id=loaded.id,
+                peer_pubkey=peer_pubkey,
+                rate_per_hour=agent_row.dm_rate_per_hour,
+            ):
+                _log.info(
+                    "ai_dm_reply",
+                    stage="skip_rate_limited",
+                    identity=loaded.name,
+                    peer=peer_hex,
+                )
+                await self._emit(
+                    loaded.id,
+                    {
+                        "type": "ai_agent_action",
+                        "kind": "skipped",
+                        "reason": "dm_rate_limited",
+                        "peer_pubkey_hex": peer_pubkey.hex(),
+                    },
+                )
+                return
+            prompt = (agent_row.system_prompt or "").strip()
+            if not prompt:
+                _log.info(
+                    "ai_dm_reply",
+                    stage="skip_empty_prompt",
+                    identity=loaded.name,
+                    peer=peer_hex,
+                )
+                return
+            # Random-Delay, damit die Antwort nicht „uhrzeitgleich" zurückkommt.
+            min_delay = max(0, int(agent_row.dm_min_delay_s))
+            max_delay = max(min_delay, int(agent_row.dm_max_delay_s))
+            delay = random.uniform(min_delay, max_delay) if max_delay > 0 else 0.0
+            _log.info(
+                "ai_dm_reply",
+                stage="delay",
+                identity=loaded.name,
+                peer=peer_hex,
+                delay_s=round(delay, 1),
+            )
+            if delay > 0:
+                try:
+                    await asyncio.wait_for(self._stop.wait(), timeout=delay)
+                    _log.info(
+                        "ai_dm_reply",
+                        stage="skip_shutdown",
+                        identity=loaded.name,
+                        peer=peer_hex,
+                    )
+                    return  # Shutdown
+                except TimeoutError:
+                    pass
+
+            async with self.sessionmaker() as db:
+                history_rows = list(
+                    (
+                        await db.execute(
+                            select(CompanionMessage)
+                            .where(
+                                CompanionMessage.identity_id == loaded.id,
+                                CompanionMessage.payload_type == int(PayloadType.TXT_MSG),
+                                CompanionMessage.peer_pubkey == peer_pubkey,
+                            )
+                            .order_by(CompanionMessage.ts.desc())
+                            .limit(self._AI_DM_HISTORY_LIMIT)
+                        )
+                    ).scalars()
+                )
+            history: list[dict[str, str]] = []
+            # In chronologischer Reihenfolge in den Prompt — der LLM liest
+            # natürlicher von alt nach neu.
+            for row in reversed(history_rows):
+                if not row.text:
+                    continue
+                role = "assistant" if row.direction == "out" else "user"
+                history.append({"role": role, "content": row.text})
+            # Sicherheitsnetz: wenn die aktuelle DM noch nicht in der History
+            # ist (z.B. weil sie unter ``existing`` deduped wurde), explizit
+            # voranstellen.
+            if not history or history[-1]["content"] != incoming_text:
+                history.append({"role": "user", "content": incoming_text})
+
+            _log.info(
+                "ai_dm_reply",
+                stage="calling_ollama",
+                identity=loaded.name,
+                peer=peer_hex,
+                model=agent_row.ollama_model or None,
+                history_len=len(history),
+            )
+            reply = await self.ai_agent.generate(
+                system_prompt=prompt,
+                history=history,
+                max_bytes=self.ai_agent_max_bytes,
+                model_override=agent_row.ollama_model or None,
+            )
+            if not reply:
+                _log.info(
+                    "ai_dm_reply",
+                    stage="empty_reply",
+                    identity=loaded.name,
+                    peer=peer_hex,
+                )
+                return
+            _log.info(
+                "ai_dm_reply",
+                stage="sending",
+                identity=loaded.name,
+                peer=peer_hex,
+                chars=len(reply),
+            )
+            await self.send_dm(identity_id=loaded.id, peer_pubkey=peer_pubkey, text=reply)
             await self._emit(
                 loaded.id,
                 {
                     "type": "ai_agent_action",
-                    "kind": "skipped",
-                    "reason": "dm_rate_limited",
+                    "kind": "dm_reply",
                     "peer_pubkey_hex": peer_pubkey.hex(),
+                    "peer_name": peer_name,
+                    "text": reply,
                 },
             )
-            return
-        prompt = (agent_row.system_prompt or "").strip()
-        if not prompt:
-            return
-        # Random-Delay, damit die Antwort nicht „uhrzeitgleich" zurückkommt.
-        min_delay = max(0, int(agent_row.dm_min_delay_s))
-        max_delay = max(min_delay, int(agent_row.dm_max_delay_s))
-        delay = random.uniform(min_delay, max_delay) if max_delay > 0 else 0.0
-        if delay > 0:
-            try:
-                await asyncio.wait_for(self._stop.wait(), timeout=delay)
-                return  # Shutdown
-            except TimeoutError:
-                pass
-
-        async with self.sessionmaker() as db:
-            history_rows = list(
-                (
-                    await db.execute(
-                        select(CompanionMessage)
-                        .where(
-                            CompanionMessage.identity_id == loaded.id,
-                            CompanionMessage.payload_type == int(PayloadType.TXT_MSG),
-                            CompanionMessage.peer_pubkey == peer_pubkey,
-                        )
-                        .order_by(CompanionMessage.ts.desc())
-                        .limit(self._AI_DM_HISTORY_LIMIT)
-                    )
-                ).scalars()
+        except Exception:
+            _log.exception(
+                "ai_dm_reply",
+                stage="exception",
+                identity=loaded.name,
+                peer=peer_hex,
             )
-        history: list[dict[str, str]] = []
-        # In chronologischer Reihenfolge in den Prompt — der LLM liest
-        # natürlicher von alt nach neu.
-        for row in reversed(history_rows):
-            if not row.text:
-                continue
-            role = "assistant" if row.direction == "out" else "user"
-            history.append({"role": role, "content": row.text})
-        # Sicherheitsnetz: wenn die aktuelle DM noch nicht in der History
-        # ist (z.B. weil sie unter ``existing`` deduped wurde), explizit
-        # voranstellen.
-        if not history or history[-1]["content"] != incoming_text:
-            history.append({"role": "user", "content": incoming_text})
-
-        reply = await self.ai_agent.generate(
-            system_prompt=prompt,
-            history=history,
-            max_bytes=self.ai_agent_max_bytes,
-            model_override=agent_row.ollama_model or None,
-        )
-        if not reply:
-            return
-        await self.send_dm(identity_id=loaded.id, peer_pubkey=peer_pubkey, text=reply)
-        await self._emit(
-            loaded.id,
-            {
-                "type": "ai_agent_action",
-                "kind": "dm_reply",
-                "peer_pubkey_hex": peer_pubkey.hex(),
-                "peer_name": peer_name,
-                "text": reply,
-            },
-        )
+            raise
 
     async def _send_advert(self, loaded: LoadedIdentity) -> None:
         if self.inject is None:
