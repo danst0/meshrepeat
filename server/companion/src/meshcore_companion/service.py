@@ -3379,13 +3379,6 @@ class CompanionService:
                 peer=peer_pubkey[:4].hex(),
             )
             return
-        _log.info(
-            "ai_dm_reply",
-            stage="scheduled",
-            identity=loaded.name,
-            peer=peer_pubkey[:4].hex(),
-            peer_name=peer_name,
-        )
         task = asyncio.create_task(
             self._run_ai_dm_reply(
                 loaded=loaded,
@@ -3511,13 +3504,6 @@ class CompanionService:
             min_delay = max(0, int(agent_row.dm_min_delay_s))
             max_delay = max(min_delay, int(agent_row.dm_max_delay_s))
             delay = random.uniform(min_delay, max_delay) if max_delay > 0 else 0.0
-            _log.info(
-                "ai_dm_reply",
-                stage="delay",
-                identity=loaded.name,
-                peer=peer_hex,
-                delay_s=round(delay, 1),
-            )
             if delay > 0:
                 try:
                     await asyncio.wait_for(self._stop.wait(), timeout=delay)
@@ -3560,14 +3546,6 @@ class CompanionService:
             if not history or history[-1]["content"] != incoming_text:
                 history.append({"role": "user", "content": incoming_text})
 
-            _log.info(
-                "ai_dm_reply",
-                stage="calling_ollama",
-                identity=loaded.name,
-                peer=peer_hex,
-                model=agent_row.ollama_model or None,
-                history_len=len(history),
-            )
             reply = await self.ai_agent.generate(
                 system_prompt=prompt,
                 history=history,
@@ -3582,13 +3560,6 @@ class CompanionService:
                     peer=peer_hex,
                 )
                 return
-            _log.info(
-                "ai_dm_reply",
-                stage="sending",
-                identity=loaded.name,
-                peer=peer_hex,
-                chars=len(reply),
-            )
             await self.send_dm(identity_id=loaded.id, peer_pubkey=peer_pubkey, text=reply)
             await self._emit(
                 loaded.id,
