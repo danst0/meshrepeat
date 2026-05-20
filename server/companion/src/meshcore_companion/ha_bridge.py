@@ -419,6 +419,10 @@ async def _ollama_chat_json(
         "messages": messages,
         "format": "json",
         "stream": False,
+        # Thinking-Modus aus: gemma4/qwen3 packen sonst die ganze Antwort
+        # ins ``thinking``-Feld und lassen ``content`` leer. Ältere
+        # Ollama-Versionen ignorieren den Key. Vgl. ai_agent.py.
+        "think": False,
         "options": {"temperature": 0.0},
     }
     url = base_url.rstrip("/") + "/api/chat"
@@ -465,6 +469,10 @@ async def _ollama_chat_text(
         "model": model,
         "messages": messages,
         "stream": False,
+        # Thinking-Modus aus: gemma4/qwen3 packen sonst die ganze Antwort
+        # ins ``thinking``-Feld und lassen ``content`` leer. Ältere
+        # Ollama-Versionen ignorieren den Key. Vgl. ai_agent.py.
+        "think": False,
         "options": {"temperature": 0.2},
     }
     url = base_url.rstrip("/") + "/api/chat"
