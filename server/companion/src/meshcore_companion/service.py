@@ -337,6 +337,11 @@ class CompanionService:
     # Deque enthält Timestamps (UTC) der letzten Antworten — älteste werden
     # bei jedem Check entfernt.
     _ai_dm_history: dict[tuple[UUID, bytes], deque[datetime]] = field(default_factory=dict)
+    # Rate-limited DM-Peers, die auf eine aggregierte Nachhol-Antwort warten.
+    # Wird im Tick des KI-Agent-Loops abgearbeitet, sobald das Sliding-Window
+    # wieder Platz hat. Die History-Fetch in ``_run_ai_dm_reply`` aggregiert
+    # die unbeantworteten Nachrichten dann organisch in einer einzigen Reply.
+    _pending_ai_dm_peers: set[tuple[UUID, bytes]] = field(default_factory=set)
     # Cooldown nach Mention-Reply pro (identity, channel). Sperrt weitere
     # Mention-Antworten bis nach diesem Zeitstempel.
     _ai_mention_cooldown: dict[tuple[UUID, UUID], datetime] = field(default_factory=dict)
@@ -3048,6 +3053,10 @@ class CompanionService:
                         _log.exception("ai_agent_post_failed", identity=loaded.name)
                     await self._reschedule_ai_agent(identity_id, agent_row.interval_s)
                 try:
+                    await self._process_pending_ai_dm_replies()
+                except Exception:
+                    _log.exception("ai_dm_deferred_retry_failed")
+                try:
                     await asyncio.wait_for(self._stop.wait(), timeout=self.ai_agent_tick_s)
                 except TimeoutError:
                     pass
@@ -3409,6 +3418,103 @@ class CompanionService:
         history.append(now)
         return True
 
+    def _ai_dm_rate_has_space(
+        self, *, identity_id: UUID, peer_pubkey: bytes, rate_per_hour: int
+    ) -> bool:
+        """Peek-Variante von :meth:`_ai_dm_rate_allows` — kein Side-effect
+        auf dem Sliding-Window-Slot (lediglich abgelaufene Einträge werden
+        bereinigt, das ist idempotent). Genutzt vom Deferred-Retry-Loop,
+        damit das eigentliche Konsumieren erst in ``_run_ai_dm_reply``
+        passiert (atomar mit dem tatsächlichen Reply)."""
+        if rate_per_hour <= 0:
+            return False
+        cap = min(rate_per_hour, self.ai_agent_dm_rate_cap)
+        key = (identity_id, peer_pubkey)
+        cutoff = datetime.now(UTC) - timedelta(hours=1)
+        history = self._ai_dm_history.setdefault(key, deque())
+        while history and history[0] < cutoff:
+            history.popleft()
+        return len(history) < cap
+
+    async def _latest_inbound_dm_text(
+        self, identity_id: UUID, peer_pubkey: bytes
+    ) -> tuple[str, str | None] | None:
+        """Liefert (text, peer_name) der jüngsten inbound-DM eines Peers oder
+        ``None`` wenn keine vorhanden. Dient dem Deferred-Retry-Loop als
+        ``incoming_text`` für den nachgeholten Reply — die History-Fetch in
+        :meth:`_run_ai_dm_reply` zieht die volle Konversation."""
+        from meshcore_bridge.db import CompanionMessage
+
+        async with self.sessionmaker() as db:
+            row = (
+                await db.execute(
+                    select(CompanionMessage)
+                    .where(
+                        CompanionMessage.identity_id == identity_id,
+                        CompanionMessage.peer_pubkey == peer_pubkey,
+                        CompanionMessage.payload_type == int(PayloadType.TXT_MSG),
+                        CompanionMessage.direction == "in",
+                    )
+                    .order_by(CompanionMessage.ts.desc())
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+        if row is None or not row.text:
+            return None
+        return (row.text, row.peer_name)
+
+    async def _process_pending_ai_dm_replies(self) -> None:
+        """Holt rate-limitierte DM-Replies nach, sobald das Sliding-Window
+        wieder Platz hat. Pro Tick (alle ``ai_agent_tick_s``) durchlaufen
+        wir die Pending-Set; pro Peer mit freiem Slot schedulen wir einen
+        regulären :meth:`_run_ai_dm_reply` mit der letzten inbound-DM als
+        Trigger. Die History-Fetch dort zieht alle unbeantworteten Nach-
+        richten in den Prompt — das LLM aggregiert organisch in einer
+        einzigen Antwort."""
+        from meshcore_bridge.db import CompanionAiAgent
+
+        if not self._pending_ai_dm_peers:
+            return
+        for identity_id, peer_pubkey in list(self._pending_ai_dm_peers):
+            loaded = self._by_id.get(identity_id)
+            if loaded is None:
+                self._pending_ai_dm_peers.discard((identity_id, peer_pubkey))
+                continue
+            async with self.sessionmaker() as db:
+                agent_row = await db.get(CompanionAiAgent, identity_id)
+            if (
+                agent_row is None
+                or not agent_row.enabled
+                or not agent_row.respond_to_dms
+                or agent_row.dm_rate_per_hour <= 0
+            ):
+                self._pending_ai_dm_peers.discard((identity_id, peer_pubkey))
+                continue
+            if not self._ai_dm_rate_has_space(
+                identity_id=identity_id,
+                peer_pubkey=peer_pubkey,
+                rate_per_hour=agent_row.dm_rate_per_hour,
+            ):
+                continue  # noch saturiert, im nächsten Tick erneut prüfen
+            latest = await self._latest_inbound_dm_text(identity_id, peer_pubkey)
+            if latest is None:
+                self._pending_ai_dm_peers.discard((identity_id, peer_pubkey))
+                continue
+            text, peer_name = latest
+            self._pending_ai_dm_peers.discard((identity_id, peer_pubkey))
+            _log.info(
+                "ai_dm_reply",
+                stage="deferred_retry",
+                identity=loaded.name,
+                peer=peer_pubkey[:4].hex(),
+            )
+            self._maybe_schedule_ai_dm_reply(
+                loaded=loaded,
+                peer_pubkey=peer_pubkey,
+                peer_name=peer_name,
+                text=text,
+            )
+
     async def _run_ai_dm_reply(
         self,
         *,
@@ -3475,11 +3581,13 @@ class CompanionService:
                 peer_pubkey=peer_pubkey,
                 rate_per_hour=agent_row.dm_rate_per_hour,
             ):
+                self._pending_ai_dm_peers.add((loaded.id, peer_pubkey))
                 _log.info(
                     "ai_dm_reply",
                     stage="skip_rate_limited",
                     identity=loaded.name,
                     peer=peer_hex,
+                    deferred=True,
                 )
                 await self._emit(
                     loaded.id,
