@@ -575,6 +575,24 @@ pre {
 }
 pre code { border: none; padding: 0; background: transparent; }
 
+/* Kompakter Kopier-Button neben Inline-<code> (z.B. Pubkey-Chip). */
+.copy-btn {
+  margin-left: .35rem;
+  padding: 0 .3rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+  font-size: .9rem;
+  line-height: 1.4;
+  cursor: pointer;
+  vertical-align: baseline;
+}
+.copy-btn:hover {
+  color: var(--accent);
+  border-color: var(--accent-line);
+}
+
 .token {
   word-break: break-all;
   display: inline-block;

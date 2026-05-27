@@ -1,4 +1,5 @@
 {% extends "base.html.j2" %}
+{% import "_macros.html.j2" as ui %}
 {% block title %}{{ identity.name }} — Companion{% endblock %}
 {% block head_extra %}
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
@@ -14,7 +15,7 @@
       <div>
         <h1 id="ident-name" style="margin:0">{{ identity.name }}</h1>
         <span class="scope-{{ 'public' if identity.scope == 'public' else 'pool' }}">{{ identity.scope }}</span>
-        · <code title="{{ identity.pubkey.hex() }}">{{ identity.pubkey.hex()[:16] }}…</code>
+        · {{ ui.pubkey(identity.pubkey.hex()) }}
       </div>
     </div>
   </div>
@@ -171,7 +172,7 @@
         <button type="submit">Umbenennen</button>
       </form>
       <p style="margin-top:1rem;font-size:.9em;color:var(--muted)">
-        Pubkey: <code>{{ identity.pubkey.hex() }}</code><br>
+        Pubkey: {{ ui.pubkey(identity.pubkey.hex()) }}<br>
         Scope: <code>{{ identity.scope }}</code><br>
         Created: {{ identity.created_at | localtime }}
       </p>

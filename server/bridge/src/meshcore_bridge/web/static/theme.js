@@ -35,10 +35,30 @@
     apply(n);
   }
 
+  // Globaler Kopier-Handler: jedes [data-copy]-Element kopiert seinen Wert ins
+  // Clipboard (delegiert, damit auch per-Zeile gerenderte Buttons greifen).
+  // Kurzes visuelles Feedback; Fehler werden geschluckt (Clipboard kann z.B.
+  // ohne Secure Context blockiert sein).
+  function attachCopy() {
+    document.addEventListener("click", function (ev) {
+      var el = ev.target.closest("[data-copy]");
+      if (!el) return;
+      var text = el.getAttribute("data-copy");
+      if (!text) return;
+      try {
+        navigator.clipboard.writeText(text);
+        var prev = el.textContent;
+        el.textContent = "✓";
+        setTimeout(function () { el.textContent = prev; }, 1000);
+      } catch (e) { /* Clipboard blockiert; Tooltip mit vollem Wert reicht */ }
+    });
+  }
+
   document.addEventListener("DOMContentLoaded", function () {
     apply(current());
     document.querySelectorAll("[data-theme-toggle]").forEach(function (b) {
       b.addEventListener("click", next);
     });
+    attachCopy();
   });
 })();

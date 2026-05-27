@@ -1,0 +1,8 @@
+{# Wiederverwendbare UI-Macros. #}
+
+{# Pubkey-Chip: gekürzte Hex-Anzeige (voller Key im Tooltip) + Kopier-Button,
+   der stets den vollen Key kopiert. Der Klick wird global in theme.js über
+   [data-copy]-Delegation behandelt. #}
+{% macro pubkey(full_hex, length=16) -%}
+<code title="{{ full_hex }}">{{ full_hex[:length] }}…</code><button type="button" class="copy-btn" data-copy="{{ full_hex }}" title="Pubkey kopieren" aria-label="Pubkey kopieren">⧉</button>
+{%- endmacro %}

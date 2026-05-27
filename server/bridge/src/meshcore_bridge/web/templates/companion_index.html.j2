@@ -1,4 +1,5 @@
 {% extends "base.html.j2" %}
+{% import "_macros.html.j2" as ui %}
 {% block title %}Companion — MeshCore Spiegel{% endblock %}
 {% block content %}
   <h1>Companion-Identitäten</h1>
@@ -16,7 +17,7 @@
           <tr>
             <td>{{ i.name }}</td>
             <td class="scope-{{ 'public' if i.scope == 'public' else 'pool' }}">{{ i.scope }}</td>
-            <td><code>{{ i.pubkey.hex()[:24] }}…</code></td>
+            <td>{{ ui.pubkey(i.pubkey.hex()) }}</td>
             <td>
               <a href="/companion/{{ i.id }}/" class="btn-link">öffnen →</a>
             </td>
