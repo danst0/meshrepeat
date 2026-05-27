@@ -323,7 +323,7 @@
         const dm = threadCache.dms.find(d => d.peer_pubkey_hex === active.peer);
         if (dm && dm.peer_name) {
           active.peer_name = dm.peer_name;
-          updateConvHeader(dm.peer_name + " · " + shortHex(active.peer, 16));
+          updateConvHeader(dm.peer_name + " · " + shortHex(active.peer, 16), active.peer);
         }
       }
     } catch (e) {
@@ -589,12 +589,24 @@
   }
 
   // ---------- Conv selection ----------
-  function updateConvHeader(text) {
+  function updateConvHeader(text, copyValue) {
     const titleEl = document.getElementById("conv-title");
     if (titleEl) titleEl.textContent = text;
     else {
       const hdr = document.getElementById("conv-header");
       if (hdr) hdr.textContent = text;
+    }
+    // Kopier-Button neben dem Titel: nur bei DMs (voller Peer-Pubkey vorhanden).
+    // Klick wird global über [data-copy] in theme.js behandelt.
+    const copyEl = document.getElementById("conv-copy");
+    if (copyEl) {
+      if (copyValue) {
+        copyEl.setAttribute("data-copy", copyValue);
+        copyEl.hidden = false;
+      } else {
+        copyEl.removeAttribute("data-copy");
+        copyEl.hidden = true;
+      }
     }
   }
 
@@ -610,7 +622,7 @@
     patchHash({tab:"chats", conv: spec});
     persistConv(spec);
     persistTab("chats");
-    updateConvHeader((peerName ? peerName+" · " : "") + shortHex(peerHex, 16));
+    updateConvHeader((peerName ? peerName+" · " : "") + shortHex(peerHex, 16), peerHex);
     document.getElementById("conv-messages").innerHTML = "";
     setComposeMode("dm");
     // Vor dem await — sonst bleibt das Badge bis loadDmMessages durch ist
