@@ -14,6 +14,7 @@ WORKDIR /app
 # Layer-Caching: Dependencies vor dem Source-Code installieren.
 RUN pip install \
     "fastapi>=0.115" \
+    "starlette>=0.46,<1.0" \
     "uvicorn[standard]>=0.30" \
     "websockets>=13" \
     "cbor2>=5.6" \
