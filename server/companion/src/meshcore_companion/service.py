@@ -417,6 +417,7 @@ class CompanionService:
             _log.exception("translate_unhandled", msg_id=str(msg_id))
             return
         if result is None:
+            await self._mark_translation_attempted(msg_id)
             return
         await self._persist_translation(identity_id, msg_id, result)
 
@@ -453,6 +454,7 @@ class CompanionService:
             _log.exception("translate_unhandled_fanout", count=len(targets))
             return
         if result is None:
+            await self._mark_translation_attempted(*(msg_id for _, msg_id in targets))
             return
         updated: list[tuple[UUID, UUID]] = []
         now = datetime.now(UTC)
@@ -2710,7 +2712,13 @@ class CompanionService:
 
     async def _translation_batch_loop(self) -> None:
         """Holt periodisch alle ``companion_messages``-Rows nach, die
-        ``translated_text IS NULL`` haben und deren ``text`` non-leer ist.
+        ``translated_at IS NULL`` haben und deren ``text`` non-leer ist.
+
+        Selektiert wird über ``translated_at``, **nicht** ``translated_text``:
+        ein erfolgloser Versuch (Skip / schon Zielsprache / Quelle gespiegelt)
+        lässt ``translated_text`` ``NULL``, stempelt aber ``translated_at`` —
+        so wird eine nicht-übersetzbare Row genau einmal versucht statt bei
+        jedem Tick erneut an Ollama geschickt.
 
         Tickrate kommt aus ``translation.batch_interval_s`` (in
         :func:`start` schon auf ``> 0`` geprüft). Initial-Pause wie
@@ -2759,7 +2767,7 @@ class CompanionService:
                                     CompanionMessage.text,
                                 )
                                 .where(
-                                    CompanionMessage.translated_text.is_(None),
+                                    CompanionMessage.translated_at.is_(None),
                                     CompanionMessage.text.is_not(None),
                                 )
                                 .order_by(CompanionMessage.ts.asc())
@@ -2796,6 +2804,11 @@ class CompanionService:
                         consecutive_errors = 0
                         if result is not None:
                             await self._persist_translation(identity_id, msg_id, result)
+                        else:
+                            # Kein Ergebnis (Skip / schon Zielsprache / Quelle
+                            # gespiegelt): stempeln, sonst zieht der nächste
+                            # Tick dieselbe Row wieder durch Ollama.
+                            await self._mark_translation_attempted(msg_id)
                     processed += 1
                     # Per-Call-Pause: Stop-aware, damit Shutdown nicht
                     # erst nach Backlog-Ende greift.
@@ -2812,6 +2825,29 @@ class CompanionService:
                     pass
         except asyncio.CancelledError:
             return
+
+    async def _mark_translation_attempted(self, *msg_ids: UUID) -> None:
+        """Markiert Rows als „Übersetzung versucht, kein Ergebnis".
+
+        Setzt ``translated_at = now`` (Text bleibt ``NULL``) für alle noch
+        nicht gestempelten ``msg_ids``. Wird gerufen, wenn ``translate()``
+        ``None`` liefert (Skip/„schon Zielsprache"/Modell spiegelt Quelle).
+        Verhindert, dass der Batch-Loop dieselbe nicht-übersetzbare Row bei
+        jedem Tick erneut an Ollama schickt — der Loop selektiert über
+        ``translated_at IS NULL``. **Nicht** bei TransientError rufen: ein
+        down-Ollama soll die Row offen lassen, damit ein späterer Tick es
+        erneut versucht.
+        """
+        from meshcore_bridge.db import CompanionMessage
+
+        now = datetime.now(UTC)
+        async with self.sessionmaker() as db:
+            for msg_id in msg_ids:
+                row = await db.get(CompanionMessage, msg_id)
+                if row is None or row.translated_at is not None:
+                    continue
+                row.translated_at = now
+            await db.commit()
 
     async def _persist_translation(
         self, identity_id: UUID, msg_id: UUID, result: Translation

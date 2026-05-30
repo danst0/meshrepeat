@@ -146,8 +146,11 @@ async def test_inbound_dm_no_translation_when_disabled(
 async def test_translation_skipped_keeps_row_clean(
     service_env, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Wenn translate() None liefert (z.B. Skip-Heuristik oder Fehler),
-    bleibt das Row unverändert und es gibt kein zusätzliches Event."""
+    """Wenn translate() None liefert (z.B. Skip-Heuristik oder „schon
+    Zielsprache"), bleibt ``translated_text`` ``NULL`` und es gibt kein
+    Event — aber ``translated_at`` wird gestempelt, damit der Batch-Loop
+    die nicht-übersetzbare Row nicht bei jedem Tick erneut an Ollama
+    schickt."""
     svc, sessionmaker, user_id, _sent = service_env
 
     async def fake_translate(text, cfg):  # type: ignore[no-untyped-def]
@@ -176,7 +179,7 @@ async def test_translation_skipped_keeps_row_clean(
             await db.execute(select(CompanionMessage).where(CompanionMessage.identity_id == me.id))
         ).scalar_one()
         assert row.translated_text is None
-        assert row.translated_at is None
+        assert row.translated_at is not None  # Versuch markiert → kein Re-Translate
 
     types = [evt.get("type") for _, evt in events]
     assert "message_translated" not in types
@@ -437,3 +440,83 @@ async def test_batch_loop_aborts_after_consecutive_errors(
 
     # Exakt max_consecutive_errors Versuche, dann Cutoff.
     assert translate_calls == 3
+
+
+@pytest.mark.asyncio
+async def test_batch_loop_stamps_untranslatable_rows_once(
+    service_env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: Rows, für die translate() ``None`` liefert (z.B. „Test"/
+    „Ping" oder „schon Zielsprache"), werden gestempelt und NICHT bei jedem
+    Batch-Tick erneut an Ollama geschickt. Vorher blieb ``translated_text``
+    NULL und der Loop nudelte denselben Backlog endlos durch."""
+    svc, sessionmaker, user_id, _sent = service_env
+
+    translate_calls = 0
+
+    async def fake_translate(text, cfg):  # type: ignore[no-untyped-def]
+        nonlocal translate_calls
+        translate_calls += 1
+        # nicht übersetzbar / schon Zielsprache → translate() liefert None
+        _ = (text, cfg)
+
+    async def fake_probe_health(cfg):  # type: ignore[no-untyped-def]
+        return True
+
+    monkeypatch.setattr(svc_mod, "translate", fake_translate)
+    monkeypatch.setattr(svc_mod, "probe_health", fake_probe_health)
+
+    svc.translation = _cfg()
+    svc.is_listener_active = lambda: False
+
+    me = await svc.add_identity(user_id=user_id, name="Antonia", scope="public")
+    sender = CompanionNode(LocalIdentity.generate())
+    await _add_contact(sessionmaker, me.id, sender.pub_key)
+
+    base_ts = int(time.time())
+    for offset, txt in enumerate(("Test", "Ping")):
+        pkt = sender.make_dm(peer_pubkey=me.pubkey, text=txt, timestamp=base_ts + offset)
+        await svc.on_inbound_packet(raw=pkt.encode(), scope="public")
+    await _wait_translation_tasks(svc)
+
+    svc.translation = TranslatorConfig(
+        base_url="http://stub.local",
+        model="stub",
+        target_lang="de",
+        target_lang_label="Deutsch",
+        timeout_s=5.0,
+        min_chars=3,
+        max_chars=800,
+        batch_interval_s=1,
+        per_call_delay_s=0.0,
+    )
+    # Lange genug laufen, dass der Loop nach der Initial-Pause MEHRERE Ticks
+    # macht — eine nicht gestempelte Row würde hier mehrfach übersetzt.
+    task = asyncio.create_task(svc._translation_batch_loop())
+    await asyncio.sleep(3.5)
+    svc._stop.set()
+    try:
+        await asyncio.wait_for(task, timeout=2.0)
+    except TimeoutError:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+    finally:
+        svc._stop.clear()
+
+    # Genau ein Versuch pro Row über alle Ticks hinweg — kein Re-Translate.
+    assert translate_calls == 2
+    async with sessionmaker() as db:
+        rows = list(
+            (
+                await db.execute(
+                    select(CompanionMessage).where(CompanionMessage.identity_id == me.id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert len(rows) == 2
+        for r in rows:
+            assert r.translated_text is None
+            assert r.translated_at is not None
