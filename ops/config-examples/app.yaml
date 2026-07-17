@@ -47,15 +47,17 @@ companion:
   enabled: true
   advert_interval_s: 180000          # 50 h — Community-Etiquette (mc-radar)
 
-# Auto-Übersetzung eingehender Companion-Nachrichten (Ollama lokal).
+# Auto-Übersetzung eingehender Companion-Nachrichten. Spricht einen
+# OpenAI-kompatiblen Chat-Endpoint (/v1/chat/completions) — funktioniert
+# sowohl gegen Ollama (dessen /v1-Compat) als auch gegen llama-swap/llama.cpp.
 # Im Browser per Checkbox in der Chat-View an-/ausschaltbar; serverseitig
-# wird übersetzt sobald enabled=true und der Ollama-Endpoint erreichbar
-# ist. Override per Env: MESHCORE_TRANSLATION__ENABLED=true,
-# MESHCORE_TRANSLATION__MODEL=qwen2.5:7b, …
+# wird übersetzt sobald enabled=true und der Endpoint erreichbar ist.
+# Override per Env: MESHCORE_TRANSLATION__ENABLED=true,
+# MESHCORE_TRANSLATION__MODEL=qwen3.6-35b-a3b, …
 # translation:
 #   enabled: false
-#   base_url: "http://host.docker.internal:11434"  # cassius: ollama lokal
-#   model: "llama3.1:8b"
+#   base_url: "http://llama-swap:8080"    # cassius: llama-swap im ollama_ollama-Netz
+#   model: "qwen3.6-35b-a3b"
 #   target_lang: "de"
 #   target_lang_label: "Deutsch"
 #   timeout_s: 20.0

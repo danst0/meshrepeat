@@ -1,7 +1,7 @@
 """Unit-Tests für :mod:`meshcore_companion.ai_agent`.
 
 Wir mocken die HTTP-Schicht via :class:`httpx.MockTransport`, damit weder
-Netzwerk noch ein laufender Ollama-Container nötig sind."""
+Netzwerk noch ein laufender LLM-Server (llama-swap/llama.cpp) nötig sind."""
 
 from __future__ import annotations
 
@@ -33,6 +33,11 @@ def _patch_httpx(monkeypatch: pytest.MonkeyPatch, handler) -> None:  # type: ign
         real_init(self, *a, **kw)
 
     monkeypatch.setattr(httpx.AsyncClient, "__init__", init)
+
+
+def _chat_response(content: str) -> dict:
+    """OpenAI-Chat-Completion-Hülle um einen ``content``-String."""
+    return {"choices": [{"message": {"role": "assistant", "content": content}}]}
 
 
 # ---------- Jitter ----------
@@ -175,7 +180,7 @@ async def test_generate_success(monkeypatch: pytest.MonkeyPatch) -> None:
         assert b'"system"' in body
         return httpx.Response(
             200,
-            json={"message": {"content": "Servus zusammen!"}},
+            json=_chat_response("Servus zusammen!"),
         )
 
     _patch_httpx(monkeypatch, handler)
@@ -213,7 +218,7 @@ async def test_generate_byte_cap_enforced(monkeypatch: pytest.MonkeyPatch) -> No
     long_response = "x" * 500
 
     def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json={"message": {"content": long_response}})
+        return httpx.Response(200, json=_chat_response(long_response))
 
     _patch_httpx(monkeypatch, handler)
     client = AiAgentClient(_cfg())
@@ -235,7 +240,7 @@ async def test_generate_model_override_propagates(monkeypatch: pytest.MonkeyPatc
         captured["body"] = request.read().decode()
         payload = _json.loads(captured["body"])
         captured["model"] = payload["model"]
-        return httpx.Response(200, json={"message": {"content": "ok"}})
+        return httpx.Response(200, json=_chat_response("ok"))
 
     _patch_httpx(monkeypatch, handler)
     client = AiAgentClient(_cfg())
@@ -255,13 +260,11 @@ async def test_generate_retry_recovers_after_500(monkeypatch: pytest.MonkeyPatch
         state["calls"] += 1
         if state["calls"] < 3:
             return httpx.Response(503, json={"error": "busy"})
-        return httpx.Response(200, json={"message": {"content": "recovered"}})
+        return httpx.Response(200, json=_chat_response("recovered"))
 
     _patch_httpx(monkeypatch, handler)
     client = AiAgentClient(_cfg(max_attempts=3, retry_backoff_s=0.0))
-    out = await client.generate(
-        system_prompt="x", history=[{"role": "user", "content": "hi"}]
-    )
+    out = await client.generate(system_prompt="x", history=[{"role": "user", "content": "hi"}])
     assert out == "recovered"
     assert state["calls"] == 3
 
@@ -278,9 +281,7 @@ async def test_generate_retry_gives_up_after_max_attempts(
 
     _patch_httpx(monkeypatch, handler)
     client = AiAgentClient(_cfg(max_attempts=2, retry_backoff_s=0.0))
-    out = await client.generate(
-        system_prompt="x", history=[{"role": "user", "content": "hi"}]
-    )
+    out = await client.generate(system_prompt="x", history=[{"role": "user", "content": "hi"}])
     assert out is None
     assert state["calls"] == 2
 

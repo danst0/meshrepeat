@@ -152,7 +152,8 @@ class HistoryFilter:
 
 
 class AiAgentClient:
-    """Wrapper um Ollama ``/api/chat`` für KI-Agent-Replies.
+    """Wrapper um den OpenAI-kompatiblen ``/v1/chat/completions``-Endpoint
+    (llama-swap/llama.cpp) für KI-Agent-Replies.
 
     Reine asyncio-Schnittstelle. Hält keinen langlebigen ``httpx.AsyncClient``
     — jeder Call öffnet seine eigene Connection. Bei den 1x/h-Frequenzen
@@ -189,18 +190,19 @@ class AiAgentClient:
             return None
         messages: list[dict[str, str]] = [{"role": "system", "content": system_prompt}]
         messages.extend(history)
-        payload = {
+        payload: dict[str, object] = {
             "model": model_override or self._cfg.model,
             "messages": messages,
             "stream": False,
-            # Thinking-Modus aus: gemma4/qwen3 packen sonst die ganze Antwort
-            # ins ``thinking``-Feld und lassen ``content`` leer (Mesh-Chat hat
-            # keinen Platz für Reasoning-Dumps). Ältere Ollama-Versionen
-            # ignorieren den Key.
-            "think": False,
-            "options": {"temperature": 0.7},
+            "temperature": 0.7,
+            # Thinking-Modus aus: Reasoning-Modelle (Qwen3) packen sonst die
+            # ganze Antwort ins ``reasoning_content``-Feld und lassen ``content``
+            # leer (Mesh-Chat hat keinen Platz für Reasoning-Dumps). Das
+            # ``--jinja``-Template wertet den Key aus; Server ohne Support
+            # ignorieren ihn.
+            "chat_template_kwargs": {"enable_thinking": False},
         }
-        url = self._cfg.base_url.rstrip("/") + "/api/chat"
+        url = self._cfg.base_url.rstrip("/") + "/v1/chat/completions"
         attempts = max(1, self._cfg.max_attempts)
         data: object | None = None
         for attempt in range(attempts):
@@ -245,18 +247,30 @@ class AiAgentClient:
 
         if data is None:
             return None
-        raw_text = _extract_ollama_content(data)
+        raw_text = _extract_openai_content(data)
         sanitized = sanitize_reply(raw_text, max_bytes=max_bytes)
         if sanitized is None:
             _log_sanitize_empty(raw_text, data)
         return sanitized
 
 
-def _extract_ollama_content(data: object) -> str | None:
+def _openai_message(data: object) -> dict[str, object] | None:
+    """``choices[0].message`` aus einem OpenAI-Chat-Completion ziehen."""
     if not isinstance(data, dict):
         return None
-    message = data.get("message")
-    if not isinstance(message, dict):
+    choices = data.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return None
+    first = choices[0]
+    if not isinstance(first, dict):
+        return None
+    message = first.get("message")
+    return message if isinstance(message, dict) else None
+
+
+def _extract_openai_content(data: object) -> str | None:
+    message = _openai_message(data)
+    if message is None:
         return None
     content = message.get("content")
     if not isinstance(content, str):
@@ -265,14 +279,14 @@ def _extract_ollama_content(data: object) -> str | None:
 
 
 def _log_sanitize_empty(raw_text: str | None, data: object) -> None:
-    """Diagnose-Log, wenn Ollama-Response nach Sanitize leer ist."""
+    """Diagnose-Log, wenn die LLM-Response nach Sanitize leer ist."""
     thinking_len = 0
-    if isinstance(data, dict):
-        msg = data.get("message")
-        if isinstance(msg, dict):
-            thinking = msg.get("thinking")
-            if isinstance(thinking, str):
-                thinking_len = len(thinking)
+    message = _openai_message(data)
+    if message is not None:
+        # llama.cpp legt Reasoning-Output in ``reasoning_content`` ab.
+        thinking = message.get("reasoning_content")
+        if isinstance(thinking, str):
+            thinking_len = len(thinking)
     _log.info(
         "ai_agent_sanitize_empty",
         raw_len=len(raw_text or ""),

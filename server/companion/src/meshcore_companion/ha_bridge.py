@@ -401,6 +401,25 @@ def _build_chat_prompt(
     return messages
 
 
+def _openai_content(data: object) -> str | None:
+    """``choices[0].message.content`` aus einem OpenAI-Chat-Completion ziehen."""
+    if not isinstance(data, dict):
+        return None
+    choices = data.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return None
+    first = choices[0]
+    if not isinstance(first, dict):
+        return None
+    message = first.get("message")
+    if not isinstance(message, dict):
+        return None
+    content = message.get("content")
+    if not isinstance(content, str):
+        return None
+    return content
+
+
 async def _ollama_chat_json(
     *,
     base_url: str,
@@ -408,24 +427,24 @@ async def _ollama_chat_json(
     messages: list[dict[str, str]],
     timeout_s: float,
 ) -> Any | None:
-    """Ein ``/api/chat``-Roundtrip mit ``format=json``. Inneres JSON wird
-    bereits geparsed zurückgegeben.
+    """Ein ``/v1/chat/completions``-Roundtrip (OpenAI-kompatibel) mit
+    erzwungenem JSON-Output. Inneres JSON wird bereits geparsed zurückgegeben.
 
     Liefert ``None`` bei Timeout/HTTP/JSON-Fehler — der Aufrufer
     entscheidet, wie damit umzugehen ist.
     """
-    payload = {
+    payload: dict[str, object] = {
         "model": model,
         "messages": messages,
-        "format": "json",
         "stream": False,
-        # Thinking-Modus aus: gemma4/qwen3 packen sonst die ganze Antwort
-        # ins ``thinking``-Feld und lassen ``content`` leer. Ältere
-        # Ollama-Versionen ignorieren den Key. Vgl. ai_agent.py.
-        "think": False,
-        "options": {"temperature": 0.0},
+        "temperature": 0.0,
+        "response_format": {"type": "json_object"},
+        # Thinking-Modus aus: Reasoning-Modelle (Qwen3) packen sonst die
+        # ganze Antwort ins ``reasoning_content`` und lassen ``content`` leer.
+        # ``--jinja``-Template wertet den Key aus. Vgl. ai_agent.py.
+        "chat_template_kwargs": {"enable_thinking": False},
     }
-    url = base_url.rstrip("/") + "/api/chat"
+    url = base_url.rstrip("/") + "/v1/chat/completions"
     try:
         async with httpx.AsyncClient(timeout=timeout_s) as client:
             resp = await client.post(url, json=payload)
@@ -441,13 +460,8 @@ async def _ollama_chat_json(
         _log.warning("ha_bridge_ollama_bad_response", url=url, error=str(exc))
         return None
 
-    if not isinstance(data, dict):
-        return None
-    message = data.get("message")
-    if not isinstance(message, dict):
-        return None
-    content = message.get("content")
-    if not isinstance(content, str) or not content.strip():
+    content = _openai_content(data)
+    if content is None or not content.strip():
         return None
     try:
         return json.loads(content)
@@ -463,19 +477,19 @@ async def _ollama_chat_text(
     messages: list[dict[str, str]],
     timeout_s: float,
 ) -> str | None:
-    """Ein ``/api/chat``-Roundtrip ohne ``format=json``. Inhalt als
+    """Ein ``/v1/chat/completions``-Roundtrip ohne JSON-Zwang. Inhalt als
     Rohtext zurück."""
-    payload = {
+    payload: dict[str, object] = {
         "model": model,
         "messages": messages,
         "stream": False,
-        # Thinking-Modus aus: gemma4/qwen3 packen sonst die ganze Antwort
-        # ins ``thinking``-Feld und lassen ``content`` leer. Ältere
-        # Ollama-Versionen ignorieren den Key. Vgl. ai_agent.py.
-        "think": False,
-        "options": {"temperature": 0.2},
+        "temperature": 0.2,
+        # Thinking-Modus aus: Reasoning-Modelle (Qwen3) packen sonst die
+        # ganze Antwort ins ``reasoning_content`` und lassen ``content`` leer.
+        # ``--jinja``-Template wertet den Key aus. Vgl. ai_agent.py.
+        "chat_template_kwargs": {"enable_thinking": False},
     }
-    url = base_url.rstrip("/") + "/api/chat"
+    url = base_url.rstrip("/") + "/v1/chat/completions"
     try:
         async with httpx.AsyncClient(timeout=timeout_s) as client:
             resp = await client.post(url, json=payload)
@@ -490,13 +504,8 @@ async def _ollama_chat_text(
     except ValueError as exc:
         _log.warning("ha_bridge_ollama_bad_response", url=url, error=str(exc))
         return None
-    if not isinstance(data, dict):
-        return None
-    message = data.get("message")
-    if not isinstance(message, dict):
-        return None
-    content = message.get("content")
-    if not isinstance(content, str):
+    content = _openai_content(data)
+    if content is None:
         return None
     return content.strip()
 

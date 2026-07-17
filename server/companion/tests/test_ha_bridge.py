@@ -182,6 +182,11 @@ def _patch_ollama_handler(monkeypatch: pytest.MonkeyPatch, handler) -> None:  # 
     monkeypatch.setattr(httpx.AsyncClient, "__init__", init)
 
 
+def _chat(content: str) -> dict:
+    """OpenAI-Chat-Completion-Hülle um einen ``content``-String."""
+    return {"choices": [{"message": {"role": "assistant", "content": content}}]}
+
+
 @pytest.mark.asyncio
 async def test_should_run_bridge_positive(db_setup) -> None:
     sessionmaker, identity_id = db_setup
@@ -243,13 +248,9 @@ async def test_handle_query_happy_path(db_setup, monkeypatch: pytest.MonkeyPatch
         # Wir unterscheiden Routing-Call (Katalog im System-Prompt)
         # vom Antwort-Call (Daten:-Block).
         if "Sensor-Katalog" in system or "Smart-Home-Router" in system:
-            payload = {
-                "message": {
-                    "content": json.dumps({"entities": ["sensor.balkon_temp"], "reason": "temp"})
-                }
-            }
+            payload = _chat(json.dumps({"entities": ["sensor.balkon_temp"], "reason": "temp"}))
         else:
-            payload = {"message": {"content": "Balkon 18.3 °C"}}
+            payload = _chat("Balkon 18.3 °C")
         return httpx.Response(200, json=payload)
 
     _patch_ollama_handler(monkeypatch, ollama_handler)
@@ -300,14 +301,14 @@ async def test_handle_query_no_route_chat_fallback(
     def ollama_handler(req: httpx.Request) -> httpx.Response:
         body = json.loads(req.content.decode("utf-8"))
         # Erster Call läuft mit format=json (Routing), zweiter ohne.
-        if body.get("format") == "json":
+        if "response_format" in body:
             return httpx.Response(
                 200,
-                json={"message": {"content": json.dumps({"entities": [], "reason": ""})}},
+                json=_chat(json.dumps({"entities": [], "reason": ""})),
             )
         return httpx.Response(
             200,
-            json={"message": {"content": "Da habe ich gerade keine Daten."}},
+            json=_chat("Da habe ich gerade keine Daten."),
         )
 
     _patch_ollama_handler(monkeypatch, ollama_handler)
@@ -347,10 +348,10 @@ async def test_handle_query_no_route_chat_fallback_failure(
 
     def ollama_handler(req: httpx.Request) -> httpx.Response:
         body = json.loads(req.content.decode("utf-8"))
-        if body.get("format") == "json":
+        if "response_format" in body:
             return httpx.Response(
                 200,
-                json={"message": {"content": json.dumps({"entities": [], "reason": ""})}},
+                json=_chat(json.dumps({"entities": [], "reason": ""})),
             )
         return httpx.Response(503, json={})
 
@@ -430,11 +431,7 @@ async def test_handle_query_ha_failure_fallback(db_setup, monkeypatch: pytest.Mo
     def ollama_handler(req: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200,
-            json={
-                "message": {
-                    "content": json.dumps({"entities": ["sensor.balkon_temp"], "reason": ""})
-                }
-            },
+            json=_chat(json.dumps({"entities": ["sensor.balkon_temp"], "reason": ""})),
         )
 
     _patch_ollama_handler(monkeypatch, ollama_handler)
@@ -475,20 +472,14 @@ async def test_handle_query_hallucinated_entity_filtered(
 
     def ollama_handler(req: httpx.Request) -> httpx.Response:
         body = json.loads(req.content.decode("utf-8"))
-        if body.get("format") == "json":
+        if "response_format" in body:
             return httpx.Response(
                 200,
-                json={
-                    "message": {
-                        "content": json.dumps(
-                            {"entities": ["sensor.zimmer_temp"], "reason": ""}
-                        )
-                    }
-                },
+                json=_chat(json.dumps({"entities": ["sensor.zimmer_temp"], "reason": ""})),
             )
         return httpx.Response(
             200,
-            json={"message": {"content": "Dazu habe ich keinen Sensor."}},
+            json=_chat("Dazu habe ich keinen Sensor."),
         )
 
     _patch_ollama_handler(monkeypatch, ollama_handler)

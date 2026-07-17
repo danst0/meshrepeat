@@ -10,8 +10,8 @@ Design:
   Ollama-Call ist async via ``httpx.AsyncClient``.
 - Skip-Heuristiken vor dem HTTP-Call halten Kosten/Latenz niedrig:
   zu kurz, zu lang, oder nur ASCII-Symbole/Whitespace → kein Call.
-- Antwortformat ist erzwungen JSON (``format="json"``) mit zwei Feldern
-  ``lang`` (ISO-639-1) und ``translated``. Wenn das Modell die Sprache
+- Antwortformat ist erzwungen JSON (``response_format=json_object``) mit
+  zwei Feldern ``lang`` (ISO-639-1) und ``translated``. Wenn das Modell die Sprache
   als Ziel erkennt, gibt es ``translated=""`` zurück → wir behandeln das
   als „keine Übersetzung nötig".
 - Selbstheilung: kleine LLMs (gemma4:e4b o.ä.) kopieren bei
@@ -71,8 +71,8 @@ class TranslatorConfig:
     # Wie viele Transient-Fehler in Folge ein Batch-Run schluckt, bevor
     # er abgebrochen wird (erst nächste Tickrate probiert es neu).
     max_consecutive_errors: int = 5
-    # Timeout des Pre-flight Health-Checks (GET /api/tags) — kurz, damit
-    # ein hängendes Ollama nicht den Loop blockiert.
+    # Timeout des Pre-flight Health-Checks (GET /v1/models) — kurz, damit
+    # ein hängender LLM-Server nicht den Loop blockiert.
     health_check_timeout_s: float = 2.0
 
 
@@ -233,17 +233,23 @@ def _build_retry_prompt(text: str, *, source_lang: str, target_label: str) -> li
 async def _translate_once(
     text: str, cfg: TranslatorConfig, messages: list[dict[str, str]]
 ) -> tuple[str, str] | None:
-    """Genau ein Ollama-/api/chat-Roundtrip. Liefert ``(lang, translated)``
-    oder ``None`` bei Fehler. Der Aufrufer entscheidet, ob ein
-    Folge-Versuch sinnvoll ist."""
-    payload = {
+    """Genau ein ``/v1/chat/completions``-Roundtrip (OpenAI-kompatibel, z.B.
+    llama-swap/llama.cpp). Liefert ``(lang, translated)`` oder ``None`` bei
+    Fehler. Der Aufrufer entscheidet, ob ein Folge-Versuch sinnvoll ist."""
+    payload: dict[str, object] = {
         "model": cfg.model,
         "messages": messages,
-        "format": "json",
         "stream": False,
-        "options": {"temperature": 0.0},
+        "temperature": 0.0,
+        # Erzwingt JSON-Output (grammar-constrained beim llama.cpp-Server),
+        # analog zum früheren Ollama ``format=json``.
+        "response_format": {"type": "json_object"},
+        # Reasoning-Modelle (Qwen3) sonst: Antwort landet im ``reasoning_content``
+        # und ``content`` bleibt leer. ``--jinja``-Template wertet den Key aus;
+        # Server ohne Support ignorieren ihn.
+        "chat_template_kwargs": {"enable_thinking": False},
     }
-    url = cfg.base_url.rstrip("/") + "/api/chat"
+    url = cfg.base_url.rstrip("/") + "/v1/chat/completions"
     try:
         async with httpx.AsyncClient(timeout=cfg.timeout_s) as client:
             resp = await client.post(url, json=payload)
@@ -259,19 +265,19 @@ async def _translate_once(
         _log.warning("translate_bad_response", url=url, error=str(exc))
         return None
 
-    return _parse_ollama_response(data)
+    return _parse_chat_response(data)
 
 
 async def probe_health(cfg: TranslatorConfig) -> bool:
-    """Schneller Liveness-Probe gegen Ollama.
+    """Schneller Liveness-Probe gegen den OpenAI-kompatiblen Endpoint.
 
-    ``GET {base_url}/api/tags`` ist billig (kein Model-Load) und liefert
-    200 wenn der Server prinzipiell antwortet. Wir behandeln *alles*
-    < 500 als gesund — 404 wäre ein Fehlkonfigurations-Signal, aber
-    immer noch besser als blind die Chat-API zu fluten. Bei Connection-
-    Refused/Timeout: ``False``.
+    ``GET {base_url}/v1/models`` ist billig (kein Model-Load; bei llama-swap
+    immer verfügbar, auch ohne geladenes Modell) und liefert 200 wenn der
+    Server prinzipiell antwortet. Wir behandeln *alles* < 500 als gesund —
+    404 wäre ein Fehlkonfigurations-Signal, aber immer noch besser als blind
+    die Chat-API zu fluten. Bei Connection-Refused/Timeout: ``False``.
     """
-    url = cfg.base_url.rstrip("/") + "/api/tags"
+    url = cfg.base_url.rstrip("/") + "/v1/models"
     try:
         async with httpx.AsyncClient(timeout=cfg.health_check_timeout_s) as client:
             resp = await client.get(url)
@@ -365,19 +371,23 @@ async def translate(text: str, cfg: TranslatorConfig) -> Translation | None:  # 
     )
 
 
-def _parse_ollama_response(data: object) -> tuple[str, str] | None:  # noqa: PLR0911
-    """Aus dem Ollama-Chat-Response das Inhalts-JSON ziehen.
+def _parse_chat_response(data: object) -> tuple[str, str] | None:  # noqa: PLR0911
+    """Aus dem OpenAI-Chat-Completion-Response das Inhalts-JSON ziehen.
 
-    Erwartete Struktur (``content`` ist eine JSON-String-Wrapper, weil
-    Ollama bei ``format=json`` den Text als JSON-Stringified zurückliefert,
-    nicht als verschachteltes Objekt).
+    Erwartete Struktur: ``choices[0].message.content`` ist ein JSON-String
+    (der Server liefert bei ``response_format=json_object`` den Text als
+    JSON-Stringified, nicht als verschachteltes Objekt).
     """
     if not isinstance(data, dict):
         _log.warning("translate_bad_shape", got=type(data).__name__)
         return None
-    message = data.get("message")
+    choices = data.get("choices")
+    if not isinstance(choices, list) or not choices:
+        _log.warning("translate_no_choices", keys=list(data.keys()))
+        return None
+    message = choices[0].get("message") if isinstance(choices[0], dict) else None
     if not isinstance(message, dict):
-        _log.warning("translate_no_message", keys=list(data.keys()))
+        _log.warning("translate_no_message")
         return None
     content = message.get("content")
     if not isinstance(content, str) or not content.strip():

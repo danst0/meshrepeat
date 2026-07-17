@@ -122,8 +122,8 @@ class TranslationConfig(BaseModel):
     # Nach N aufeinanderfolgenden Transient-Fehlern (5xx/Timeout) bricht
     # der Batch-Run ab und probiert es beim nächsten Tick neu.
     max_consecutive_errors: int = 5
-    # Timeout des Pre-flight Health-Checks (GET /api/tags) vor jedem
-    # Batch-Run. Ein hängendes Ollama soll den Loop nicht blockieren.
+    # Timeout des Pre-flight Health-Checks (GET /v1/models) vor jedem
+    # Batch-Run. Ein hängender LLM-Server soll den Loop nicht blockieren.
     health_check_timeout_s: float = 2.0
 
 
