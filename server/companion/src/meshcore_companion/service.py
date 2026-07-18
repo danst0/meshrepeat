@@ -367,9 +367,11 @@ class CompanionService:
     # Hin-und-Her, wenn mehrere Teilnehmer kurz hintereinander erwähnen.
     _AI_MENTION_COOLDOWN_S: ClassVar[float] = 60.0
     # Wieviele DM-Verlauf-Zeilen wir maximal in den Prompt geben.
-    _AI_DM_HISTORY_LIMIT: ClassVar[int] = 10
-    # Wieviele Channel-Verlauf-Zeilen wir maximal in den Prompt geben.
-    _AI_CHANNEL_HISTORY_LIMIT: ClassVar[int] = 30
+    _AI_DM_HISTORY_LIMIT: ClassVar[int] = 30
+    # Wieviele Channel-Verlauf-Zeilen wir maximal in den Prompt geben (auch
+    # als Kontext bei Mention-Replies). Grosszuegig, weil qwen3.6 ~100k ctx
+    # hat und Mesh-Zeilen kurz sind.
+    _AI_CHANNEL_HISTORY_LIMIT: ClassVar[int] = 60
     # Random-Delay-Bereich für Mention-Replies (Sekunden) — entzerrt
     # mehrere Companions, die denselben Mention sehen.
     _AI_MENTION_MIN_DELAY_S: ClassVar[float] = 5.0
@@ -3366,7 +3368,43 @@ class CompanionService:
         prompt = (agent_row.system_prompt or "").strip()
         if not prompt:
             return
-        history = [
+
+        # Jüngste Channel-History als Kontext voranstellen — sonst sieht der
+        # Agent nur die eine Mention und kann nicht auf den Gesprächsverlauf
+        # eingehen. Fenster = ``lookback_minutes`` des Agents, gekappt auf
+        # ``_AI_CHANNEL_HISTORY_LIMIT`` Zeilen.
+        from meshcore_bridge.db import CompanionMessage
+
+        lookback_min = max(1, int(getattr(agent_row, "lookback_minutes", 60)))
+        cutoff = datetime.now(UTC) - timedelta(minutes=lookback_min)
+        async with self.sessionmaker() as db:
+            recent = list(
+                (
+                    await db.execute(
+                        select(CompanionMessage)
+                        .where(
+                            CompanionMessage.identity_id == loaded.id,
+                            CompanionMessage.payload_type == int(PayloadType.GRP_TXT),
+                            CompanionMessage.channel_name == channel_name,
+                            CompanionMessage.direction == "in",
+                            CompanionMessage.ts >= cutoff,
+                        )
+                        .order_by(CompanionMessage.ts.desc())
+                        .limit(self._AI_CHANNEL_HISTORY_LIMIT)
+                    )
+                ).scalars()
+            )
+        history: list[dict[str, str]] = []
+        # Chronologisch (alt → neu). Die auslösende Nachricht selbst lassen wir
+        # weg — sie kommt als explizit gerahmter Schluss-Turn.
+        for row in reversed(recent):
+            if not row.text or row.text == text:
+                continue
+            if not hist_filter.allows(peer_pubkey=row.peer_pubkey, peer_name=row.peer_name):
+                continue
+            label = row.peer_name or "unbekannt"
+            history.append({"role": "user", "content": f"{label}: {row.text}"})
+        history.append(
             {
                 "role": "user",
                 "content": (
@@ -3374,7 +3412,7 @@ class CompanionService:
                     f"{sender_name or 'jemandem'} angesprochen worden: {text}"
                 ),
             }
-        ]
+        )
         reply = await self.ai_agent.generate(
             system_prompt=prompt,
             history=history,
