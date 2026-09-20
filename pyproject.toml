@@ -98,4 +98,8 @@ filterwarnings = [
     "ignore::ResourceWarning",
     "ignore::pytest.PytestUnraisableExceptionWarning",
     "ignore::pytest.PytestUnhandledThreadExceptionWarning",
+    # starlette (<=0.52) importiert in testclient.py den mit anyio 4.15
+    # deprecateten Alias anyio.abc.BlockingPortal. Fremdcode — wir koennen
+    # es nicht beheben, und ohne dieses ignore scheitert schon das Collecting.
+    "ignore:The anyio.abc.BlockingPortal alias is deprecated:DeprecationWarning",
 ]
