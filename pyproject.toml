@@ -26,6 +26,9 @@ select = [
 ignore = [
     "S101",              # assert in Tests OK
     "PLR0913",           # zu viele Argumente — pragmatisch
+    "PLR0917",           # zu viele positionale Argumente — dito; FastAPI-Routen
+                         # deklarieren Form/Depends/Path als normale Parameter.
+                         # Seit ruff 0.16 stabil, vorher nur preview.
 ]
 
 [tool.ruff.lint.flake8-bugbear]
